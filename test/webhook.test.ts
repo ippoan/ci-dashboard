@@ -119,7 +119,7 @@ describe("POST /webhook", () => {
     await waitOnExecutionContext(ctx);
     expect(res.status).toBe(200);
 
-    const stored = await env.CI_STATUS.get("ippoan/rust-alc-api");
+    const stored = await env.CI_STATUS.get("run:12345");
     expect(stored).not.toBeNull();
     const data = JSON.parse(stored!);
     expect(data.repo).toBe("ippoan/rust-alc-api");
@@ -180,7 +180,7 @@ describe("POST /webhook", () => {
     await waitOnExecutionContext(ctx2);
     expect(res.status).toBe(200);
 
-    const stored = await env.CI_STATUS.get("ippoan/rust-alc-api");
+    const stored = await env.CI_STATUS.get("run:12345");
     const data = JSON.parse(stored!);
     expect(data.jobs).toHaveLength(1);
     expect(data.jobs[0].name).toBe("Type Check");
@@ -261,7 +261,7 @@ describe("POST /webhook", () => {
     );
     await waitOnExecutionContext(ctx3);
 
-    const stored = await env.CI_STATUS.get("ippoan/test-update");
+    const stored = await env.CI_STATUS.get("run:55555");
     const data = JSON.parse(stored!);
     expect(data.jobs).toHaveLength(1); // Not duplicated
     expect(data.jobs[0].conclusion).toBe("success"); // Updated

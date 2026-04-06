@@ -78,31 +78,23 @@ async function verifySignature(
   return signature === digest;
 }
 
+function runKey(runId: number): string {
+  return `run:${runId}`;
+}
+
 async function handleWorkflowRun(
   payload: WorkflowRunPayload,
   env: Env
 ): Promise<void> {
   const run = payload.workflow_run;
-  const repo = payload.repository.full_name;
-  const key = repo;
+  const key = runKey(run.id);
 
-  // Delete old branch keys when a new run starts
-  if (run.status !== "completed") {
-    const list = await env.CI_STATUS.list({ prefix: `${repo}/` });
-    for (const k of list.keys) {
-      await env.CI_STATUS.delete(k.name);
-    }
-  }
-
-  // Preserve existing jobs if any
+  // Preserve existing jobs
   const existing = await env.CI_STATUS.get(key);
   let jobs: JobStatus[] | undefined;
   if (existing) {
     const prev = JSON.parse(existing) as CIStatus;
-    // Keep jobs only if same run_id, otherwise reset
-    if (prev.run_id === run.id) {
-      jobs = prev.jobs;
-    }
+    jobs = prev.jobs;
   }
 
   const status: CIStatus = {
@@ -124,33 +116,17 @@ async function handleWorkflowRun(
   });
 }
 
-async function findRunEntryByRunId(
-  env: Env,
-  repo: string,
-  runId: number
-): Promise<{ key: string; status: CIStatus } | null> {
-  const val = await env.CI_STATUS.get(repo);
-  if (val) {
-    const s = JSON.parse(val) as CIStatus;
-    if (s.run_id === runId) {
-      return { key: repo, status: s };
-    }
-  }
-  return null;
-}
-
 async function handleWorkflowJob(
   payload: WorkflowJobPayload,
   env: Env
 ): Promise<void> {
   const job = payload.workflow_job;
-  const repo = payload.repository.full_name;
+  const key = runKey(job.run_id);
 
-  // Find the run entry by run_id (key includes branch)
-  const entry = await findRunEntryByRunId(env, repo, job.run_id);
-  if (!entry) return; // No run yet, ignore
+  const existing = await env.CI_STATUS.get(key);
+  if (!existing) return;
 
-  const { key, status } = entry;
+  const status = JSON.parse(existing) as CIStatus;
 
   const jobStatus: JobStatus = {
     name: job.name,
