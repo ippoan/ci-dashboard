@@ -23,7 +23,7 @@ export function handleDashboard(): Response {
     .status-bar .disconnected { color: #f85149; }
     .grid {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+      grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
       gap: 12px;
     }
     .card {
@@ -66,6 +66,7 @@ export function handleDashboard(): Response {
     .badge.failure { background: #f85149; color: #fff; }
     .badge.cancelled { background: #484f58; color: #c9d1d9; }
     .badge.queued { background: #58a6ff; color: #000; }
+    .badge.skipped { background: #30363d; color: #8b949e; }
     .empty {
       text-align: center;
       padding: 48px;
@@ -75,7 +76,31 @@ export function handleDashboard(): Response {
       0%, 100% { opacity: 1; }
       50% { opacity: 0.5; }
     }
-    .card.in_progress .badge { animation: pulse 2s infinite; }
+    .card.in_progress .badge.in_progress { animation: pulse 2s infinite; }
+    .jobs {
+      margin-top: 10px;
+      border-top: 1px solid #21262d;
+      padding-top: 8px;
+    }
+    .job-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 3px 0;
+      font-size: 12px;
+    }
+    .job-row a {
+      color: #c9d1d9;
+      text-decoration: none;
+    }
+    .job-row a:hover { text-decoration: underline; }
+    .job-icon { width: 16px; text-align: center; }
+    .job-icon.success { color: #3fb950; }
+    .job-icon.failure { color: #f85149; }
+    .job-icon.in_progress { color: #d29922; }
+    .job-icon.queued { color: #58a6ff; }
+    .job-icon.skipped { color: #484f58; }
+    .job-icon.cancelled { color: #484f58; }
   </style>
 </head>
 <body>
@@ -99,6 +124,19 @@ export function handleDashboard(): Response {
       return "queued";
     }
 
+    function jobIcon(status, conclusion) {
+      const cls = badgeClass(status, conclusion);
+      const icons = {
+        success: "\\u2713",
+        failure: "\\u2717",
+        in_progress: "\\u25CF",
+        queued: "\\u25CB",
+        skipped: "\\u2013",
+        cancelled: "\\u2013",
+      };
+      return '<span class="job-icon ' + cls + '">' + (icons[cls] || "?") + '</span>';
+    }
+
     function timeAgo(dateStr) {
       const diff = Date.now() - new Date(dateStr).getTime();
       const sec = Math.floor(diff / 1000);
@@ -116,6 +154,17 @@ export function handleDashboard(): Response {
       const min = Math.floor(sec / 60);
       const s = sec % 60;
       return min + "m" + String(s).padStart(2, "0") + "s";
+    }
+
+    function renderJobs(jobs) {
+      if (!jobs || !jobs.length) return "";
+      return '<div class="jobs">' + jobs.map(j => {
+        const cls = badgeClass(j.status, j.conclusion);
+        return '<div class="job-row">'
+          + jobIcon(j.status, j.conclusion)
+          + '<a href="' + j.url + '" target="_blank" rel="noopener">' + j.name + '</a>'
+          + '</div>';
+      }).join("") + '</div>';
     }
 
     function render(statuses) {
@@ -141,6 +190,7 @@ export function handleDashboard(): Response {
               <span>\${elapsed(s.started_at, s.updated_at, s.status)}</span>
               <span>\${timeAgo(s.updated_at)}</span>
             </div>
+            \${renderJobs(s.jobs)}
           </div>
         \`;
       }).join("");
@@ -166,16 +216,6 @@ export function handleDashboard(): Response {
     }
 
     connect();
-
-    // Update elapsed times every second for in_progress runs
-    setInterval(() => {
-      document.querySelectorAll(".card.in_progress .meta span:nth-child(3)").forEach(el => {
-        const card = el.closest(".card");
-        if (card) {
-          // Re-render would be cleaner but this keeps it lightweight
-        }
-      });
-    }, 1000);
   </script>
 </body>
 </html>`;

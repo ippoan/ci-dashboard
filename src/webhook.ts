@@ -18,6 +18,23 @@ interface WorkflowRunPayload {
   };
 }
 
+interface WorkflowJobPayload {
+  action: string;
+  workflow_job: {
+    id: number;
+    run_id: number;
+    name: string;
+    status: string;
+    conclusion: string | null;
+    html_url: string;
+    started_at: string | null;
+    completed_at: string | null;
+  };
+  repository: {
+    full_name: string;
+  };
+}
+
 export interface CIStatus {
   repo: string;
   workflow: string;
@@ -29,6 +46,16 @@ export interface CIStatus {
   actor: string;
   updated_at: string;
   started_at: string;
+  jobs?: JobStatus[];
+}
+
+export interface JobStatus {
+  name: string;
+  status: string;
+  conclusion: string | null;
+  url: string;
+  started_at: string | null;
+  completed_at: string | null;
 }
 
 async function verifySignature(
@@ -51,6 +78,81 @@ async function verifySignature(
   return signature === digest;
 }
 
+async function handleWorkflowRun(
+  payload: WorkflowRunPayload,
+  env: Env
+): Promise<void> {
+  const run = payload.workflow_run;
+  const key = payload.repository.full_name;
+
+  // Preserve existing jobs if any
+  const existing = await env.CI_STATUS.get(key);
+  let jobs: JobStatus[] | undefined;
+  if (existing) {
+    const prev = JSON.parse(existing) as CIStatus;
+    // Keep jobs only if same run_id, otherwise reset
+    if (prev.run_id === run.id) {
+      jobs = prev.jobs;
+    }
+  }
+
+  const status: CIStatus = {
+    repo: payload.repository.full_name,
+    workflow: run.name,
+    branch: run.head_branch,
+    status: run.status,
+    conclusion: run.conclusion,
+    run_id: run.id,
+    run_url: run.html_url,
+    actor: run.actor.login,
+    updated_at: run.updated_at,
+    started_at: run.run_started_at,
+    jobs,
+  };
+
+  await env.CI_STATUS.put(key, JSON.stringify(status), {
+    expirationTtl: 86400,
+  });
+}
+
+async function handleWorkflowJob(
+  payload: WorkflowJobPayload,
+  env: Env
+): Promise<void> {
+  const job = payload.workflow_job;
+  const key = payload.repository.full_name;
+
+  const existing = await env.CI_STATUS.get(key);
+  if (!existing) return; // No run yet, ignore
+
+  const status = JSON.parse(existing) as CIStatus;
+
+  // Only update jobs for the current run
+  if (status.run_id !== job.run_id) return;
+
+  const jobStatus: JobStatus = {
+    name: job.name,
+    status: job.status,
+    conclusion: job.conclusion,
+    url: job.html_url,
+    started_at: job.started_at,
+    completed_at: job.completed_at,
+  };
+
+  const jobs = status.jobs ?? [];
+  const idx = jobs.findIndex((j) => j.name === job.name);
+  if (idx >= 0) {
+    jobs[idx] = jobStatus;
+  } else {
+    jobs.push(jobStatus);
+  }
+  status.jobs = jobs;
+
+  await env.CI_STATUS.put(key, JSON.stringify(status), {
+    expirationTtl: 86400,
+  });
+}
+
 export async function handleWebhook(
   request: Request,
   env: Env
@@ -68,32 +170,20 @@ export async function handleWebhook(
   }
 
   const event = request.headers.get("X-GitHub-Event");
-  if (event !== "workflow_run") {
-    return new Response("Ignored event: " + event, { status: 200 });
+
+  if (event === "workflow_run") {
+    const payload: WorkflowRunPayload = JSON.parse(body);
+    await handleWorkflowRun(payload, env);
+    return new Response("OK", { status: 200 });
   }
 
-  const payload: WorkflowRunPayload = JSON.parse(body);
-  const run = payload.workflow_run;
+  if (event === "workflow_job") {
+    const payload: WorkflowJobPayload = JSON.parse(body);
+    await handleWorkflowJob(payload, env);
+    return new Response("OK", { status: 200 });
+  }
 
-  const status: CIStatus = {
-    repo: payload.repository.full_name,
-    workflow: run.name,
-    branch: run.head_branch,
-    status: run.status,
-    conclusion: run.conclusion,
-    run_id: run.id,
-    run_url: run.html_url,
-    actor: run.actor.login,
-    updated_at: run.updated_at,
-    started_at: run.run_started_at,
-  };
-
-  const key = payload.repository.full_name;
-  await env.CI_STATUS.put(key, JSON.stringify(status), {
-    expirationTtl: 86400, // 24h
-  });
-
-  return new Response("OK", { status: 200 });
+  return new Response("Ignored event: " + event, { status: 200 });
 }
 
 export { verifySignature };
