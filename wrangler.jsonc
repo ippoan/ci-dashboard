@@ -1,6 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "ci-dashboard",
+  "account_id": "24b45709d060d957340180e995f0d373",
   "main": "src/index.ts",
   "compatibility_date": "2026-04-06",
   "observability": {
