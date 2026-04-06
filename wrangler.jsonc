@@ -12,5 +12,19 @@
       "binding": "CI_STATUS",
       "id": "ffb983ee8324499f915b11a0b8cf787b"
     }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CI_HUB",
+        "class_name": "CIDashboardHub"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["CIDashboardHub"]
+    }
   ]
 }

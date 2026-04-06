@@ -169,9 +169,19 @@ async function handleWorkflowJob(
   });
 }
 
+async function broadcastUpdate(env: Env, hub: DurableObjectStub): Promise<void> {
+  const { getAllStatuses } = await import("./status");
+  const statuses = await getAllStatuses(env);
+  await hub.fetch(new Request("http://hub/broadcast", {
+    method: "POST",
+    body: JSON.stringify(statuses),
+  }));
+}
+
 export async function handleWebhook(
   request: Request,
-  env: Env
+  env: Env,
+  hub: DurableObjectStub
 ): Promise<Response> {
   const signature = request.headers.get("X-Hub-Signature-256");
   if (!signature) {
@@ -190,12 +200,14 @@ export async function handleWebhook(
   if (event === "workflow_run") {
     const payload: WorkflowRunPayload = JSON.parse(body);
     await handleWorkflowRun(payload, env);
+    await broadcastUpdate(env, hub);
     return new Response("OK", { status: 200 });
   }
 
   if (event === "workflow_job") {
     const payload: WorkflowJobPayload = JSON.parse(body);
     await handleWorkflowJob(payload, env);
+    await broadcastUpdate(env, hub);
     return new Response("OK", { status: 200 });
   }
 

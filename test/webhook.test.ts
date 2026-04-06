@@ -41,10 +41,17 @@ function makePayload(overrides: Record<string, unknown> = {}) {
   });
 }
 
+function mockHub(): DurableObjectStub {
+  return {
+    fetch: async () => new Response("OK"),
+  } as unknown as DurableObjectStub;
+}
+
 function testEnv(): Env {
   return {
     CI_STATUS: env.CI_STATUS,
     WEBHOOK_SECRET,
+    CI_HUB: { idFromName: () => ({}), get: () => mockHub() } as unknown as DurableObjectNamespace,
   };
 }
 

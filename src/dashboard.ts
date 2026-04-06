@@ -197,21 +197,29 @@ export function handleDashboard(): Response {
     }
 
     function connect() {
-      const es = new EventSource("/stream");
-      es.onopen = () => {
+      const proto = location.protocol === "https:" ? "wss:" : "ws:";
+      const ws = new WebSocket(proto + "//" + location.host + "/ws");
+      ws.onopen = () => {
         sseStatus.textContent = "connected";
         sseStatus.className = "connected";
+        // Request initial data
+        fetch("/status").then(r => r.json()).then(data => {
+          render(data);
+          lastUpdate.textContent = new Date().toLocaleTimeString();
+        });
       };
-      es.onmessage = (e) => {
+      ws.onmessage = (e) => {
         const data = JSON.parse(e.data);
         render(data);
         lastUpdate.textContent = new Date().toLocaleTimeString();
       };
-      es.onerror = () => {
+      ws.onclose = () => {
         sseStatus.textContent = "reconnecting...";
         sseStatus.className = "disconnected";
-        es.close();
         setTimeout(connect, 3000);
+      };
+      ws.onerror = () => {
+        ws.close();
       };
     }
 

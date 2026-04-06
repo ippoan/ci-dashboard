@@ -10,6 +10,7 @@ function testEnv(): Env {
   return {
     CI_STATUS: env.CI_STATUS,
     WEBHOOK_SECRET,
+    CI_HUB: {} as unknown as DurableObjectNamespace,
   };
 }
 
@@ -78,7 +79,7 @@ describe("GET /", () => {
     expect(res.headers.get("Content-Type")).toBe("text/html; charset=utf-8");
     const html = await res.text();
     expect(html).toContain("CI Dashboard");
-    expect(html).toContain("EventSource");
+    expect(html).toContain("WebSocket");
   });
 });
 

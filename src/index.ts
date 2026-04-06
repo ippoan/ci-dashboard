@@ -1,11 +1,18 @@
 import { handleWebhook } from "./webhook";
-import { handleStream } from "./stream";
 import { handleStatus } from "./status";
 import { handleDashboard } from "./dashboard";
+
+export { CIDashboardHub } from "./hub";
 
 export interface Env {
   CI_STATUS: KVNamespace;
   WEBHOOK_SECRET: string;
+  CI_HUB: DurableObjectNamespace;
+}
+
+function getHub(env: Env): DurableObjectStub {
+  const id = env.CI_HUB.idFromName("singleton");
+  return env.CI_HUB.get(id);
 }
 
 export default {
@@ -27,10 +34,10 @@ export default {
         if (request.method !== "POST") {
           return new Response("Method Not Allowed", { status: 405 });
         }
-        return handleWebhook(request, env);
+        return handleWebhook(request, env, getHub(env));
 
-      case "/stream":
-        return handleStream(request, env, ctx);
+      case "/ws":
+        return getHub(env).fetch(request);
 
       case "/status":
         return handleStatus(env);
