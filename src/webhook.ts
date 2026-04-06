@@ -89,31 +89,35 @@ async function handleWorkflowRun(
   const run = payload.workflow_run;
   const key = runKey(run.id);
 
-  // Preserve existing jobs
   const existing = await env.CI_STATUS.get(key);
-  let jobs: JobStatus[] | undefined;
+
   if (existing) {
+    // Update only run-level fields, preserve jobs from workflow_job events
     const prev = JSON.parse(existing) as CIStatus;
-    jobs = prev.jobs;
+    prev.status = run.status;
+    prev.conclusion = run.conclusion;
+    prev.updated_at = run.updated_at;
+    await env.CI_STATUS.put(key, JSON.stringify(prev), {
+      expirationTtl: 86400,
+    });
+  } else {
+    // First event for this run — create new entry
+    const status: CIStatus = {
+      repo: payload.repository.full_name,
+      workflow: run.name,
+      branch: run.head_branch,
+      status: run.status,
+      conclusion: run.conclusion,
+      run_id: run.id,
+      run_url: run.html_url,
+      actor: run.actor.login,
+      updated_at: run.updated_at,
+      started_at: run.run_started_at,
+    };
+    await env.CI_STATUS.put(key, JSON.stringify(status), {
+      expirationTtl: 86400,
+    });
   }
-
-  const status: CIStatus = {
-    repo: payload.repository.full_name,
-    workflow: run.name,
-    branch: run.head_branch,
-    status: run.status,
-    conclusion: run.conclusion,
-    run_id: run.id,
-    run_url: run.html_url,
-    actor: run.actor.login,
-    updated_at: run.updated_at,
-    started_at: run.run_started_at,
-    jobs,
-  };
-
-  await env.CI_STATUS.put(key, JSON.stringify(status), {
-    expirationTtl: 86400,
-  });
 }
 
 async function handleWorkflowJob(
