@@ -83,7 +83,16 @@ async function handleWorkflowRun(
   env: Env
 ): Promise<void> {
   const run = payload.workflow_run;
-  const key = `${payload.repository.full_name}/${run.head_branch}`;
+  const repo = payload.repository.full_name;
+  const key = repo;
+
+  // Delete old branch keys when a new run starts
+  if (run.status !== "completed") {
+    const list = await env.CI_STATUS.list({ prefix: `${repo}/` });
+    for (const k of list.keys) {
+      await env.CI_STATUS.delete(k.name);
+    }
+  }
 
   // Preserve existing jobs if any
   const existing = await env.CI_STATUS.get(key);
@@ -120,14 +129,11 @@ async function findRunEntryByRunId(
   repo: string,
   runId: number
 ): Promise<{ key: string; status: CIStatus } | null> {
-  const list = await env.CI_STATUS.list({ prefix: `${repo}/` });
-  for (const k of list.keys) {
-    const val = await env.CI_STATUS.get(k.name);
-    if (val) {
-      const s = JSON.parse(val) as CIStatus;
-      if (s.run_id === runId) {
-        return { key: k.name, status: s };
-      }
+  const val = await env.CI_STATUS.get(repo);
+  if (val) {
+    const s = JSON.parse(val) as CIStatus;
+    if (s.run_id === runId) {
+      return { key: repo, status: s };
     }
   }
   return null;
