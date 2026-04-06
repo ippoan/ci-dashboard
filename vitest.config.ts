@@ -13,7 +13,7 @@ export default defineConfig({
     globals: true,
     include: ["test/**/*.test.ts"],
     coverage: {
-      provider: "v8",
+      provider: "istanbul",
       reporter: ["text", "json-summary", "html"],
       reportsDirectory: "./coverage",
       include: ["src/**/*.ts"],
