@@ -1,0 +1,15 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ci-dashboard",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-04-06",
+  "observability": {
+    "enabled": true
+  },
+  "kv_namespaces": [
+    {
+      "binding": "CI_STATUS",
+      "id": "PLACEHOLDER_PRODUCTION_ID"
+    }
+  ]
+}
