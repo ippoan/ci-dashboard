@@ -19,5 +19,4 @@ jobs:
       install_command: 'npm install'
       typecheck_command: 'npx tsc --noEmit'
       deploy_release_script: 'npx wrangler deploy'
-    secrets:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    secrets: inherit
