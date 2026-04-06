@@ -83,7 +83,7 @@ async function handleWorkflowRun(
   env: Env
 ): Promise<void> {
   const run = payload.workflow_run;
-  const key = payload.repository.full_name;
+  const key = `${payload.repository.full_name}/${run.head_branch}`;
 
   // Preserve existing jobs if any
   const existing = await env.CI_STATUS.get(key);
@@ -115,20 +115,36 @@ async function handleWorkflowRun(
   });
 }
 
+async function findRunEntryByRunId(
+  env: Env,
+  repo: string,
+  runId: number
+): Promise<{ key: string; status: CIStatus } | null> {
+  const list = await env.CI_STATUS.list({ prefix: `${repo}/` });
+  for (const k of list.keys) {
+    const val = await env.CI_STATUS.get(k.name);
+    if (val) {
+      const s = JSON.parse(val) as CIStatus;
+      if (s.run_id === runId) {
+        return { key: k.name, status: s };
+      }
+    }
+  }
+  return null;
+}
+
 async function handleWorkflowJob(
   payload: WorkflowJobPayload,
   env: Env
 ): Promise<void> {
   const job = payload.workflow_job;
-  const key = payload.repository.full_name;
+  const repo = payload.repository.full_name;
 
-  const existing = await env.CI_STATUS.get(key);
-  if (!existing) return; // No run yet, ignore
+  // Find the run entry by run_id (key includes branch)
+  const entry = await findRunEntryByRunId(env, repo, job.run_id);
+  if (!entry) return; // No run yet, ignore
 
-  const status = JSON.parse(existing) as CIStatus;
-
-  // Only update jobs for the current run
-  if (status.run_id !== job.run_id) return;
+  const { key, status } = entry;
 
   const jobStatus: JobStatus = {
     name: job.name,

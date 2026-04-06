@@ -55,7 +55,7 @@ describe("GET /stream", () => {
       updated_at: "2026-04-06T12:00:00Z",
       started_at: "2026-04-06T11:55:00Z",
     };
-    await env.CI_STATUS.put("ippoan/rust-alc-api", JSON.stringify(status));
+    await env.CI_STATUS.put("ippoan/rust-alc-api/main", JSON.stringify(status));
 
     const req = new Request("http://localhost/stream");
     const ctx = createExecutionContext();

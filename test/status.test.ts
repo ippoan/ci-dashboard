@@ -52,8 +52,8 @@ describe("GET /status", () => {
       started_at: "2026-04-06T11:50:00Z",
     };
 
-    await env.CI_STATUS.put("ippoan/auth-worker", JSON.stringify(completed));
-    await env.CI_STATUS.put("ippoan/rust-alc-api", JSON.stringify(inProgress));
+    await env.CI_STATUS.put("ippoan/auth-worker/main", JSON.stringify(completed));
+    await env.CI_STATUS.put("ippoan/rust-alc-api/main", JSON.stringify(inProgress));
 
     const req = new Request("http://localhost/status");
     const ctx = createExecutionContext();
