@@ -1,5 +1,5 @@
 import { handleWebhook } from "./webhook";
-import { handleStatus } from "./status";
+
 import { handleDashboard } from "./dashboard";
 import { handleTagRelease } from "./tag-release";
 
@@ -41,8 +41,16 @@ export default {
       case "/ws":
         return getHub(env).fetch(request);
 
-      case "/status":
-        return handleStatus(env);
+      case "/status": {
+        const res = await getHub(env).fetch(new Request("http://hub/statuses"));
+        const body = await res.text();
+        return new Response(body, {
+          headers: {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*",
+          },
+        });
+      }
 
       case "/api/tag-release":
         if (request.method !== "POST") {

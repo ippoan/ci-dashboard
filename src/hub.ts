@@ -3,11 +3,61 @@ import type { CIStatus, JobStatus } from "./webhook";
 import type { Env } from "./index";
 
 export class CIDashboardHub extends DurableObject<Env> {
+  // In-memory cache: run_id → CIStatus
+  private cache = new Map<number, CIStatus>();
+  private cacheLoaded = false;
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.ctx.setWebSocketAutoResponse(
       new WebSocketRequestResponsePair("ping", "pong")
     );
+  }
+
+  private async ensureCache(): Promise<void> {
+    if (this.cacheLoaded) return;
+    const list = await this.env.CI_STATUS.list({ prefix: "run:" });
+    const values = await Promise.all(
+      list.keys.map((key) => this.env.CI_STATUS.get(key.name))
+    );
+    for (const v of values) {
+      if (v) {
+        const s = JSON.parse(v) as CIStatus;
+        this.cache.set(s.run_id, s);
+      }
+    }
+    this.cacheLoaded = true;
+  }
+
+  private computeStatuses(): CIStatus[] {
+    const all = [...this.cache.values()];
+
+    const latestInProgress = new Map<string, CIStatus>();
+    const latestCompleted = new Map<string, CIStatus>();
+
+    for (const s of all) {
+      const map = s.status === "completed" ? latestCompleted : latestInProgress;
+      const existing = map.get(s.repo);
+      if (!existing || s.updated_at > existing.updated_at) {
+        map.set(s.repo, s);
+      }
+    }
+
+    for (const [repo, ip] of latestInProgress) {
+      const completed = latestCompleted.get(repo);
+      if (completed && completed.updated_at > ip.updated_at) {
+        latestInProgress.delete(repo);
+      }
+    }
+
+    const result = [...latestInProgress.values(), ...latestCompleted.values()];
+    result.sort((a, b) => {
+      if (a.status !== "completed" && b.status === "completed") return -1;
+      if (a.status === "completed" && b.status !== "completed") return 1;
+      return b.updated_at.localeCompare(a.updated_at);
+    });
+
+    return result;
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -26,7 +76,13 @@ export class CIDashboardHub extends DurableObject<Env> {
       return new Response("OK");
     }
 
-    // Serialized KV mutations — all go through the singleton DO
+    // All statuses from in-memory cache (for /status endpoint)
+    if (url.pathname === "/statuses") {
+      await this.ensureCache();
+      const statuses = this.computeStatuses();
+      return Response.json(statuses);
+    }
+
     if (url.pathname === "/update-run") {
       const payload = await request.json<{
         run: {
@@ -42,8 +98,9 @@ export class CIDashboardHub extends DurableObject<Env> {
         };
         repo: string;
       }>();
+      await this.ensureCache();
       await this.updateRun(payload);
-      await this.broadcastStatuses();
+      this.broadcastFromCache();
       return new Response("OK");
     }
 
@@ -59,15 +116,18 @@ export class CIDashboardHub extends DurableObject<Env> {
           completed_at: string | null;
         };
       }>();
+      await this.ensureCache();
       await this.updateJob(payload);
-      await this.broadcastStatuses();
+      this.broadcastFromCache();
       return new Response("OK");
     }
 
     if (url.pathname === "/delete-run") {
       const { run_id } = await request.json<{ run_id: number }>();
+      await this.ensureCache();
+      this.cache.delete(run_id);
       await this.env.CI_STATUS.delete(`run:${run_id}`);
-      await this.broadcastStatuses();
+      this.broadcastFromCache();
       return new Response("OK");
     }
 
@@ -89,28 +149,24 @@ export class CIDashboardHub extends DurableObject<Env> {
     repo: string;
   }): Promise<void> {
     const { run, repo } = payload;
-    const key = `run:${run.id}`;
-    const existing = await this.env.CI_STATUS.get(key);
+    const existing = this.cache.get(run.id);
 
+    let status: CIStatus;
     if (existing) {
-      const prev = JSON.parse(existing) as CIStatus;
-      prev.status = run.status;
-      prev.conclusion = run.conclusion;
-      prev.updated_at = run.updated_at;
-      // When run completes, fix stale in_progress/queued jobs
-      if (run.status === "completed" && prev.jobs) {
-        for (const job of prev.jobs) {
+      existing.status = run.status;
+      existing.conclusion = run.conclusion;
+      existing.updated_at = run.updated_at;
+      if (run.status === "completed" && existing.jobs) {
+        for (const job of existing.jobs) {
           if (job.status === "in_progress" || job.status === "queued") {
             job.status = "completed";
             job.conclusion = job.conclusion ?? "skipped";
           }
         }
       }
-      await this.env.CI_STATUS.put(key, JSON.stringify(prev), {
-        expirationTtl: 86400,
-      });
+      status = existing;
     } else {
-      const status: CIStatus = {
+      status = {
         repo,
         workflow: run.name,
         branch: run.head_branch,
@@ -122,10 +178,15 @@ export class CIDashboardHub extends DurableObject<Env> {
         updated_at: run.updated_at,
         started_at: run.run_started_at,
       };
-      await this.env.CI_STATUS.put(key, JSON.stringify(status), {
-        expirationTtl: 86400,
-      });
     }
+
+    this.cache.set(run.id, status);
+    // KV write is fire-and-forget for speed; cache is source of truth
+    this.ctx.waitUntil(
+      this.env.CI_STATUS.put(`run:${run.id}`, JSON.stringify(status), {
+        expirationTtl: 86400,
+      })
+    );
   }
 
   private async updateJob(payload: {
@@ -140,11 +201,9 @@ export class CIDashboardHub extends DurableObject<Env> {
     };
   }): Promise<void> {
     const { job } = payload;
-    const key = `run:${job.run_id}`;
-    const existing = await this.env.CI_STATUS.get(key);
-    if (!existing) return;
+    const status = this.cache.get(job.run_id);
+    if (!status) return;
 
-    const status = JSON.parse(existing) as CIStatus;
     const jobStatus: JobStatus = {
       name: job.name,
       status: job.status,
@@ -163,14 +222,15 @@ export class CIDashboardHub extends DurableObject<Env> {
     }
     status.jobs = jobs;
 
-    await this.env.CI_STATUS.put(key, JSON.stringify(status), {
-      expirationTtl: 86400,
-    });
+    this.ctx.waitUntil(
+      this.env.CI_STATUS.put(`run:${job.run_id}`, JSON.stringify(status), {
+        expirationTtl: 86400,
+      })
+    );
   }
 
-  private async broadcastStatuses(): Promise<void> {
-    const { getAllStatuses } = await import("./status");
-    const statuses = await getAllStatuses(this.env);
+  private broadcastFromCache(): void {
+    const statuses = this.computeStatuses();
     this.broadcast(JSON.stringify(statuses));
   }
 
@@ -179,14 +239,12 @@ export class CIDashboardHub extends DurableObject<Env> {
       try {
         ws.send(data);
       } catch {
-        // Client disconnected, will be cleaned up by webSocketClose
+        // Client disconnected
       }
     }
   }
 
-  async webSocketMessage(_ws: WebSocket, _message: string | ArrayBuffer): Promise<void> {
-    // Clients don't send meaningful messages, ignore
-  }
+  async webSocketMessage(_ws: WebSocket, _message: string | ArrayBuffer): Promise<void> {}
 
   async webSocketClose(ws: WebSocket, _code: number, _reason: string): Promise<void> {
     ws.close();
