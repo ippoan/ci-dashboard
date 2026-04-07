@@ -3,14 +3,12 @@ import type { CIStatus } from "./webhook";
 
 export async function getAllStatuses(env: Env): Promise<CIStatus[]> {
   const list = await env.CI_STATUS.list({ prefix: "run:" });
-  const all: CIStatus[] = [];
-
-  for (const key of list.keys) {
-    const value = await env.CI_STATUS.get(key.name);
-    if (value) {
-      all.push(JSON.parse(value) as CIStatus);
-    }
-  }
+  const values = await Promise.all(
+    list.keys.map((key) => env.CI_STATUS.get(key.name))
+  );
+  const all = values
+    .filter((v): v is string => v !== null)
+    .map((v) => JSON.parse(v) as CIStatus);
 
   // Keep only the latest per repo per status group
   const latestInProgress = new Map<string, CIStatus>();
