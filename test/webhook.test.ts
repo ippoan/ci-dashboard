@@ -2,6 +2,7 @@ import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:
 import { describe, it, expect } from "vitest";
 import worker from "../src/index";
 import type { Env } from "../src/index";
+import type { CIStatus, JobStatus } from "../src/webhook";
 
 const WEBHOOK_SECRET = "test-secret";
 
@@ -41,18 +42,93 @@ function makePayload(overrides: Record<string, unknown> = {}) {
   });
 }
 
-function mockHub(): DurableObjectStub {
+// Mock Hub DO that performs KV operations like the real Hub
+function mockHub(kv: KVNamespace): DurableObjectStub {
   return {
-    fetch: async () => new Response("OK"),
+    fetch: async (req: Request) => {
+      const url = new URL(req.url);
+
+      if (url.pathname === "/update-run") {
+        const payload = await req.json() as {
+          run: {
+            id: number; name: string; head_branch: string;
+            status: string; conclusion: string | null; html_url: string;
+            actor: { login: string }; updated_at: string; run_started_at: string;
+          };
+          repo: string;
+        };
+        const { run, repo } = payload;
+        const key = `run:${run.id}`;
+        const existing = await kv.get(key);
+        if (existing) {
+          const prev = JSON.parse(existing) as CIStatus;
+          prev.status = run.status;
+          prev.conclusion = run.conclusion;
+          prev.updated_at = run.updated_at;
+          if (run.status === "completed" && prev.jobs) {
+            for (const job of prev.jobs) {
+              if (job.status === "in_progress" || job.status === "queued") {
+                job.status = "completed";
+                job.conclusion = job.conclusion ?? "skipped";
+              }
+            }
+          }
+          await kv.put(key, JSON.stringify(prev), { expirationTtl: 86400 });
+        } else {
+          const status: CIStatus = {
+            repo, workflow: run.name, branch: run.head_branch,
+            status: run.status, conclusion: run.conclusion,
+            run_id: run.id, run_url: run.html_url, actor: run.actor.login,
+            updated_at: run.updated_at, started_at: run.run_started_at,
+          };
+          await kv.put(key, JSON.stringify(status), { expirationTtl: 86400 });
+        }
+        return new Response("OK");
+      }
+
+      if (url.pathname === "/update-job") {
+        const payload = await req.json() as {
+          job: {
+            run_id: number; name: string; status: string;
+            conclusion: string | null; html_url: string;
+            started_at: string | null; completed_at: string | null;
+          };
+        };
+        const { job } = payload;
+        const key = `run:${job.run_id}`;
+        const existing = await kv.get(key);
+        if (!existing) return new Response("OK");
+        const status = JSON.parse(existing) as CIStatus;
+        const jobStatus: JobStatus = {
+          name: job.name, status: job.status, conclusion: job.conclusion,
+          url: job.html_url, started_at: job.started_at, completed_at: job.completed_at,
+        };
+        const jobs = status.jobs ?? [];
+        const idx = jobs.findIndex((j) => j.name === job.name);
+        if (idx >= 0) { jobs[idx] = jobStatus; } else { jobs.push(jobStatus); }
+        status.jobs = jobs;
+        await kv.put(key, JSON.stringify(status), { expirationTtl: 86400 });
+        return new Response("OK");
+      }
+
+      if (url.pathname === "/delete-run") {
+        const { run_id } = await req.json() as { run_id: number };
+        await kv.delete(`run:${run_id}`);
+        return new Response("OK");
+      }
+
+      return new Response("OK");
+    },
   } as unknown as DurableObjectStub;
 }
 
 function testEnv(): Env {
+  const hub = mockHub(env.CI_STATUS);
   return {
     CI_STATUS: env.CI_STATUS,
     WEBHOOK_SECRET,
     GITHUB_TOKEN: "test-token",
-    CI_HUB: { idFromName: () => ({}), get: () => mockHub() } as unknown as DurableObjectNamespace,
+    CI_HUB: { idFromName: () => ({}), get: () => hub } as unknown as DurableObjectNamespace,
   };
 }
 
@@ -137,19 +213,20 @@ describe("POST /webhook", () => {
   });
 
   it("stores workflow_job and attaches to existing run", async () => {
+    const te = testEnv();
     // First, create a workflow_run
     const runBody = makePayload();
     const runSig = await sign(runBody, WEBHOOK_SECRET);
-    const runReq = new Request("http://localhost/webhook", {
-      method: "POST",
-      body: runBody,
-      headers: {
-        "X-Hub-Signature-256": runSig,
-        "X-GitHub-Event": "workflow_run",
-      },
-    });
     const ctx1 = createExecutionContext();
-    await worker.fetch(runReq, testEnv(), ctx1);
+    await worker.fetch(
+      new Request("http://localhost/webhook", {
+        method: "POST",
+        body: runBody,
+        headers: { "X-Hub-Signature-256": runSig, "X-GitHub-Event": "workflow_run" },
+      }),
+      te,
+      ctx1
+    );
     await waitOnExecutionContext(ctx1);
 
     // Then, send a workflow_job event
@@ -168,16 +245,16 @@ describe("POST /webhook", () => {
       repository: { full_name: "ippoan/rust-alc-api" },
     });
     const jobSig = await sign(jobBody, WEBHOOK_SECRET);
-    const jobReq = new Request("http://localhost/webhook", {
-      method: "POST",
-      body: jobBody,
-      headers: {
-        "X-Hub-Signature-256": jobSig,
-        "X-GitHub-Event": "workflow_job",
-      },
-    });
     const ctx2 = createExecutionContext();
-    const res = await worker.fetch(jobReq, testEnv(), ctx2);
+    const res = await worker.fetch(
+      new Request("http://localhost/webhook", {
+        method: "POST",
+        body: jobBody,
+        headers: { "X-Hub-Signature-256": jobSig, "X-GitHub-Event": "workflow_job" },
+      }),
+      te,
+      ctx2
+    );
     await waitOnExecutionContext(ctx2);
     expect(res.status).toBe(200);
 
@@ -189,7 +266,8 @@ describe("POST /webhook", () => {
   });
 
   it("updates existing job instead of duplicating", async () => {
-    // Create run with unique repo
+    const te = testEnv();
+    // Create run
     const runBody = makePayload({
       repository: { full_name: "ippoan/test-update" },
       workflow_run: {
@@ -209,7 +287,7 @@ describe("POST /webhook", () => {
         body: runBody,
         headers: { "X-Hub-Signature-256": runSig, "X-GitHub-Event": "workflow_run" },
       }),
-      testEnv(),
+      te,
       ctx1
     );
     await waitOnExecutionContext(ctx1);
@@ -233,7 +311,7 @@ describe("POST /webhook", () => {
         body: job1,
         headers: { "X-Hub-Signature-256": sig1, "X-GitHub-Event": "workflow_job" },
       }),
-      testEnv(),
+      te,
       ctx2
     );
     await waitOnExecutionContext(ctx2);
@@ -257,7 +335,7 @@ describe("POST /webhook", () => {
         body: job2,
         headers: { "X-Hub-Signature-256": sig2, "X-GitHub-Event": "workflow_job" },
       }),
-      testEnv(),
+      te,
       ctx3
     );
     await waitOnExecutionContext(ctx3);

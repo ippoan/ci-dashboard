@@ -1,5 +1,5 @@
 import { handleWebhook } from "./webhook";
-import { handleStatus, getAllStatuses } from "./status";
+import { handleStatus } from "./status";
 import { handleDashboard } from "./dashboard";
 import { handleTagRelease } from "./tag-release";
 
@@ -55,12 +55,9 @@ export default {
           return new Response("Method Not Allowed", { status: 405 });
         }
         const { run_id } = await request.json<{ run_id: number }>();
-        await env.CI_STATUS.delete(`run:${run_id}`);
-        const statuses = await getAllStatuses(env);
-        const hub = getHub(env);
-        await hub.fetch(new Request("http://hub/broadcast", {
+        await getHub(env).fetch(new Request("http://hub/delete-run", {
           method: "POST",
-          body: JSON.stringify(statuses),
+          body: JSON.stringify({ run_id }),
         }));
         return Response.json({ ok: true });
       }
