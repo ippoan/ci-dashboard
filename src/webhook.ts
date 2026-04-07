@@ -97,6 +97,16 @@ async function handleWorkflowRun(
     prev.status = run.status;
     prev.conclusion = run.conclusion;
     prev.updated_at = run.updated_at;
+    // When run completes, fix stale in_progress/queued jobs whose
+    // workflow_job completed event was missed
+    if (run.status === "completed" && prev.jobs) {
+      for (const job of prev.jobs) {
+        if (job.status === "in_progress" || job.status === "queued") {
+          job.status = "completed";
+          job.conclusion = job.conclusion ?? "skipped";
+        }
+      }
+    }
     await env.CI_STATUS.put(key, JSON.stringify(prev), {
       expirationTtl: 86400,
     });
