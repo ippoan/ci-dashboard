@@ -24,7 +24,10 @@ export async function getAllStatuses(env: Env): Promise<CIStatus[]> {
     }
   }
 
-  // Combine: in_progress first, then latest completed per repo
+  // Hide completed when in_progress exists for the same repo
+  for (const repo of latestInProgress.keys()) {
+    latestCompleted.delete(repo);
+  }
   const result = [...latestInProgress.values(), ...latestCompleted.values()];
 
   // Sort: in_progress first, then by updated_at desc
