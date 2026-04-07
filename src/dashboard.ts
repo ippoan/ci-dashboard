@@ -75,11 +75,12 @@ export function handleDashboard(): Response {
     }
     .repo-item .repo-branch {
       font-size: 11px;
-      color: #8b949e;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
     }
+    .repo-item .repo-branch.is-tag { color: #3fb950; }
+    .repo-item .repo-branch.is-branch { color: #d29922; }
     .repo-item .sidebar-deploy {
       background: #238636;
       color: #fff;
@@ -306,12 +307,14 @@ export function handleDashboard(): Response {
         const shortName = s.repo.includes("/") ? s.repo.split("/").pop() : s.repo;
         const isActive = activeFilter === s.repo ? " active" : "";
         const canDeploy = s.repo.startsWith("ippoan/") || s.repo.startsWith("ohishi-exp/");
-        const deployBtn = canDeploy
+        const isTag = /^v\\d/.test(s.branch);
+        const branchCls = isTag ? "is-tag" : "is-branch";
+        const deployBtn = canDeploy && !isTag
           ? '<button class="sidebar-deploy" data-repo="' + s.repo + '" onclick="event.stopPropagation();deployTag(this)">Deploy</button>'
           : '';
         return '<div class="repo-item' + isActive + '" data-filter-repo="' + s.repo + '" onclick="toggleFilter(this)">'
           + '<div class="repo-name"><span class="repo-dot ' + cls + '"></span>' + shortName + '</div>'
-          + '<div class="repo-meta"><span class="repo-branch">' + s.branch + '</span>' + deployBtn + '</div>'
+          + '<div class="repo-meta"><span class="repo-branch ' + branchCls + '">' + s.branch + '</span>' + deployBtn + '</div>'
           + '</div>';
       }).join("");
     }
