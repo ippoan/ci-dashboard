@@ -6,9 +6,10 @@ export async function handleTagRelease(
 ): Promise<Response> {
   const { repo } = await request.json<{ repo: string }>();
 
-  if (!repo || !repo.startsWith("ippoan/")) {
+  const allowedOrgs = ["ippoan/", "ohishi-exp/"];
+  if (!repo || !allowedOrgs.some((org) => repo.startsWith(org))) {
     return Response.json(
-      { error: "Only ippoan org repos allowed" },
+      { error: "Org not allowed" },
       { status: 403 },
     );
   }
