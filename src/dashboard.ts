@@ -202,7 +202,7 @@ export function handleDashboard(): Response {
 <body>
   <h1>CI Dashboard</h1>
   <div class="status-bar">
-    SSE: <span id="sse-status" class="disconnected">connecting...</span>
+    WS: <span id="sse-status" class="disconnected">connecting...</span>
     &middot; Last update: <span id="last-update">-</span>
   </div>
   <div class="layout">
