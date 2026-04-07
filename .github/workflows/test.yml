@@ -18,5 +18,6 @@ jobs:
     with:
       install_command: 'npm install'
       typecheck_command: 'npx tsc --noEmit'
+      deploy_staging_script: 'npx wrangler deploy --env staging'
       deploy_release_script: 'npx wrangler deploy'
     secrets: inherit

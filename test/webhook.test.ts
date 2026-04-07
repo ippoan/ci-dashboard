@@ -51,6 +51,7 @@ function testEnv(): Env {
   return {
     CI_STATUS: env.CI_STATUS,
     WEBHOOK_SECRET,
+    GITHUB_TOKEN: "test-token",
     CI_HUB: { idFromName: () => ({}), get: () => mockHub() } as unknown as DurableObjectNamespace,
   };
 }

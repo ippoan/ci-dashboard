@@ -10,6 +10,7 @@ function testEnv(): Env {
   return {
     CI_STATUS: env.CI_STATUS,
     WEBHOOK_SECRET,
+    GITHUB_TOKEN: "test-token",
     CI_HUB: {} as unknown as DurableObjectNamespace,
   };
 }
