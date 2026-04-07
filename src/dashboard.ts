@@ -202,7 +202,7 @@ export function handleDashboard(): Response {
 <body>
   <h1>CI Dashboard</h1>
   <div class="status-bar">
-    SSE: <span id="sse-status" class="disconnected">connecting...</span>
+    WS: <span id="sse-status" class="disconnected">connecting...</span>
     &middot; Last update: <span id="last-update">-</span>
   </div>
   <div class="layout">
@@ -350,9 +350,14 @@ export function handleDashboard(): Response {
     function connect() {
       const proto = location.protocol === "https:" ? "wss:" : "ws:";
       const ws = new WebSocket(proto + "//" + location.host + "/ws");
+      let pingInterval = null;
       ws.onopen = () => {
         sseStatus.textContent = "connected";
         sseStatus.className = "connected";
+        // Keep alive: send ping every 30s to prevent idle timeout
+        pingInterval = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) ws.send("ping");
+        }, 30000);
         // Request initial data
         fetch("/status").then(r => r.json()).then(data => {
           render(data);
@@ -360,11 +365,13 @@ export function handleDashboard(): Response {
         });
       };
       ws.onmessage = (e) => {
+        if (e.data === "pong") return;
         const data = JSON.parse(e.data);
         render(data);
         lastUpdate.textContent = new Date().toLocaleTimeString();
       };
       ws.onclose = () => {
+        if (pingInterval) clearInterval(pingInterval);
         sseStatus.textContent = "reconnecting...";
         sseStatus.className = "disconnected";
         setTimeout(connect, 3000);
