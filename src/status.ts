@@ -22,6 +22,14 @@ export async function getAllStatuses(env: Env): Promise<CIStatus[]> {
     }
   }
 
+  // Drop stale in_progress: if completed is newer, the run already finished
+  for (const [repo, ip] of latestInProgress) {
+    const completed = latestCompleted.get(repo);
+    if (completed && completed.updated_at > ip.updated_at) {
+      latestInProgress.delete(repo);
+    }
+  }
+
   // Combine: in_progress first, then latest completed per repo
   const result = [...latestInProgress.values(), ...latestCompleted.values()];
 
