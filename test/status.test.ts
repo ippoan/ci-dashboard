@@ -6,12 +6,55 @@ import type { CIStatus } from "../src/webhook";
 
 const WEBHOOK_SECRET = "test-secret";
 
+// Mock Hub that supports /statuses by reading from KV (like the real Hub's ensureCache)
+function mockHub(kv: KVNamespace): DurableObjectStub {
+  return {
+    fetch: async (req: Request) => {
+      const url = new URL(req.url);
+      if (url.pathname === "/statuses") {
+        const list = await kv.list({ prefix: "run:" });
+        const values = await Promise.all(
+          list.keys.map((key) => kv.get(key.name))
+        );
+        const all = values
+          .filter((v): v is string => v !== null)
+          .map((v) => JSON.parse(v) as CIStatus);
+
+        const latestInProgress = new Map<string, CIStatus>();
+        const latestCompleted = new Map<string, CIStatus>();
+        for (const s of all) {
+          const map = s.status === "completed" ? latestCompleted : latestInProgress;
+          const existing = map.get(s.repo);
+          if (!existing || s.updated_at > existing.updated_at) {
+            map.set(s.repo, s);
+          }
+        }
+        for (const [repo, ip] of latestInProgress) {
+          const completed = latestCompleted.get(repo);
+          if (completed && completed.updated_at > ip.updated_at) {
+            latestInProgress.delete(repo);
+          }
+        }
+        const result = [...latestInProgress.values(), ...latestCompleted.values()];
+        result.sort((a, b) => {
+          if (a.status !== "completed" && b.status === "completed") return -1;
+          if (a.status === "completed" && b.status !== "completed") return 1;
+          return b.updated_at.localeCompare(a.updated_at);
+        });
+        return Response.json(result);
+      }
+      return new Response("OK");
+    },
+  } as unknown as DurableObjectStub;
+}
+
 function testEnv(): Env {
+  const hub = mockHub(env.CI_STATUS);
   return {
     CI_STATUS: env.CI_STATUS,
     WEBHOOK_SECRET,
     GITHUB_TOKEN: "test-token",
-    CI_HUB: {} as unknown as DurableObjectNamespace,
+    CI_HUB: { idFromName: () => ({}), get: () => hub } as unknown as DurableObjectNamespace,
   };
 }
 
@@ -64,7 +107,6 @@ describe("GET /status", () => {
 
     const data: CIStatus[] = await res.json();
     expect(data).toHaveLength(2);
-    // in_progress should come first
     expect(data[0]!.repo).toBe("ippoan/rust-alc-api");
     expect(data[1]!.repo).toBe("ippoan/auth-worker");
   });
