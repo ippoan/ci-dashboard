@@ -78,92 +78,6 @@ async function verifySignature(
   return signature === digest;
 }
 
-function runKey(runId: number): string {
-  return `run:${runId}`;
-}
-
-async function handleWorkflowRun(
-  payload: WorkflowRunPayload,
-  env: Env
-): Promise<void> {
-  const run = payload.workflow_run;
-  const key = runKey(run.id);
-
-  const existing = await env.CI_STATUS.get(key);
-
-  if (existing) {
-    // Update only run-level fields, preserve jobs from workflow_job events
-    const prev = JSON.parse(existing) as CIStatus;
-    prev.status = run.status;
-    prev.conclusion = run.conclusion;
-    prev.updated_at = run.updated_at;
-    await env.CI_STATUS.put(key, JSON.stringify(prev), {
-      expirationTtl: 86400,
-    });
-  } else {
-    // First event for this run — create new entry
-    const status: CIStatus = {
-      repo: payload.repository.full_name,
-      workflow: run.name,
-      branch: run.head_branch,
-      status: run.status,
-      conclusion: run.conclusion,
-      run_id: run.id,
-      run_url: run.html_url,
-      actor: run.actor.login,
-      updated_at: run.updated_at,
-      started_at: run.run_started_at,
-    };
-    await env.CI_STATUS.put(key, JSON.stringify(status), {
-      expirationTtl: 86400,
-    });
-  }
-}
-
-async function handleWorkflowJob(
-  payload: WorkflowJobPayload,
-  env: Env
-): Promise<void> {
-  const job = payload.workflow_job;
-  const key = runKey(job.run_id);
-
-  const existing = await env.CI_STATUS.get(key);
-  if (!existing) return;
-
-  const status = JSON.parse(existing) as CIStatus;
-
-  const jobStatus: JobStatus = {
-    name: job.name,
-    status: job.status,
-    conclusion: job.conclusion,
-    url: job.html_url,
-    started_at: job.started_at,
-    completed_at: job.completed_at,
-  };
-
-  const jobs = status.jobs ?? [];
-  const idx = jobs.findIndex((j) => j.name === job.name);
-  if (idx >= 0) {
-    jobs[idx] = jobStatus;
-  } else {
-    jobs.push(jobStatus);
-  }
-  status.jobs = jobs;
-
-  await env.CI_STATUS.put(key, JSON.stringify(status), {
-    expirationTtl: 86400,
-  });
-}
-
-async function broadcastUpdate(env: Env, hub: DurableObjectStub): Promise<void> {
-  const { getAllStatuses } = await import("./status");
-  const statuses = await getAllStatuses(env);
-  await hub.fetch(new Request("http://hub/broadcast", {
-    method: "POST",
-    body: JSON.stringify(statuses),
-  }));
-}
-
 export async function handleWebhook(
   request: Request,
   env: Env,
@@ -185,15 +99,23 @@ export async function handleWebhook(
 
   if (event === "workflow_run") {
     const payload: WorkflowRunPayload = JSON.parse(body);
-    await handleWorkflowRun(payload, env);
-    await broadcastUpdate(env, hub);
+    // Route through Hub DO for serialized KV access
+    await hub.fetch(new Request("http://hub/update-run", {
+      method: "POST",
+      body: JSON.stringify({
+        run: payload.workflow_run,
+        repo: payload.repository.full_name,
+      }),
+    }));
     return new Response("OK", { status: 200 });
   }
 
   if (event === "workflow_job") {
     const payload: WorkflowJobPayload = JSON.parse(body);
-    await handleWorkflowJob(payload, env);
-    await broadcastUpdate(env, hub);
+    await hub.fetch(new Request("http://hub/update-job", {
+      method: "POST",
+      body: JSON.stringify({ job: payload.workflow_job }),
+    }));
     return new Response("OK", { status: 200 });
   }
 
