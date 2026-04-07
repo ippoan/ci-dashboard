@@ -67,14 +67,34 @@ export function handleDashboard(): Response {
       overflow: hidden;
       text-overflow: ellipsis;
     }
+    .repo-item .repo-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 2px;
+    }
     .repo-item .repo-branch {
       font-size: 11px;
       color: #8b949e;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
-      margin-top: 2px;
     }
+    .repo-item .sidebar-deploy {
+      background: #238636;
+      color: #fff;
+      border: 1px solid #2ea043;
+      border-radius: 4px;
+      padding: 1px 6px;
+      font-size: 10px;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+      flex-shrink: 0;
+      margin-left: 4px;
+    }
+    .repo-item .sidebar-deploy:hover { background: #2ea043; }
+    .repo-item .sidebar-deploy:disabled { opacity: 0.5; cursor: not-allowed; }
     .repo-dot {
       display: inline-block;
       width: 8px;
@@ -285,9 +305,13 @@ export function handleDashboard(): Response {
         const cls = badgeClass(s.status, s.conclusion);
         const shortName = s.repo.includes("/") ? s.repo.split("/").pop() : s.repo;
         const isActive = activeFilter === s.repo ? " active" : "";
+        const canDeploy = s.repo.startsWith("ippoan/") || s.repo.startsWith("ohishi-exp/");
+        const deployBtn = canDeploy
+          ? '<button class="sidebar-deploy" data-repo="' + s.repo + '" onclick="event.stopPropagation();deployTag(this)">Deploy</button>'
+          : '';
         return '<div class="repo-item' + isActive + '" data-filter-repo="' + s.repo + '" onclick="toggleFilter(this)">'
           + '<div class="repo-name"><span class="repo-dot ' + cls + '"></span>' + shortName + '</div>'
-          + '<div class="repo-branch">' + s.branch + '</div>'
+          + '<div class="repo-meta"><span class="repo-branch">' + s.branch + '</span>' + deployBtn + '</div>'
           + '</div>';
       }).join("");
     }
