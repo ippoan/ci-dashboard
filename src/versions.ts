@@ -47,11 +47,12 @@ export async function getAllVersions(env: Env): Promise<RepoVersion[]> {
         );
         if (!res.ok) return { repo, version: null, url: null };
         const tags = await res.json<Array<{ name: string }>>();
-        if (!tags.length) return { repo, version: null, url: null };
+        const first = tags[0];
+        if (!first) return { repo, version: null, url: null };
         return {
           repo,
-          version: tags[0].name,
-          url: `https://github.com/${repo}/releases/tag/${tags[0].name}`,
+          version: first.name,
+          url: `https://github.com/${repo}/releases/tag/${first.name}`,
         };
       } catch {
         return { repo, version: null, url: null };
