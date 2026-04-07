@@ -21,10 +21,79 @@ export function handleDashboard(): Response {
     }
     .status-bar .connected { color: #3fb950; }
     .status-bar .disconnected { color: #f85149; }
+    .layout {
+      display: flex;
+      gap: 16px;
+    }
+    .sidebar {
+      width: 220px;
+      min-width: 220px;
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      padding: 12px;
+      align-self: flex-start;
+      position: sticky;
+      top: 24px;
+      max-height: calc(100vh - 100px);
+      overflow-y: auto;
+    }
+    .sidebar-header {
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      color: #8b949e;
+      margin-bottom: 8px;
+      letter-spacing: 0.5px;
+    }
+    .repo-item {
+      padding: 8px;
+      border-radius: 6px;
+      cursor: pointer;
+      margin-bottom: 2px;
+      font-size: 13px;
+      transition: background 0.15s;
+    }
+    .repo-item:hover { background: #21262d; }
+    .repo-item.active {
+      background: #1f6feb22;
+      border-left: 2px solid #58a6ff;
+      padding-left: 6px;
+    }
+    .repo-item .repo-name {
+      font-weight: 600;
+      color: #c9d1d9;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .repo-item .repo-branch {
+      font-size: 11px;
+      color: #8b949e;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-top: 2px;
+    }
+    .repo-dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      margin-right: 6px;
+      vertical-align: middle;
+    }
+    .repo-dot.success { background: #3fb950; }
+    .repo-dot.failure { background: #f85149; }
+    .repo-dot.in_progress { background: #d29922; animation: pulse 2s infinite; }
+    .repo-dot.queued { background: #58a6ff; }
+    .repo-dot.cancelled { background: #484f58; }
     .grid {
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
       gap: 12px;
+      flex: 1;
+      min-width: 0;
     }
     .card {
       border: 1px solid #30363d;
@@ -136,14 +205,24 @@ export function handleDashboard(): Response {
     SSE: <span id="sse-status" class="disconnected">connecting...</span>
     &middot; Last update: <span id="last-update">-</span>
   </div>
-  <div id="grid" class="grid">
-    <div class="empty">Waiting for data...</div>
+  <div class="layout">
+    <aside id="sidebar" class="sidebar">
+      <div class="sidebar-header">Repositories</div>
+      <div id="repo-list"></div>
+    </aside>
+    <div id="grid" class="grid">
+      <div class="empty">Waiting for data...</div>
+    </div>
   </div>
 
   <script>
     const grid = document.getElementById("grid");
+    const repoList = document.getElementById("repo-list");
     const sseStatus = document.getElementById("sse-status");
     const lastUpdate = document.getElementById("last-update");
+
+    let lastStatuses = [];
+    let activeFilter = null;
 
     function badgeClass(status, conclusion) {
       if (status === "completed") return conclusion || "success";
@@ -194,12 +273,50 @@ export function handleDashboard(): Response {
       }).join("") + '</div>';
     }
 
+    function renderSidebar(statuses) {
+      const seen = new Map();
+      for (const s of statuses) {
+        if (!seen.has(s.repo)) {
+          seen.set(s.repo, s);
+        }
+      }
+      const repos = [...seen.values()];
+      repoList.innerHTML = repos.map(s => {
+        const cls = badgeClass(s.status, s.conclusion);
+        const shortName = s.repo.includes("/") ? s.repo.split("/").pop() : s.repo;
+        const isActive = activeFilter === s.repo ? " active" : "";
+        return '<div class="repo-item' + isActive + '" data-filter-repo="' + s.repo + '" onclick="toggleFilter(this)">'
+          + '<div class="repo-name"><span class="repo-dot ' + cls + '"></span>' + shortName + '</div>'
+          + '<div class="repo-branch">' + s.branch + '</div>'
+          + '</div>';
+      }).join("");
+    }
+
+    function toggleFilter(el) {
+      const repo = el.dataset.filterRepo;
+      activeFilter = activeFilter === repo ? null : repo;
+      renderAll(lastStatuses);
+    }
+
     function render(statuses) {
-      if (!statuses.length) {
-        grid.innerHTML = '<div class="empty">No CI runs yet. Configure webhooks to start.</div>';
+      lastStatuses = statuses;
+      renderAll(statuses);
+    }
+
+    function renderAll(statuses) {
+      renderSidebar(statuses);
+      const filtered = activeFilter
+        ? statuses.filter(s => s.repo === activeFilter)
+        : statuses;
+      if (!filtered.length) {
+        grid.innerHTML = '<div class="empty">'
+          + (activeFilter
+            ? 'No runs for this repo. <a href="#" onclick="activeFilter=null;render(lastStatuses);return false" style="color:#58a6ff">Clear filter</a>'
+            : 'No CI runs yet. Configure webhooks to start.')
+          + '</div>';
         return;
       }
-      grid.innerHTML = statuses.map(s => {
+      grid.innerHTML = filtered.map(s => {
         const cls = badgeClass(s.status, s.conclusion);
         const label = s.status === "completed" ? (s.conclusion || "unknown") : s.status;
         const deployBtn = (s.repo.startsWith("ippoan/") || s.repo.startsWith("ohishi-exp/"))
