@@ -202,7 +202,7 @@ export function handleDashboard(): Response {
       grid.innerHTML = statuses.map(s => {
         const cls = badgeClass(s.status, s.conclusion);
         const label = s.status === "completed" ? (s.conclusion || "unknown") : s.status;
-        const deployBtn = s.repo.startsWith("ippoan/")
+        const deployBtn = (s.repo.startsWith("ippoan/") || s.repo.startsWith("ohishi-exp/"))
           ? '<button class="deploy-btn" data-repo="' + s.repo + '" onclick="deployTag(this)">Deploy</button>'
           : '';
         const dismissBtn = '<button class="dismiss-btn" data-run-id="' + s.run_id + '" onclick="dismissRun(this)">&times;</button>';
