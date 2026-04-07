@@ -9,3 +9,4 @@ permissions:
 jobs:
   release:
     uses: ippoan/ci-workflows/.github/workflows/tag-release.yml@main
+    secrets: inherit
