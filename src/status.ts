@@ -12,21 +12,20 @@ export async function getAllStatuses(env: Env): Promise<CIStatus[]> {
     }
   }
 
-  // Split into in_progress and completed
-  const inProgress = all.filter((s) => s.status !== "completed");
-  const completed = all.filter((s) => s.status === "completed");
+  // Keep only the latest per repo per status group
+  const latestInProgress = new Map<string, CIStatus>();
+  const latestCompleted = new Map<string, CIStatus>();
 
-  // For completed: keep only the latest per repo
-  const latestByRepo = new Map<string, CIStatus>();
-  for (const s of completed) {
-    const existing = latestByRepo.get(s.repo);
+  for (const s of all) {
+    const map = s.status === "completed" ? latestCompleted : latestInProgress;
+    const existing = map.get(s.repo);
     if (!existing || s.updated_at > existing.updated_at) {
-      latestByRepo.set(s.repo, s);
+      map.set(s.repo, s);
     }
   }
 
   // Combine: in_progress first, then latest completed per repo
-  const result = [...inProgress, ...latestByRepo.values()];
+  const result = [...latestInProgress.values(), ...latestCompleted.values()];
 
   // Sort: in_progress first, then by updated_at desc
   result.sort((a, b) => {
