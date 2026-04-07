@@ -290,6 +290,7 @@ export function handleDashboard(): Response {
     }
 
     async function dismissRun(btn) {
+      if (!confirm("Remove this card?")) return;
       const runId = btn.dataset.runId;
       btn.disabled = true;
       try {
