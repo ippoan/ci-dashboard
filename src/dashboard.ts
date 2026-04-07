@@ -116,6 +116,18 @@ export function handleDashboard(): Response {
     .deploy-btn:hover { background: #2ea043; }
     .deploy-btn:disabled { opacity: 0.5; cursor: not-allowed; }
     .deploy-btn.loading { animation: pulse 1.5s infinite; }
+    .dismiss-btn {
+      background: transparent;
+      color: #8b949e;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      padding: 4px 8px;
+      font-size: 11px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .dismiss-btn:hover { color: #f85149; border-color: #f85149; }
+    .btn-group { display: flex; gap: 6px; }
   </style>
 </head>
 <body>
@@ -193,13 +205,14 @@ export function handleDashboard(): Response {
         const deployBtn = s.repo.startsWith("ippoan/")
           ? '<button class="deploy-btn" data-repo="' + s.repo + '" onclick="deployTag(this)">Deploy</button>'
           : '';
+        const dismissBtn = '<button class="dismiss-btn" data-run-id="' + s.run_id + '" onclick="dismissRun(this)">&times;</button>';
         return \`
           <div class="card \${cls}">
             <div class="card-header">
               <div class="repo">
                 <a href="\${s.run_url}" target="_blank" rel="noopener">\${s.repo}</a>
               </div>
-              \${deployBtn}
+              <div class="btn-group">\${deployBtn}\${dismissBtn}</div>
             </div>
             <div>
               <span class="badge \${cls}">\${label}</span>
@@ -273,6 +286,20 @@ export function handleDashboard(): Response {
         btn.textContent = "Error";
         btn.classList.remove("loading");
         setTimeout(() => { btn.textContent = "Deploy"; btn.disabled = false; }, 3000);
+      }
+    }
+
+    async function dismissRun(btn) {
+      const runId = btn.dataset.runId;
+      btn.disabled = true;
+      try {
+        await fetch("/api/dismiss", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ run_id: Number(runId) }),
+        });
+      } catch (e) {
+        btn.disabled = false;
       }
     }
 
