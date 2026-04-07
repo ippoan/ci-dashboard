@@ -274,20 +274,29 @@ export function handleDashboard(): Response {
     }
 
     function renderSidebar(statuses) {
-      const seen = new Map();
+      const repoMap = new Map();
       for (const s of statuses) {
-        if (!seen.has(s.repo)) {
-          seen.set(s.repo, s);
+        if (!repoMap.has(s.repo)) {
+          repoMap.set(s.repo, { inProgress: null, completed: null });
+        }
+        const entry = repoMap.get(s.repo);
+        if (s.status === "completed" && !entry.completed) {
+          entry.completed = s;
+        } else if (s.status !== "completed" && !entry.inProgress) {
+          entry.inProgress = s;
         }
       }
-      const repos = [...seen.values()];
-      repoList.innerHTML = repos.map(s => {
-        const cls = badgeClass(s.status, s.conclusion);
-        const shortName = s.repo.includes("/") ? s.repo.split("/").pop() : s.repo;
-        const isActive = activeFilter === s.repo ? " active" : "";
-        return '<div class="repo-item' + isActive + '" data-filter-repo="' + s.repo + '" onclick="toggleFilter(this)">'
+      const repos = [...repoMap.entries()];
+      repoList.innerHTML = repos.map(([repo, entry]) => {
+        const display = entry.completed || entry.inProgress;
+        const dotStatus = entry.inProgress || entry.completed;
+        const cls = badgeClass(dotStatus.status, dotStatus.conclusion);
+        const shortName = repo.includes("/") ? repo.split("/").pop() : repo;
+        const branch = display.branch;
+        const isActive = activeFilter === repo ? " active" : "";
+        return '<div class="repo-item' + isActive + '" data-filter-repo="' + repo + '" onclick="toggleFilter(this)">'
           + '<div class="repo-name"><span class="repo-dot ' + cls + '"></span>' + shortName + '</div>'
-          + '<div class="repo-branch">' + s.branch + '</div>'
+          + '<div class="repo-branch">' + branch + '</div>'
           + '</div>';
       }).join("");
     }
