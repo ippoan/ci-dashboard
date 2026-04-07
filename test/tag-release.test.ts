@@ -32,7 +32,7 @@ describe("POST /api/tag-release", () => {
     await waitOnExecutionContext(ctx);
     expect(res.status).toBe(403);
     const data = await res.json<{ error: string }>();
-    expect(data.error).toContain("ippoan");
+    expect(data.error).toContain("not allowed");
   });
 
   it("returns 200 on successful dispatch", async () => {
