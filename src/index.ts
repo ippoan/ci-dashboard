@@ -1,12 +1,14 @@
 import { handleWebhook } from "./webhook";
 import { handleStatus } from "./status";
 import { handleDashboard } from "./dashboard";
+import { handleTagRelease } from "./tag-release";
 
 export { CIDashboardHub } from "./hub";
 
 export interface Env {
   CI_STATUS: KVNamespace;
   WEBHOOK_SECRET: string;
+  GITHUB_TOKEN: string;
   CI_HUB: DurableObjectNamespace;
 }
 
@@ -41,6 +43,12 @@ export default {
 
       case "/status":
         return handleStatus(env);
+
+      case "/api/tag-release":
+        if (request.method !== "POST") {
+          return new Response("Method Not Allowed", { status: 405 });
+        }
+        return handleTagRelease(request, env);
 
       case "/":
         return handleDashboard();

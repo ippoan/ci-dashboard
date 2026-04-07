@@ -101,6 +101,21 @@ export function handleDashboard(): Response {
     .job-icon.queued { color: #58a6ff; }
     .job-icon.skipped { color: #484f58; }
     .job-icon.cancelled { color: #484f58; }
+    .card-header { display: flex; justify-content: space-between; align-items: flex-start; }
+    .deploy-btn {
+      background: #238636;
+      color: #fff;
+      border: 1px solid #2ea043;
+      border-radius: 6px;
+      padding: 4px 10px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .deploy-btn:hover { background: #2ea043; }
+    .deploy-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .deploy-btn.loading { animation: pulse 1.5s infinite; }
   </style>
 </head>
 <body>
@@ -175,10 +190,16 @@ export function handleDashboard(): Response {
       grid.innerHTML = statuses.map(s => {
         const cls = badgeClass(s.status, s.conclusion);
         const label = s.status === "completed" ? (s.conclusion || "unknown") : s.status;
+        const deployBtn = s.repo.startsWith("ippoan/")
+          ? '<button class="deploy-btn" data-repo="' + s.repo + '" onclick="deployTag(this)">Deploy</button>'
+          : '';
         return \`
           <div class="card \${cls}">
-            <div class="repo">
-              <a href="\${s.run_url}" target="_blank" rel="noopener">\${s.repo}</a>
+            <div class="card-header">
+              <div class="repo">
+                <a href="\${s.run_url}" target="_blank" rel="noopener">\${s.repo}</a>
+              </div>
+              \${deployBtn}
             </div>
             <div>
               <span class="badge \${cls}">\${label}</span>
@@ -221,6 +242,38 @@ export function handleDashboard(): Response {
       ws.onerror = () => {
         ws.close();
       };
+    }
+
+    async function deployTag(btn) {
+      const repo = btn.dataset.repo;
+      if (!confirm("Create patch release for " + repo + "?")) return;
+
+      btn.disabled = true;
+      btn.textContent = "Creating...";
+      btn.classList.add("loading");
+
+      try {
+        const res = await fetch("/api/tag-release", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ repo }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          btn.textContent = "Error";
+          btn.classList.remove("loading");
+          alert("Failed: " + (data.error || res.statusText));
+          setTimeout(() => { btn.textContent = "Deploy"; btn.disabled = false; }, 3000);
+          return;
+        }
+        btn.textContent = "Triggered!";
+        btn.classList.remove("loading");
+        setTimeout(() => { btn.textContent = "Deploy"; btn.disabled = false; }, 5000);
+      } catch (e) {
+        btn.textContent = "Error";
+        btn.classList.remove("loading");
+        setTimeout(() => { btn.textContent = "Deploy"; btn.disabled = false; }, 3000);
+      }
     }
 
     connect();
