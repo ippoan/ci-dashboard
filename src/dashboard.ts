@@ -12,7 +12,48 @@ export function handleDashboard(): Response {
       background: #0d1117;
       color: #c9d1d9;
       padding: 24px;
+      display: flex;
+      gap: 24px;
     }
+    .sidebar {
+      width: 220px;
+      flex-shrink: 0;
+    }
+    .sidebar h2 {
+      font-size: 14px;
+      color: #58a6ff;
+      margin-bottom: 12px;
+    }
+    .version-list {
+      list-style: none;
+    }
+    .version-list li {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 6px 0;
+      border-bottom: 1px solid #21262d;
+      font-size: 12px;
+    }
+    .version-list .repo-name {
+      color: #c9d1d9;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .version-list .ver-tag {
+      color: #3fb950;
+      font-weight: 600;
+      white-space: nowrap;
+      margin-left: 8px;
+    }
+    .version-list .ver-tag a {
+      color: #3fb950;
+      text-decoration: none;
+    }
+    .version-list .ver-tag a:hover { text-decoration: underline; }
+    .version-list .ver-none { color: #484f58; }
+    .main-content { flex: 1; min-width: 0; }
     h1 { font-size: 20px; margin-bottom: 16px; color: #58a6ff; }
     .status-bar {
       font-size: 12px;
@@ -131,6 +172,13 @@ export function handleDashboard(): Response {
   </style>
 </head>
 <body>
+  <div class="sidebar">
+    <h2>Versions</h2>
+    <ul id="version-list" class="version-list">
+      <li style="color:#484f58">Loading...</li>
+    </ul>
+  </div>
+  <div class="main-content">
   <h1>CI Dashboard</h1>
   <div class="status-bar">
     SSE: <span id="sse-status" class="disconnected">connecting...</span>
@@ -138,6 +186,7 @@ export function handleDashboard(): Response {
   </div>
   <div id="grid" class="grid">
     <div class="empty">Waiting for data...</div>
+  </div>
   </div>
 
   <script>
@@ -303,6 +352,28 @@ export function handleDashboard(): Response {
         btn.disabled = false;
       }
     }
+
+    const versionList = document.getElementById("version-list");
+    async function loadVersions() {
+      try {
+        const res = await fetch("/api/versions");
+        const data = await res.json();
+        if (!data.length) {
+          versionList.innerHTML = '<li class="ver-none">No repos</li>';
+          return;
+        }
+        versionList.innerHTML = data.map(v => {
+          const name = v.repo.replace("ippoan/", "");
+          const ver = v.version
+            ? '<span class="ver-tag"><a href="' + v.url + '" target="_blank" rel="noopener">' + v.version + '</a></span>'
+            : '<span class="ver-tag ver-none">-</span>';
+          return '<li><span class="repo-name">' + name + '</span>' + ver + '</li>';
+        }).join("");
+      } catch (e) {
+        versionList.innerHTML = '<li style="color:#f85149">Error</li>';
+      }
+    }
+    loadVersions();
 
     connect();
   </script>

@@ -2,6 +2,7 @@ import { handleWebhook } from "./webhook";
 import { handleStatus, getAllStatuses } from "./status";
 import { handleDashboard } from "./dashboard";
 import { handleTagRelease } from "./tag-release";
+import { handleVersions } from "./versions";
 
 export { CIDashboardHub } from "./hub";
 
@@ -64,6 +65,9 @@ export default {
         }));
         return Response.json({ ok: true });
       }
+
+      case "/api/versions":
+        return handleVersions(env);
 
       case "/":
         return handleDashboard();
