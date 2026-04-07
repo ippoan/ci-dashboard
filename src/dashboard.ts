@@ -217,6 +217,19 @@ export function handleDashboard(): Response {
       white-space: nowrap;
     }
     .dismiss-btn:hover { color: #f85149; border-color: #f85149; }
+    .recheck-btn {
+      background: transparent;
+      color: #8b949e;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      padding: 4px 8px;
+      font-size: 11px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .recheck-btn:hover { color: #58a6ff; border-color: #58a6ff; }
+    .recheck-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .recheck-btn.loading { animation: pulse 1.5s infinite; }
     .btn-group { display: flex; gap: 6px; }
   </style>
 </head>
@@ -349,6 +362,7 @@ export function handleDashboard(): Response {
         const deployBtn = (s.repo.startsWith("ippoan/") || s.repo.startsWith("ohishi-exp/"))
           ? '<button class="deploy-btn" data-repo="' + s.repo + '" onclick="deployTag(this)">Deploy</button>'
           : '';
+        const recheckBtn = '<button class="recheck-btn" data-run-id="' + s.run_id + '" data-repo="' + s.repo + '" onclick="recheckRun(this)">&#x21bb;</button>';
         const dismissBtn = '<button class="dismiss-btn" data-run-id="' + s.run_id + '" onclick="dismissRun(this)">&times;</button>';
         return \`
           <div class="card \${cls}">
@@ -356,7 +370,7 @@ export function handleDashboard(): Response {
               <div class="repo">
                 <a href="\${s.run_url}" target="_blank" rel="noopener">\${s.repo}</a>
               </div>
-              <div class="btn-group">\${deployBtn}\${dismissBtn}</div>
+              <div class="btn-group">\${deployBtn}\${recheckBtn}\${dismissBtn}</div>
             </div>
             <div>
               <span class="badge \${cls}">\${label}</span>
@@ -437,6 +451,29 @@ export function handleDashboard(): Response {
         btn.textContent = "Error";
         btn.classList.remove("loading");
         setTimeout(() => { btn.textContent = "Deploy"; btn.disabled = false; }, 3000);
+      }
+    }
+
+    async function recheckRun(btn) {
+      const runId = btn.dataset.runId;
+      const repo = btn.dataset.repo;
+      btn.disabled = true;
+      btn.classList.add("loading");
+      try {
+        const res = await fetch("/api/recheck", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ run_id: Number(runId), repo }),
+        });
+        if (!res.ok) {
+          const data = await res.json();
+          alert("Re-check failed: " + (data.error || res.statusText));
+        }
+      } catch (e) {
+        alert("Re-check failed");
+      } finally {
+        btn.disabled = false;
+        btn.classList.remove("loading");
       }
     }
 

@@ -1,6 +1,7 @@
 import { handleWebhook } from "./webhook";
 
 import { handleDashboard } from "./dashboard";
+import { handleRecheck } from "./recheck";
 import { handleTagRelease } from "./tag-release";
 
 export { CIDashboardHub } from "./hub";
@@ -57,6 +58,12 @@ export default {
           return new Response("Method Not Allowed", { status: 405 });
         }
         return handleTagRelease(request, env);
+
+      case "/api/recheck":
+        if (request.method !== "POST") {
+          return new Response("Method Not Allowed", { status: 405 });
+        }
+        return handleRecheck(request, env, getHub(env));
 
       case "/api/dismiss": {
         if (request.method !== "POST") {
