@@ -13,12 +13,12 @@ function testEnv(): Env {
 }
 
 describe("POST /api/tag-release", () => {
-  it("returns 405 for GET", async () => {
+  it("returns 404 for GET (Hono: no GET route defined)", async () => {
     const req = new Request("http://localhost/api/tag-release");
     const ctx = createExecutionContext();
     const res = await worker.fetch(req, testEnv(), ctx);
     await waitOnExecutionContext(ctx);
-    expect(res.status).toBe(405);
+    expect(res.status).toBe(404);
   });
 
   it("returns 403 for non-ippoan repo", async () => {

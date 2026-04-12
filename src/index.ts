@@ -1,8 +1,10 @@
+import { Hono } from "hono";
+import { cors } from "hono/cors";
 import { handleWebhook } from "./webhook";
-
 import { handleDashboard } from "./dashboard";
 import { handleRecheck } from "./recheck";
 import { handleTagRelease } from "./tag-release";
+import { handleMcpRequest } from "./mcp/server";
 
 export { CIDashboardHub } from "./hub";
 
@@ -13,75 +15,55 @@ export interface Env {
   CI_HUB: DurableObjectNamespace;
 }
 
+const app = new Hono<{ Bindings: Env }>();
+
+app.use("*", cors());
+
 function getHub(env: Env): DurableObjectStub {
   const id = env.CI_HUB.idFromName("singleton");
   return env.CI_HUB.get(id);
 }
 
-export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const url = new URL(request.url);
+// Dashboard
+app.get("/", () => handleDashboard());
 
-    if (request.method === "OPTIONS") {
-      return new Response(null, {
-        headers: {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "GET, POST",
-          "Access-Control-Allow-Headers": "Content-Type",
-        },
-      });
-    }
+// WebSocket
+app.get("/ws", (c) => getHub(c.env).fetch(c.req.raw));
 
-    switch (url.pathname) {
-      case "/webhook":
-        if (request.method !== "POST") {
-          return new Response("Method Not Allowed", { status: 405 });
-        }
-        return handleWebhook(request, env, getHub(env));
+// Webhook
+app.post("/webhook", (c) => handleWebhook(c.req.raw, c.env, getHub(c.env)));
 
-      case "/ws":
-        return getHub(env).fetch(request);
+// Status
+app.get("/status", async (c) => {
+  const res = await getHub(c.env).fetch(new Request("http://hub/statuses"));
+  const body = await res.text();
+  return new Response(body, {
+    headers: {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*",
+    },
+  });
+});
 
-      case "/status": {
-        const res = await getHub(env).fetch(new Request("http://hub/statuses"));
-        const body = await res.text();
-        return new Response(body, {
-          headers: {
-            "Content-Type": "application/json",
-            "Access-Control-Allow-Origin": "*",
-          },
-        });
-      }
+// Tag release
+app.post("/api/tag-release", (c) => handleTagRelease(c.req.raw, c.env));
 
-      case "/api/tag-release":
-        if (request.method !== "POST") {
-          return new Response("Method Not Allowed", { status: 405 });
-        }
-        return handleTagRelease(request, env);
+// Recheck
+app.post("/api/recheck", (c) => handleRecheck(c.req.raw, c.env, getHub(c.env)));
 
-      case "/api/recheck":
-        if (request.method !== "POST") {
-          return new Response("Method Not Allowed", { status: 405 });
-        }
-        return handleRecheck(request, env, getHub(env));
+// Dismiss run
+app.post("/api/dismiss", async (c) => {
+  const { run_id } = await c.req.json<{ run_id: number }>();
+  await getHub(c.env).fetch(
+    new Request("http://hub/delete-run", {
+      method: "POST",
+      body: JSON.stringify({ run_id }),
+    }),
+  );
+  return c.json({ ok: true });
+});
 
-      case "/api/dismiss": {
-        if (request.method !== "POST") {
-          return new Response("Method Not Allowed", { status: 405 });
-        }
-        const { run_id } = await request.json<{ run_id: number }>();
-        await getHub(env).fetch(new Request("http://hub/delete-run", {
-          method: "POST",
-          body: JSON.stringify({ run_id }),
-        }));
-        return Response.json({ ok: true });
-      }
+// MCP endpoint (Streamable HTTP)
+app.all("/mcp", (c) => handleMcpRequest(c.req.raw, c.env.GITHUB_TOKEN));
 
-      case "/":
-        return handleDashboard();
-
-      default:
-        return new Response("Not Found", { status: 404 });
-    }
-  },
-} satisfies ExportedHandler<Env>;
+export default app;
