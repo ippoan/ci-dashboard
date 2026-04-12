@@ -140,7 +140,7 @@ describe("routing", () => {
     const ctx = createExecutionContext();
     const res = await worker.fetch(req, testEnv(), ctx);
     await waitOnExecutionContext(ctx);
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(204); // Hono CORS middleware returns 204 for OPTIONS
     expect(res.headers.get("Access-Control-Allow-Origin")).toBe("*");
   });
 });

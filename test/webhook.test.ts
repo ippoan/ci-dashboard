@@ -209,7 +209,7 @@ describe("POST /webhook", () => {
     const ctx = createExecutionContext();
     const res = await worker.fetch(req, testEnv(), ctx);
     await waitOnExecutionContext(ctx);
-    expect(res.status).toBe(405);
+    expect(res.status).toBe(404); // Hono: no GET route defined for /webhook
   });
 
   it("stores workflow_job and attaches to existing run", async () => {
