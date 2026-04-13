@@ -41,6 +41,7 @@ export async function githubApi<T>(
   path: string,
   body?: unknown,
   params?: Record<string, string>,
+  extraHeaders?: Record<string, string>,
 ): Promise<T> {
   const url = new URL(`${GITHUB_API}${path}`);
   if (params) {
@@ -51,7 +52,7 @@ export async function githubApi<T>(
 
   const res = await fetch(url.toString(), {
     method,
-    headers: headers(token),
+    headers: { ...headers(token), ...extraHeaders },
     body: body ? JSON.stringify(body) : undefined,
   });
 

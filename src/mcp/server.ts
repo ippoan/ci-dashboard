@@ -4,6 +4,9 @@ import { registerActionsTools } from "./tools/actions";
 import { registerPullsTools } from "./tools/pulls";
 import { registerReleasesTools } from "./tools/releases";
 import { registerLogsTools } from "./tools/logs";
+import { registerRepositoryTools } from "./tools/repository";
+import { registerCommitsTools } from "./tools/commits";
+import { registerIssuesTools } from "./tools/issues";
 
 function createMcpServer(token: string): McpServer {
   const server = new McpServer({
@@ -15,6 +18,9 @@ function createMcpServer(token: string): McpServer {
   registerPullsTools(server, token);
   registerReleasesTools(server, token);
   registerLogsTools(server, token);
+  registerRepositoryTools(server, token);
+  registerCommitsTools(server, token);
+  registerIssuesTools(server, token);
 
   return server;
 }
