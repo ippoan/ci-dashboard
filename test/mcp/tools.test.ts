@@ -254,6 +254,147 @@ describe("Log tool logic", () => {
   });
 });
 
+describe("Issues write tool logic", () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it("create_issue posts title/body/labels and returns minimal shape", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({
+        number: 99,
+        title: "test",
+        state: "open",
+        html_url: "https://github.com/ippoan/ci-dashboard/issues/99",
+      }, { status: 201 }),
+    );
+
+    const { owner, repo } = parseRepo("ci-dashboard");
+    validateOrg(owner);
+    const created = await githubApi<{ number: number; html_url: string }>(
+      "token", "POST", `/repos/${owner}/${repo}/issues`,
+      { title: "test", body: "hello", labels: ["enhancement"] },
+    );
+
+    const body = JSON.parse(fetchSpy.mock.calls[0]![1]!.body as string);
+    expect(body.title).toBe("test");
+    expect(body.body).toBe("hello");
+    expect(body.labels).toEqual(["enhancement"]);
+    expect(created.number).toBe(99);
+  });
+
+  it("create_issue propagates 422 validation error", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({ message: "Validation Failed" }, { status: 422 }),
+    );
+
+    await expect(
+      githubApi("token", "POST", "/repos/ippoan/ci-dashboard/issues",
+        { title: "x", labels: ["nonexistent-label"] }),
+    ).rejects.toThrow(GitHubApiError);
+  });
+
+  it("add_issue_comment posts body and returns id/url/created_at", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({
+        id: 12345,
+        html_url: "https://github.com/ippoan/ci-dashboard/issues/99#issuecomment-12345",
+        created_at: "2026-05-02T01:00:00Z",
+      }, { status: 201 }),
+    );
+
+    const { owner, repo } = parseRepo("ci-dashboard");
+    const result = await githubApi<{ id: number; html_url: string; created_at: string }>(
+      "token", "POST", `/repos/${owner}/${repo}/issues/99/comments`,
+      { body: "thanks!" },
+    );
+
+    const body = JSON.parse(fetchSpy.mock.calls[0]![1]!.body as string);
+    expect(body.body).toBe("thanks!");
+    expect(result.id).toBe(12345);
+    expect(result.created_at).toBe("2026-05-02T01:00:00Z");
+  });
+
+  it("add_labels posts labels and normalizes the response to string[]", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json([
+        { name: "bug" },
+        { name: "enhancement" },
+      ]),
+    );
+
+    const { owner, repo } = parseRepo("ci-dashboard");
+    const updated = await githubApi<Array<{ name: string }>>(
+      "token", "POST", `/repos/${owner}/${repo}/issues/99/labels`,
+      { labels: ["enhancement"] },
+    );
+
+    const body = JSON.parse(fetchSpy.mock.calls[0]![1]!.body as string);
+    expect(body.labels).toEqual(["enhancement"]);
+    expect(updated.map((l) => l.name)).toEqual(["bug", "enhancement"]);
+  });
+
+  it("remove_label DELETEs and url-encodes the label name", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json([{ name: "bug" }]),
+    );
+
+    const { owner, repo } = parseRepo("ci-dashboard");
+    const labelToRemove = "needs review";
+    await githubApi<Array<{ name: string }>>(
+      "token", "DELETE",
+      `/repos/${owner}/${repo}/issues/99/labels/${encodeURIComponent(labelToRemove)}`,
+    );
+
+    const calledUrl = fetchSpy.mock.calls[0]![0] as string;
+    expect(calledUrl).toContain("needs%20review");
+    expect(fetchSpy.mock.calls[0]![1]!.method).toBe("DELETE");
+  });
+
+  it("remove_label propagates 404 when label is not attached", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({ message: "Label does not exist" }, { status: 404 }),
+    );
+
+    await expect(
+      githubApi("token", "DELETE", "/repos/ippoan/ci-dashboard/issues/99/labels/missing"),
+    ).rejects.toThrow(GitHubApiError);
+  });
+
+  it("close_issue PATCHes state=closed with state_reason", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({
+        number: 99, state: "closed", state_reason: "completed",
+        html_url: "https://github.com/ippoan/ci-dashboard/issues/99",
+      }),
+    );
+
+    const { owner, repo } = parseRepo("ci-dashboard");
+    await githubApi("token", "PATCH", `/repos/${owner}/${repo}/issues/99`,
+      { state: "closed", state_reason: "completed" });
+
+    const body = JSON.parse(fetchSpy.mock.calls[0]![1]!.body as string);
+    expect(body.state).toBe("closed");
+    expect(body.state_reason).toBe("completed");
+    expect(fetchSpy.mock.calls[0]![1]!.method).toBe("PATCH");
+  });
+
+  it("reopen_issue PATCHes state=open without state_reason", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({
+        number: 99, state: "open",
+        html_url: "https://github.com/ippoan/ci-dashboard/issues/99",
+      }),
+    );
+
+    const { owner, repo } = parseRepo("ci-dashboard");
+    await githubApi("token", "PATCH", `/repos/${owner}/${repo}/issues/99`,
+      { state: "open" });
+
+    const body = JSON.parse(fetchSpy.mock.calls[0]![1]!.body as string);
+    expect(body.state).toBe("open");
+    expect(body.state_reason).toBeUndefined();
+  });
+});
+
 describe("MCP server smoke test", () => {
   afterEach(() => { vi.restoreAllMocks(); });
 
