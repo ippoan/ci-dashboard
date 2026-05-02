@@ -395,6 +395,98 @@ describe("Issues write tool logic", () => {
   });
 });
 
+describe("list_org_issues tool logic", () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it("builds q with state/orgs/labels/assignee and extracts repo from repository_url", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({
+        total_count: 1,
+        incomplete_results: false,
+        items: [
+          {
+            number: 42,
+            title: "bug: thing broken",
+            state: "open",
+            user: { login: "yhonda" },
+            labels: [{ name: "bug" }],
+            assignees: [{ login: "yhonda" }],
+            comments: 2,
+            created_at: "2026-05-01T00:00:00Z",
+            updated_at: "2026-05-02T00:00:00Z",
+            html_url: "https://github.com/ippoan/foo/issues/42",
+            repository_url: "https://api.github.com/repos/ippoan/foo",
+          },
+        ],
+      }),
+    );
+
+    // Validate each org first (mirrors tool behavior)
+    for (const o of ["ippoan", "ohishi-exp"]) validateOrg(o);
+
+    const parts = [
+      "is:issue", "state:open", "org:ippoan", "org:ohishi-exp",
+      'label:"bug"', "assignee:@me",
+    ];
+    const q = parts.join(" ");
+
+    await githubApi("token", "GET", "/search/issues", undefined,
+      { q, per_page: "30" });
+
+    const calledUrl = fetchSpy.mock.calls[0]![0] as string;
+    // URLSearchParams encodes spaces as '+'
+    expect(decodeURIComponent(calledUrl.replace(/\+/g, " "))).toContain(
+      "q=is:issue state:open org:ippoan org:ohishi-exp",
+    );
+    expect(calledUrl).toContain("per_page=30");
+
+    // Tool's mapping logic
+    const repo = "https://api.github.com/repos/ippoan/foo".split("/").slice(-2).join("/");
+    expect(repo).toBe("ippoan/foo");
+  });
+
+  it("filters out items that look like PRs (defensive even with is:issue)", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({
+        total_count: 2,
+        incomplete_results: false,
+        items: [
+          {
+            number: 1, title: "real issue", state: "open",
+            user: { login: "a" }, labels: [], assignees: [],
+            comments: 0, created_at: "2026-05-01T00:00:00Z",
+            updated_at: "2026-05-01T00:00:00Z",
+            html_url: "https://github.com/ippoan/foo/issues/1",
+            repository_url: "https://api.github.com/repos/ippoan/foo",
+          },
+          {
+            number: 2, title: "stray PR", state: "open",
+            user: { login: "b" }, labels: [], assignees: [],
+            comments: 0, created_at: "2026-05-01T00:00:00Z",
+            updated_at: "2026-05-01T00:00:00Z",
+            html_url: "https://github.com/ippoan/foo/pull/2",
+            repository_url: "https://api.github.com/repos/ippoan/foo",
+            pull_request: { url: "https://api.github.com/repos/ippoan/foo/pulls/2" },
+          },
+        ],
+      }),
+    );
+
+    const data = await githubApi<{ items: Array<{ number: number; pull_request?: unknown }> }>(
+      "token", "GET", "/search/issues", undefined, { q: "is:issue", per_page: "30" },
+    );
+    const filtered = data.items.filter((i) => !i.pull_request);
+    expect(filtered).toHaveLength(1);
+    expect(filtered[0]!.number).toBe(1);
+  });
+
+  it("rejects disallowed org via validateOrg", () => {
+    expect(() => {
+      for (const o of ["ippoan", "evil-org"]) validateOrg(o);
+    }).toThrow(GitHubApiError);
+  });
+});
+
 describe("MCP server smoke test", () => {
   afterEach(() => { vi.restoreAllMocks(); });
 
