@@ -35,6 +35,7 @@ src/
 | `list_commits` | commits | read | List commits for a repository. |
 | `get_commit` | commits | read | Get commit details including changed files and diff patches. |
 | `list_issues` | issues | read | List issues for a repository. |
+| `list_org_issues` | issues | read | List issues across multiple orgs in one call (search-backed, PRs excluded). |
 | `get_issue` | issues | read | Get issue details including body and comments. |
 | `create_issue` | issues | write | Create a new issue in a repository. |
 | `add_issue_comment` | issues | write | Add a comment to an existing issue or PR. |
