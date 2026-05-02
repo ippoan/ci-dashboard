@@ -87,6 +87,184 @@ export function registerIssuesTools(server: McpServer, token: string): void {
       return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
     },
   );
+
+  server.registerTool(
+    "create_issue",
+    {
+      description: "Create a new issue in a repository.",
+      inputSchema: {
+        repo: z.string().describe("Repository (e.g. 'rust-alc-api')"),
+        title: z.string().describe("Issue title"),
+        body: z.string().optional().describe("Issue body (markdown)"),
+        labels: z.array(z.string()).optional().describe("Label names to attach"),
+        assignees: z.array(z.string()).optional().describe("GitHub usernames to assign"),
+      },
+      annotations: { destructiveHint: true },
+    },
+    async ({ repo, title, body, labels, assignees }) => {
+      const { owner, repo: name } = parseRepo(repo);
+      validateOrg(owner);
+
+      const payload: Record<string, unknown> = { title };
+      if (body) payload.body = body;
+      if (labels) payload.labels = labels;
+      if (assignees) payload.assignees = assignees;
+
+      const created = await githubApi<Issue>(
+        token, "POST", `/repos/${owner}/${name}/issues`, payload,
+      );
+
+      const result = {
+        number: created.number,
+        title: created.title,
+        state: created.state,
+        url: created.html_url,
+      };
+
+      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    },
+  );
+
+  server.registerTool(
+    "add_issue_comment",
+    {
+      description: "Add a comment to an existing issue or pull request.",
+      inputSchema: {
+        repo: z.string().describe("Repository (e.g. 'rust-alc-api')"),
+        issue_number: z.number().describe("Issue or PR number"),
+        body: z.string().describe("Comment body (markdown)"),
+      },
+      annotations: { destructiveHint: true },
+    },
+    async ({ repo, issue_number, body }) => {
+      const { owner, repo: name } = parseRepo(repo);
+      validateOrg(owner);
+
+      const created = await githubApi<{ id: number; html_url: string; created_at: string }>(
+        token, "POST", `/repos/${owner}/${name}/issues/${issue_number}/comments`, { body },
+      );
+
+      const result = {
+        id: created.id,
+        url: created.html_url,
+        created_at: created.created_at,
+      };
+
+      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    },
+  );
+
+  server.registerTool(
+    "add_labels",
+    {
+      description: "Add labels to an issue or pull request. Returns the current label list.",
+      inputSchema: {
+        repo: z.string().describe("Repository (e.g. 'rust-alc-api')"),
+        issue_number: z.number().describe("Issue or PR number"),
+        labels: z.array(z.string()).min(1).describe("Label names to add"),
+      },
+      annotations: { destructiveHint: true },
+    },
+    async ({ repo, issue_number, labels }) => {
+      const { owner, repo: name } = parseRepo(repo);
+      validateOrg(owner);
+
+      const updated = await githubApi<Array<{ name: string }>>(
+        token, "POST", `/repos/${owner}/${name}/issues/${issue_number}/labels`, { labels },
+      );
+
+      const result = updated.map((l) => l.name);
+      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    },
+  );
+
+  server.registerTool(
+    "remove_label",
+    {
+      description: "Remove a single label from an issue or pull request. Returns the remaining label list.",
+      inputSchema: {
+        repo: z.string().describe("Repository (e.g. 'rust-alc-api')"),
+        issue_number: z.number().describe("Issue or PR number"),
+        label: z.string().describe("Label name to remove"),
+      },
+      annotations: { destructiveHint: true },
+    },
+    async ({ repo, issue_number, label }) => {
+      const { owner, repo: name } = parseRepo(repo);
+      validateOrg(owner);
+
+      const remaining = await githubApi<Array<{ name: string }>>(
+        token, "DELETE",
+        `/repos/${owner}/${name}/issues/${issue_number}/labels/${encodeURIComponent(label)}`,
+      );
+
+      const result = remaining.map((l) => l.name);
+      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    },
+  );
+
+  server.registerTool(
+    "close_issue",
+    {
+      description: "Close an issue. Optionally set state_reason to 'completed' or 'not_planned'.",
+      inputSchema: {
+        repo: z.string().describe("Repository (e.g. 'rust-alc-api')"),
+        issue_number: z.number().describe("Issue number"),
+        state_reason: z.enum(["completed", "not_planned"]).optional()
+          .describe("Reason for closing (default: completed)"),
+      },
+      annotations: { destructiveHint: true },
+    },
+    async ({ repo, issue_number, state_reason }) => {
+      const { owner, repo: name } = parseRepo(repo);
+      validateOrg(owner);
+
+      const payload: Record<string, unknown> = { state: "closed" };
+      payload.state_reason = state_reason ?? "completed";
+
+      const updated = await githubApi<Issue & { state_reason?: string | null }>(
+        token, "PATCH", `/repos/${owner}/${name}/issues/${issue_number}`, payload,
+      );
+
+      const result = {
+        number: updated.number,
+        state: updated.state,
+        state_reason: updated.state_reason ?? null,
+        url: updated.html_url,
+      };
+
+      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    },
+  );
+
+  server.registerTool(
+    "reopen_issue",
+    {
+      description: "Reopen a closed issue.",
+      inputSchema: {
+        repo: z.string().describe("Repository (e.g. 'rust-alc-api')"),
+        issue_number: z.number().describe("Issue number"),
+      },
+      annotations: { destructiveHint: true },
+    },
+    async ({ repo, issue_number }) => {
+      const { owner, repo: name } = parseRepo(repo);
+      validateOrg(owner);
+
+      const updated = await githubApi<Issue>(
+        token, "PATCH", `/repos/${owner}/${name}/issues/${issue_number}`,
+        { state: "open" },
+      );
+
+      const result = {
+        number: updated.number,
+        state: updated.state,
+        url: updated.html_url,
+      };
+
+      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    },
+  );
 }
 
 interface Issue {
