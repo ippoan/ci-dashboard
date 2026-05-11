@@ -234,7 +234,7 @@ export function handleDashboard(): Response {
   </style>
 </head>
 <body>
-  <h1>CI Dashboard</h1>
+  <h1>CI Dashboard <a href="/issues" style="font-size:13px;font-weight:400;margin-left:12px;color:#58a6ff;text-decoration:none;">📋 Open Issues →</a></h1>
   <div class="status-bar">
     WS: <span id="sse-status" class="disconnected">connecting...</span>
     &middot; Last update: <span id="last-update">-</span>

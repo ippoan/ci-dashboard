@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { handleWebhook } from "./webhook";
 import { handleDashboard } from "./dashboard";
+import { handleIssuesPage } from "./issues-page";
 import { handleRecheck } from "./recheck";
 import { handleTagRelease } from "./tag-release";
 import { handleMcpRequest } from "./mcp/server";
@@ -26,6 +27,9 @@ function getHub(env: Env): DurableObjectStub {
 
 // Dashboard
 app.get("/", () => handleDashboard());
+
+// Open issues (SSR, cross-org)
+app.get("/issues", (c) => handleIssuesPage(c.env));
 
 // WebSocket
 app.get("/ws", (c) => getHub(c.env).fetch(c.req.raw));
