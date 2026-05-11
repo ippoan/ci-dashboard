@@ -287,46 +287,90 @@ export function registerIssuesTools(server: McpServer, token: string): void {
       annotations: { readOnlyHint: true },
     },
     async ({ orgs, state, labels, assignee, query, per_page }) => {
-      for (const o of orgs) validateOrg(o);
-
-      const parts: string[] = ["is:issue"];
-      if (state !== "all") parts.push(`state:${state}`);
-      for (const o of orgs) parts.push(`org:${o}`);
-      if (labels) for (const l of labels) parts.push(`label:"${l}"`);
-      if (assignee) parts.push(`assignee:${assignee}`);
-      if (query) parts.push(query);
-      const q = parts.join(" ");
-
-      const data = await githubApi<SearchIssuesResponse>(
-        token, "GET", "/search/issues", undefined,
-        { q, per_page: String(per_page) },
-      );
-
-      const items = data.items
-        .filter((i) => !i.pull_request)
-        .map((i) => ({
-          repo: i.repository_url.split("/").slice(-2).join("/"),
-          number: i.number,
-          title: i.title,
-          state: i.state,
-          author: i.user?.login ?? "",
-          labels: i.labels.map((l) => l.name),
-          assignees: (i.assignees ?? []).map((a) => a.login),
-          comments: i.comments,
-          created_at: i.created_at,
-          updated_at: i.updated_at,
-          url: i.html_url,
-        }));
-
-      const result = {
-        total_count: data.total_count,
-        incomplete: data.incomplete_results,
-        items,
-      };
-
+      const result = await fetchOrgIssues(token, {
+        orgs, state, labels, assignee, query, per_page,
+      });
       return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
     },
   );
+}
+
+// --------------------------------------------------------------------------
+// Shared: org-wide issue search (used by `list_org_issues` MCP tool and by
+// the SSR `/issues` page in src/issues-page.ts)
+// --------------------------------------------------------------------------
+
+export interface OrgIssue {
+  repo: string;
+  number: number;
+  title: string;
+  state: string;
+  author: string;
+  labels: string[];
+  assignees: string[];
+  comments: number;
+  created_at: string;
+  updated_at: string;
+  url: string;
+}
+
+export interface FetchOrgIssuesParams {
+  orgs: string[];
+  state?: "open" | "closed" | "all";
+  labels?: string[];
+  assignee?: string;
+  query?: string;
+  per_page?: number;
+}
+
+export interface FetchOrgIssuesResult {
+  total_count: number;
+  incomplete: boolean;
+  items: OrgIssue[];
+}
+
+export async function fetchOrgIssues(
+  token: string,
+  params: FetchOrgIssuesParams,
+): Promise<FetchOrgIssuesResult> {
+  const { orgs, state = "open", labels, assignee, query, per_page = 30 } = params;
+
+  for (const o of orgs) validateOrg(o);
+
+  const parts: string[] = ["is:issue"];
+  if (state !== "all") parts.push(`state:${state}`);
+  for (const o of orgs) parts.push(`org:${o}`);
+  if (labels) for (const l of labels) parts.push(`label:"${l}"`);
+  if (assignee) parts.push(`assignee:${assignee}`);
+  if (query) parts.push(query);
+  const q = parts.join(" ");
+
+  const data = await githubApi<SearchIssuesResponse>(
+    token, "GET", "/search/issues", undefined,
+    { q, per_page: String(per_page) },
+  );
+
+  const items = data.items
+    .filter((i) => !i.pull_request)
+    .map((i) => ({
+      repo: i.repository_url.split("/").slice(-2).join("/"),
+      number: i.number,
+      title: i.title,
+      state: i.state,
+      author: i.user?.login ?? "",
+      labels: i.labels.map((l) => l.name),
+      assignees: (i.assignees ?? []).map((a) => a.login),
+      comments: i.comments,
+      created_at: i.created_at,
+      updated_at: i.updated_at,
+      url: i.html_url,
+    }));
+
+  return {
+    total_count: data.total_count,
+    incomplete: data.incomplete_results,
+    items,
+  };
 }
 
 interface SearchIssuesResponse {
