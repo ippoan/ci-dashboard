@@ -434,6 +434,31 @@ describe("GET /releases", () => {
     expect(html).toContain("evil-org");
   });
 
+  // #61: detail-page sibling of the index fix. When the flash redirect lands
+  // after closing every row, the form/button must disappear; only the closed
+  // flash banner + the "all closed" hint should remain.
+  it("hides the detail form when the flash filter removes every remaining candidate", async () => {
+    stubGithubApi();
+    // Pass every candidate (42, 50, 99) through `closed=` so the filter empties
+    // the table. The data loader still sees them, but the renderer should
+    // recognize there's nothing left to act on.
+    const req = new Request(
+      "http://localhost/releases?repo=ippoan/ci-dashboard&tag=v1.2.0&closed=42,50,99",
+    );
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(req, testEnv(), ctx);
+    await waitOnExecutionContext(ctx);
+
+    const html = await res.text();
+    // Flash banner survives (operator sees what just got closed).
+    expect(html).toContain("Closed:");
+    // No button, no form-shaped checkboxes.
+    expect(html).not.toContain("Close selected as released");
+    expect(html).not.toMatch(/name="issue" value="\d+"/);
+    // Reassuring hint takes the form's slot.
+    expect(html).toContain("All referenced issues for this release are closed");
+  });
+
   // #57: synthetic block for tag-less direct-push-OK repos. The allowlist
   // comes from `yhonda-ohishi/claude-skills`; only repos appearing in it get
   // the fallback path so auto-merge PR repos in a brief tag-less window stay
