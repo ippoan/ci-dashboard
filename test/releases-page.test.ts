@@ -433,4 +433,142 @@ describe("GET /releases", () => {
     const html = await res.text();
     expect(html).toContain("evil-org");
   });
+
+  // #57: synthetic block for tag-less direct-push-OK repos. The allowlist
+  // comes from `yhonda-ohishi/claude-skills`; only repos appearing in it get
+  // the fallback path so auto-merge PR repos in a brief tag-less window stay
+  // off the page (which is what the user explicitly called out).
+  it("renders a synthetic block from default-branch commits for an allowlisted tag-less repo", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (req) => {
+      const url = typeof req === "string" ? req : (req as Request).url;
+
+      // SoT allowlist fetched from claude-skills repo.
+      if (url.includes("/repos/yhonda-ohishi/claude-skills/contents/wt-direct-push/config/direct-push-ok.txt")) {
+        const body = "yhonda-ohishi/claude-hooks\n";
+        return Response.json({ content: btoa(body), encoding: "base64" });
+      }
+
+      // Target repo: no tags published → triggers the synthetic path.
+      if (url.includes("/repos/yhonda-ohishi/claude-hooks/tags")) {
+        return Response.json([]);
+      }
+
+      // /repos/{o}/{n} for default_branch lookup.
+      if (url.match(/\/repos\/yhonda-ohishi\/claude-hooks(\?|$)/)) {
+        return Response.json({ default_branch: "master" });
+      }
+
+      // Most recent default-branch commits — only one carries a Refs trailer,
+      // the other is noise we expect the loader to skip cleanly.
+      if (url.includes("/repos/yhonda-ohishi/claude-hooks/commits")) {
+        return Response.json([
+          { sha: "deadbeefcafe1234", commit: { message: "feat: hook\n\nRefs #2" } },
+          { sha: "1111222233334444", commit: { message: "chore: tidy" } },
+        ]);
+      }
+
+      // The Refs target — open + clean → checkbox defaults ON.
+      if (url.endsWith("/repos/yhonda-ohishi/claude-hooks/issues/2")) {
+        return Response.json({
+          number: 2, title: "worktree-naming-guard hook", state: "open",
+          labels: [], assignees: [],
+          html_url: "https://github.com/yhonda-ohishi/claude-hooks/issues/2",
+          updated_at: "2026-05-12T00:00:00Z",
+        });
+      }
+
+      return new Response(`not stubbed: ${url}`, { status: 500 });
+    });
+
+    const req = new Request("http://localhost/releases");
+    const ctx = createExecutionContext();
+    // No `watched` — the repo only appears via the allowlist, proving the
+    // Hub-cache ∪ allowlist union path actually picks it up.
+    const res = await worker.fetch(req, testEnv(), ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(200);
+    const html = await res.text();
+
+    // Synthetic tag identity: <branch>@<sha7> from the HEAD commit.
+    expect(html).toContain("master@deadbee");
+    // The "direct push" marker replaces the "→ detail" link.
+    expect(html).toContain("direct push");
+    expect(html).not.toMatch(/→ detail[\s\S]*master@deadbee/);
+    // The candidate row + form pair encoding works the same as the tag path.
+    expect(html).toContain(`name="pair" value="master@deadbee:2"`);
+    expect(html).toContain("worktree-naming-guard hook");
+  });
+
+  it("omits a synthetic block when the recent commit window has no Refs", async () => {
+    // Direct-push-OK repo, but the recent commits don't reference any issue —
+    // we drop the whole RepoView so the landing page doesn't grow a noisy
+    // empty card.
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (req) => {
+      const url = typeof req === "string" ? req : (req as Request).url;
+
+      if (url.includes("/contents/wt-direct-push/config/direct-push-ok.txt")) {
+        return Response.json({
+          content: btoa("yhonda-ohishi/claude-hooks\n"),
+          encoding: "base64",
+        });
+      }
+      if (url.includes("/repos/yhonda-ohishi/claude-hooks/tags")) {
+        return Response.json([]);
+      }
+      if (url.match(/\/repos\/yhonda-ohishi\/claude-hooks(\?|$)/)) {
+        return Response.json({ default_branch: "master" });
+      }
+      if (url.includes("/repos/yhonda-ohishi/claude-hooks/commits")) {
+        return Response.json([
+          { sha: "aaa", commit: { message: "no refs here" } },
+        ]);
+      }
+      return new Response(`not stubbed: ${url}`, { status: 500 });
+    });
+
+    const req = new Request("http://localhost/releases");
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(req, testEnv(), ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    // Repo dropped → empty-state hint shown, no synthetic block markup.
+    expect(html).toContain("No releases with referenced issues");
+    expect(html).not.toContain("yhonda-ohishi/claude-hooks");
+  });
+
+  it("does not turn an unallowlisted tag-less repo into a synthetic block", async () => {
+    // Guard against the auto-merge regression the user called out: a PR repo
+    // briefly without tags must NOT show its main-branch commits here.
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (req) => {
+      const url = typeof req === "string" ? req : (req as Request).url;
+
+      // Allowlist is empty.
+      if (url.includes("/contents/wt-direct-push/config/direct-push-ok.txt")) {
+        return Response.json({ content: btoa(""), encoding: "base64" });
+      }
+      if (url.includes("/repos/ippoan/some-pr-repo/tags")) {
+        return Response.json([]);
+      }
+      // /repos/{o}/{n} should NOT be hit for the non-allowlisted path; fail
+      // loudly if it is so we notice the regression in CI.
+      if (url.match(/\/repos\/ippoan\/some-pr-repo(\?|$)/)) {
+        throw new Error("unexpected fetch: synthetic path leaked");
+      }
+      return new Response(`not stubbed: ${url}`, { status: 500 });
+    });
+
+    const e = testEnv({ watched: ["ippoan/some-pr-repo"] });
+    const req = new Request("http://localhost/releases");
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(req, e, ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain("No releases with referenced issues");
+    expect(html).not.toContain("direct push");
+  });
 });

@@ -9,6 +9,7 @@ import {
   collectIssueNumbersForRange,
   fetchIssuesByNumbers,
 } from "./release-alert";
+import { loadDirectPushAllowlist } from "./direct-push-allowlist";
 import { renderTabs, TAB_STYLES } from "./nav-tabs";
 
 // `/releases` (no params) renders a list of "recent releases" — every watched
@@ -27,7 +28,11 @@ import { renderTabs, TAB_STYLES } from "./nav-tabs";
 
 export async function handleReleasesPage(
   req: Request,
-  env: { GITHUB_TOKEN: string; CI_HUB: DurableObjectNamespace },
+  env: {
+    GITHUB_TOKEN: string;
+    CI_HUB: DurableObjectNamespace;
+    CI_STATUS?: KVNamespace;
+  },
 ): Promise<Response> {
   const url = new URL(req.url);
   const repoParam = url.searchParams.get("repo");
@@ -73,6 +78,11 @@ interface TagBlock {
   tag: string;
   prevTag: string | null;
   issues: IssueRow[];    // already-fetched and warning-annotated
+  // `synthetic` blocks are constructed from default-branch commits when a
+  // direct-push-OK repo has no semver tags (#57). They drop the "→ detail"
+  // link because there's no compare-range view to point at, and they hide
+  // already-closed issues entirely instead of nesting them in <details>.
+  synthetic?: boolean;
 }
 
 // Top tags shown inline per repo (each fans out compare + per-issue fetches).
@@ -80,30 +90,46 @@ interface TagBlock {
 const TOP_TAGS_INLINE = 5;
 
 async function handleIndexPage(
-  env: { GITHUB_TOKEN: string; CI_HUB: DurableObjectNamespace },
+  env: {
+    GITHUB_TOKEN: string;
+    CI_HUB: DurableObjectNamespace;
+    CI_STATUS?: KVNamespace;
+  },
   closedFlash: number[],
   failedFlash: number[],
   flashRepo: string | null,
 ): Promise<Response> {
-  // 1. Watched repos come from the Hub's status cache — every repo that has
-  //    ever fired a CI run lives there, which is the same source the
-  //    dashboard sidebar uses.
-  let repos: string[] = [];
+  // 1. Watched repos come from two sources:
+  //   (a) Hub status cache — every repo that has ever fired a CI run.
+  //   (b) Direct-push-OK allowlist — repos that never auto-merge a PR and
+  //       therefore won't show up in (a) until they happen to push a tag.
+  //       Fetched from `yhonda-ohishi/claude-skills` (same SoT as
+  //       `/wt-direct-push`); see direct-push-allowlist.ts.
+  const watched = new Set<string>();
   try {
     const hubId = env.CI_HUB.idFromName("singleton");
     const hub = env.CI_HUB.get(hubId);
     const res = await hub.fetch(new Request("http://hub/statuses"));
     if (res.ok) {
       const statuses = await res.json<Array<{ repo: string }>>();
-      repos = [...new Set(statuses.map((s) => s.repo))].sort();
+      for (const s of statuses) watched.add(s.repo);
     }
-  } catch { /* empty list → page falls back to lookup form only */ }
+  } catch { /* empty list → falls through; allowlist may still add repos */ }
+
+  let allowlist = new Set<string>();
+  try {
+    allowlist = await loadDirectPushAllowlist(env.GITHUB_TOKEN, env.CI_STATUS);
+    for (const r of allowlist) watched.add(r);
+  } catch { /* graceful: allowlist stays empty, existing tag-flow unaffected */ }
+
+  const repos = [...watched].sort();
 
   // 2. Per-repo data load in parallel; whole-repo failures get a null view
-  //    we drop in the renderer.
+  //    we drop in the renderer. Allowlisted repos take the synthetic path
+  //    inside loadRepoView when they have no semver tags.
   const views = await Promise.all(repos.map(async (repo) => {
     try {
-      return await loadRepoView(env.GITHUB_TOKEN, repo);
+      return await loadRepoView(env.GITHUB_TOKEN, repo, allowlist.has(repo));
     } catch {
       return null;
     }
@@ -120,7 +146,11 @@ async function handleIndexPage(
   );
 }
 
-async function loadRepoView(token: string, repo: string): Promise<RepoView | null> {
+async function loadRepoView(
+  token: string,
+  repo: string,
+  isDirectPush: boolean,
+): Promise<RepoView | null> {
   const { owner, repo: name } = parseRepo(repo);
   validateOrg(owner);
 
@@ -133,6 +163,19 @@ async function loadRepoView(token: string, repo: string): Promise<RepoView | nul
   const sorted = sortSemverDesc(allTags.map((t) => t.name));
   const topTags = sorted.slice(0, TOP_TAGS_INLINE);
   if (topTags.length === 0) {
+    // Direct-push-OK repos that never tag still need a way to surface their
+    // open Refs. Fall back to a synthetic block built from the default
+    // branch's recent commits (#57). Non-allowlisted tag-less repos return
+    // empty as before so we don't accidentally treat an auto-merge repo as a
+    // direct-push one mid-release.
+    if (isDirectPush) {
+      const block = await loadSyntheticBlock(token, owner, name);
+      return {
+        repo: `${owner}/${name}`,
+        tagBlocks: block ? [block] : [],
+        olderTags: [],
+      };
+    }
     return { repo: `${owner}/${name}`, tagBlocks: [], olderTags: [] };
   }
 
@@ -200,6 +243,87 @@ async function loadRepoView(token: string, repo: string): Promise<RepoView | nul
     repo: `${owner}/${name}`,
     tagBlocks,
     olderTags: sorted.slice(TOP_TAGS_INLINE),
+  };
+}
+
+// Build a synthetic block for tag-less direct-push-OK repos (#57).
+//
+// We scan the most recent SYNTHETIC_COMMIT_WINDOW commits on the default
+// branch for `Refs #N`, hydrate the referenced issues, and keep only the ones
+// still `open`. Closed issues drop out entirely (no <details>): the alternative
+// view's case for collapsing them is "they got auto-closed by `Closes #N` in a
+// PR merge", which can't happen on direct-push-OK repos by construction.
+//
+// The "tag" identity is `<branch>@<sha7>` so the post-close comment
+// ("Closed by release main@e8e90a4") stays traceable even though the synthetic
+// block has no compare range. The detail page (`?repo=X&tag=Y`) is *not*
+// supported for these tags — `renderTagBlock` skips the link.
+const SYNTHETIC_COMMIT_WINDOW = 100;
+
+interface RepoMeta { default_branch: string }
+
+async function loadSyntheticBlock(
+  token: string,
+  owner: string,
+  name: string,
+): Promise<TagBlock | null> {
+  let defaultBranch: string;
+  try {
+    const meta = await githubApi<RepoMeta>(token, "GET", `/repos/${owner}/${name}`);
+    defaultBranch = meta.default_branch;
+  } catch {
+    return null;
+  }
+  if (!defaultBranch) return null;
+
+  let commits: RawCommit[] = [];
+  try {
+    commits = await githubApi<RawCommit[]>(
+      token, "GET", `/repos/${owner}/${name}/commits`, undefined,
+      { sha: defaultBranch, per_page: String(SYNTHETIC_COMMIT_WINDOW) },
+    );
+  } catch {
+    return null;
+  }
+  if (commits.length === 0) return null;
+
+  const refs = new Set<number>();
+  for (const c of commits) {
+    for (const n of extractRefIssues(c.commit.message)) refs.add(n);
+  }
+  if (refs.size === 0) {
+    // No referenced issues in the recent window — nothing to confirm. Skipping
+    // the block (vs. returning an empty one) keeps the repo off the landing
+    // page entirely, matching the tag path's behavior.
+    return null;
+  }
+
+  const issues = await fetchIssuesByNumbers(token, owner, name, refs);
+  const openRows: IssueRow[] = issues
+    .filter((i) => !i.pull_request && i.state === "open")
+    .map((i) => {
+      const labels = i.labels.map((l) => l.name);
+      return {
+        number: i.number,
+        title: i.title,
+        state: i.state,
+        labels,
+        assignees: i.assignees.map((a) => a.login),
+        url: i.html_url,
+        updated_at: i.updated_at,
+        warnings: computeWarnings({ state: i.state, labels }),
+      };
+    })
+    .sort((a, b) => a.number - b.number);
+
+  if (openRows.length === 0) return null;
+
+  const headSha7 = commits[0]!.sha.slice(0, 7);
+  return {
+    tag: `${defaultBranch}@${headSha7}`,
+    prevTag: null,
+    issues: openRows,
+    synthetic: true,
   };
 }
 
@@ -501,12 +625,26 @@ function renderTagBlock(repo: string, block: TagBlock): string {
   // so they collapse into a native <details> below the active rows. The form
   // wrapping the whole repo card still picks up checkboxes inside <details>
   // when the operator expands it.
+  //
+  // Synthetic (direct-push) blocks have already filtered to open-only when
+  // they were built (#57), so `hidden` ends up empty there and the <details>
+  // collapses out naturally.
   const visible = block.issues.filter((i) => i.state !== "closed");
   const hidden = block.issues.filter((i) => i.state === "closed");
 
   const since = block.prevTag
     ? `<span class="since">since <code>${escapeHtml(block.prevTag)}</code></span>`
     : "";
+
+  // Direct-push blocks have no compare range, so the detail page (`?tag=X`)
+  // would 404. Show a passive "direct push" marker instead so the operator
+  // knows why the link is missing.
+  const detailOrMarker = block.synthetic
+    ? `<span class="direct-marker" title="direct-push branch — no tag range">direct push</span>`
+    : `<a class="detail-link"
+         href="/releases?repo=${encodeURIComponent(repo)}&tag=${encodeURIComponent(block.tag)}">
+        → detail
+      </a>`;
 
   const visibleTable = visible.length === 0 ? "" : `
     <table>
@@ -532,10 +670,7 @@ function renderTagBlock(repo: string, block: TagBlock): string {
     <div class="tag-block-header">
       <strong>${escapeHtml(block.tag)}</strong>
       ${since}
-      <a class="detail-link"
-         href="/releases?repo=${encodeURIComponent(repo)}&tag=${encodeURIComponent(block.tag)}">
-        → detail
-      </a>
+      ${detailOrMarker}
     </div>
     ${visibleTable}
     ${hiddenDetails}
@@ -673,6 +808,11 @@ const STYLES = `
     margin-left: auto; color: #58a6ff; text-decoration: none; font-size: 12px;
   }
   .tag-block-header .detail-link:hover { text-decoration: underline; }
+  .tag-block-header .direct-marker {
+    margin-left: auto; font-size: 11px; color: #8b949e;
+    background: #21262d; border: 1px solid #30363d;
+    padding: 1px 8px; border-radius: 10px;
+  }
   .tag-block table {
     background: #0d1117; border: 1px solid #30363d;
     border-radius: 6px; overflow: hidden;
