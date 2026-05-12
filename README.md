@@ -14,10 +14,11 @@ src/
 │       ├── commits.ts   # コミット情報
 │       ├── issues.ts    # issue 読取 + 書込
 │       ├── logs.ts      # ジョブログ取得・検索
+│       ├── projects.ts  # GitHub Projects v2 (GraphQL)
 │       ├── pulls.ts     # PR 読取 + マージ
 │       ├── releases.ts  # タグ・リリース
 │       └── repository.ts # ファイルツリー・コード検索
-└── github-api.ts        # 共通 HTTP ラッパー (validateOrg / githubApi / githubApiRaw)
+└── github-api.ts        # 共通 HTTP / GraphQL ラッパー (validateOrg / githubApi / githubGraphQL / githubApiRaw)
 ```
 
 各ツールは `server.registerTool(name, schema, handler)` で登録される。新ツール追加時は対応する `src/mcp/tools/*.ts` の `registerXxxTools` 関数内に追記するだけで `server.ts` の変更は不要。
@@ -52,6 +53,13 @@ src/
 | `list_tags` | releases | read | List tags for a repository. |
 | `get_latest_release` | releases | read | Get the latest release for a repository. |
 | `create_tag_release` | releases | write | Dispatch `tag-release.yml` workflow. |
+| `list_org_projects` | projects | read | List Projects v2 across one or more orgs (number/title/url/closed). |
+| `get_project` | projects | read | Get a Project's metadata + field definitions (incl. single-select options / iterations). |
+| `list_project_items` | projects | read | List items (issues/PRs/draft) attached to a Project with their field values. |
+| `add_issue_to_project` | projects | write | Add an issue/PR to a Project (resolves project number + issue number internally). |
+| `remove_project_item` | projects | write | Remove an item from a Project (does not delete the issue). |
+| `set_project_item_field` | projects | write | Update a field value on a Project item (single_select/iteration resolved by name). |
+| `create_project_field` | projects | write | Create a custom field (text/number/date/single_select). |
 | `get_file_tree` | repository | read | Get the file tree of a repository. |
 | `get_file_content` | repository | read | Get file content with optional line range. |
 | `search_code` | repository | read | grep-like code search. |
@@ -61,7 +69,7 @@ src/
 
 ## 認可
 
-- 操作対象は `ALLOWED_ORGS = ["ippoan", "ohishi-exp"]` 配下のリポジトリのみ (`src/github-api.ts`)
+- 操作対象は `ALLOWED_ORGS = ["ippoan", "ohishi-exp", "yhonda-ohishi"]` 配下のリポジトリ / Project のみ (`src/github-api.ts`)
 - それ以外の owner を指定すると `GitHubApiError(403, "Org not allowed: ...")` で拒否
 - リポジトリ指定は `"owner/name"` または `"name"` (後者は `ippoan/` を補完)
 
@@ -88,6 +96,8 @@ wrangler secret put GITHUB_TOKEN
 ```
 
 `repo` / `workflow` スコープが必要 (issue 書込・PR マージ・workflow dispatch のため)。
+Projects v2 ツールを使う場合は **`project`** (write) または `read:project` (read のみ) スコープも追加。
+GitHub App で運用する場合は **Organization → Projects: Read & Write** 権限が必要 (App 再インストール / 権限受諾)。
 
 ## 開発ルール
 

@@ -7,6 +7,7 @@ import { registerLogsTools } from "./tools/logs";
 import { registerRepositoryTools } from "./tools/repository";
 import { registerCommitsTools } from "./tools/commits";
 import { registerIssuesTools } from "./tools/issues";
+import { registerProjectsTools } from "./tools/projects";
 
 function createMcpServer(token: string): McpServer {
   const server = new McpServer({
@@ -21,6 +22,7 @@ function createMcpServer(token: string): McpServer {
   registerRepositoryTools(server, token);
   registerCommitsTools(server, token);
   registerIssuesTools(server, token);
+  registerProjectsTools(server, token);
 
   return server;
 }
