@@ -15,6 +15,8 @@ export function handleDashboard(): Response {
       background: #0d1117;
       color: #c9d1d9;
       padding: 24px;
+      max-width: 1200px;
+      margin: 0 auto;
     }
     h1 { font-size: 20px; margin-bottom: 16px; color: #58a6ff; }
     .status-bar {
