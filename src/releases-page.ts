@@ -535,10 +535,37 @@ function renderIndexRepo(view: RepoView): string {
 }
 
 function renderTagBlock(repo: string, block: TagBlock): string {
-  const rows = block.issues.map((i) => renderIndexRow(block.tag, i)).join("\n");
+  // Split by state: already-closed issues are noise in the at-a-glance view,
+  // so they collapse into a native <details> below the active rows. The form
+  // wrapping the whole repo card still picks up checkboxes inside <details>
+  // when the operator expands it.
+  const visible = block.issues.filter((i) => i.state !== "closed");
+  const hidden = block.issues.filter((i) => i.state === "closed");
+
   const since = block.prevTag
     ? `<span class="since">since <code>${escapeHtml(block.prevTag)}</code></span>`
     : "";
+
+  const visibleTable = visible.length === 0 ? "" : `
+    <table>
+      <thead><tr>
+        <th class="col-check"></th>
+        <th>#</th>
+        <th>Title</th>
+        <th>State</th>
+        <th>Labels</th>
+      </tr></thead>
+      <tbody>${visible.map((i) => renderIndexRow(block.tag, i)).join("\n")}</tbody>
+    </table>`;
+
+  const hiddenDetails = hidden.length === 0 ? "" : `
+    <details class="closed-details">
+      <summary>${hidden.length} closed issue${hidden.length === 1 ? "" : "s"}</summary>
+      <table>
+        <tbody>${hidden.map((i) => renderIndexRow(block.tag, i)).join("\n")}</tbody>
+      </table>
+    </details>`;
+
   return `<div class="tag-block">
     <div class="tag-block-header">
       <strong>${escapeHtml(block.tag)}</strong>
@@ -548,16 +575,8 @@ function renderTagBlock(repo: string, block: TagBlock): string {
         → detail
       </a>
     </div>
-    <table>
-      <thead><tr>
-        <th class="col-check"></th>
-        <th>#</th>
-        <th>Title</th>
-        <th>State</th>
-        <th>Labels</th>
-      </tr></thead>
-      <tbody>${rows}</tbody>
-    </table>
+    ${visibleTable}
+    ${hiddenDetails}
   </div>`;
 }
 
@@ -706,6 +725,31 @@ const STYLES = `
     font-variant-numeric: tabular-nums;
   }
   .older-tags a:hover { background: #1f6feb22; }
+  details.closed-details {
+    margin-top: 8px;
+    background: #0d1117;
+    border: 1px dashed #30363d;
+    border-radius: 6px;
+  }
+  details.closed-details > summary {
+    padding: 6px 12px;
+    font-size: 12px; color: #8b949e;
+    cursor: pointer; user-select: none;
+    list-style: none;
+  }
+  details.closed-details > summary::before {
+    content: "▶";
+    display: inline-block;
+    margin-right: 6px;
+    transition: transform 0.1s;
+    font-size: 10px;
+  }
+  details.closed-details[open] > summary::before { transform: rotate(90deg); }
+  details.closed-details > summary:hover { color: #c9d1d9; }
+  details.closed-details[open] > summary {
+    color: #c9d1d9; border-bottom: 1px solid #30363d;
+  }
+  details.closed-details table { background: transparent; border: 0; }
   .lookup-header {
     font-size: 12px; font-weight: 600; text-transform: uppercase;
     letter-spacing: 0.5px; color: #8b949e;
