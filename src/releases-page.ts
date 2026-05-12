@@ -447,10 +447,13 @@ function renderHtml(
   closedFlash: number[],
   failedFlash: number[],
 ): string {
-  const candidateRows = data.rows
-    .filter((r) => !closedFlash.includes(r.number))
-    .map((r) => renderRow(r))
-    .join("\n");
+  // The flash filter strips just-closed rows from the candidate set so a
+  // close-then-redirect lands on a page that no longer offers them. We then
+  // gate the form by the *remaining* candidates rather than the unfiltered
+  // payload — otherwise the operator sees a header-only table with a button
+  // that round-trips empty (#61, sibling of the index-side fix in #59).
+  const candidates = data.rows.filter((r) => !closedFlash.includes(r.number));
+  const candidateRows = candidates.map((r) => renderRow(r)).join("\n");
 
   const flash = renderFlash(closedFlash, failedFlash, data.repo);
 
@@ -460,11 +463,17 @@ function renderHtml(
       ? ` (since <code>${escapeHtml(data.previousTag)}</code>, ${data.commits} commits)`
       : ` (first release; last ${data.commits} commits scanned)`);
 
+  // Two distinct "nothing to do" states share the same hint slot:
+  //   - data.rows.length === 0 → tag had no Refs at all
+  //   - data.rows.length > 0 but candidates.length === 0 → everything just got
+  //     closed in this round-trip; show the celebratory variant instead.
   const empty = data.rows.length === 0
     ? `<div class="empty">🎉 No referenced issues for this release.</div>`
-    : "";
+    : candidates.length === 0
+      ? `<div class="empty">✅ All referenced issues for this release are closed.</div>`
+      : "";
 
-  const formInner = data.rows.length === 0 ? "" : `
+  const formInner = candidates.length === 0 ? "" : `
     <form method="POST" action="/api/release-close" class="close-form">
       <input type="hidden" name="repo" value="${escapeHtml(data.repo)}">
       <input type="hidden" name="tag" value="${escapeHtml(data.tag)}">
