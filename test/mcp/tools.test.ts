@@ -61,6 +61,19 @@ describe("Actions tool logic", () => {
     );
     expect(data.workflow_runs).toHaveLength(0);
   });
+
+  it("supports yhonda-ohishi org", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({ workflow_runs: [] }),
+    );
+
+    const { owner, repo } = parseRepo("yhonda-ohishi/claude-skills");
+    validateOrg(owner);
+    const data = await githubApi<{ workflow_runs: unknown[] }>(
+      "token", "GET", `/repos/${owner}/${repo}/actions/runs`,
+    );
+    expect(data.workflow_runs).toHaveLength(0);
+  });
 });
 
 describe("PR tool logic", () => {
