@@ -395,14 +395,16 @@ describe("POST /webhook", () => {
     expect(res.status).toBe(200);
   });
 
-  // Tag Release detection: when the `Tag Release` workflow finishes
-  // successfully we side-channel a /release-alert-detect to the Hub so the
-  // dashboard banner can pick up any open `Refs #N` issues.
-  it("triggers release-alert-detect on a successful Tag Release completion", async () => {
+  // Release alert detection: we listen for the **CI** workflow finishing on a
+  // tag head_branch (e.g. v0.0.43). That run is the one that does
+  // `wrangler deploy`, so by the time it completes the new code is live and
+  // the /release-alert-detect ping reaches a Hub that knows the route. See
+  // issue #51 for why detecting on Tag Release directly was wrong.
+  it("triggers release-alert-detect on a successful CI run for a tag", async () => {
     const body = makePayload({
       action: "completed",
       workflow_run: {
-        id: 77777, name: "Tag Release", head_branch: "main",
+        id: 77777, name: "CI", head_branch: "v0.0.43",
         status: "completed", conclusion: "success",
         html_url: "https://github.com/ippoan/foo/actions/runs/77777",
         actor: { login: "yhonda" },
@@ -427,10 +429,14 @@ describe("POST /webhook", () => {
 
     const detectCalls = hubCalls.filter((c) => c.path === "/release-alert-detect");
     expect(detectCalls.length).toBe(1);
-    expect(detectCalls[0]!.body).toMatchObject({ repo: "ippoan/foo" });
+    // We pass the tag explicitly from head_branch so the Hub doesn't need to
+    // re-resolve "latest" (avoids races with rapid back-to-back releases).
+    expect(detectCalls[0]!.body).toMatchObject({
+      repo: "ippoan/foo", tag: "v0.0.43",
+    });
   });
 
-  it("does NOT trigger release-alert-detect for non-Tag-Release workflows", async () => {
+  it("does NOT trigger release-alert-detect for CI on a branch (non-tag)", async () => {
     const body = makePayload({
       action: "completed",
       workflow_run: {
@@ -458,13 +464,43 @@ describe("POST /webhook", () => {
     expect(hubCalls.filter((c) => c.path === "/release-alert-detect")).toHaveLength(0);
   });
 
-  it("does NOT trigger release-alert-detect for failed Tag Release runs", async () => {
+  it("does NOT trigger release-alert-detect for failed CI on a tag", async () => {
     const body = makePayload({
       action: "completed",
       workflow_run: {
-        id: 22222, name: "Tag Release", head_branch: "main",
+        id: 22222, name: "CI", head_branch: "v0.0.43",
         status: "completed", conclusion: "failure",
         html_url: "https://github.com/ippoan/foo/actions/runs/22222",
+        actor: { login: "yhonda" },
+        updated_at: "2026-05-12T10:00:00Z",
+        run_started_at: "2026-05-12T09:59:00Z",
+      },
+      repository: { full_name: "ippoan/foo" },
+    });
+    const sig = await sign(body, WEBHOOK_SECRET);
+    const ctx = createExecutionContext();
+    await worker.fetch(
+      new Request("http://localhost/webhook", {
+        method: "POST",
+        body,
+        headers: { "X-Hub-Signature-256": sig, "X-GitHub-Event": "workflow_run" },
+      }),
+      testEnv(),
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+    expect(hubCalls.filter((c) => c.path === "/release-alert-detect")).toHaveLength(0);
+  });
+
+  // Regression guard for issue #51: Tag Release directly must NOT fire — the
+  // Hub it would reach is still on the previous version's deploy.
+  it("does NOT trigger release-alert-detect on a Tag Release workflow completion", async () => {
+    const body = makePayload({
+      action: "completed",
+      workflow_run: {
+        id: 33333, name: "Tag Release", head_branch: "main",
+        status: "completed", conclusion: "success",
+        html_url: "https://github.com/ippoan/foo/actions/runs/33333",
         actor: { login: "yhonda" },
         updated_at: "2026-05-12T10:00:00Z",
         run_started_at: "2026-05-12T09:59:00Z",
