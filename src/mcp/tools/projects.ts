@@ -122,6 +122,133 @@ function summarizeField(f: ProjectField) {
   return base;
 }
 
+// --------------------------------------------------------------------------
+// Exported read-side helpers (used by both MCP tool handlers and the SSR
+// `/issues` page in `src/issues-page.ts`). Keep these as plain async
+// functions so callers don't have to go through the MCP transport.
+// --------------------------------------------------------------------------
+
+export interface OrgProject {
+  id: string;
+  number: number;
+  title: string;
+  url: string;
+  closed: boolean;
+  shortDescription: string | null;
+}
+
+export interface OrgProjectsResult {
+  org: string;
+  projects: OrgProject[];
+}
+
+/**
+ * List open (and optionally closed) Projects v2 across one or more orgs.
+ * `validateOrg` is enforced for every org before any network call.
+ */
+export async function fetchOrgProjects(
+  token: string,
+  params: { orgs: string[]; first?: number; include_closed?: boolean },
+): Promise<OrgProjectsResult[]> {
+  const { orgs, first = 50, include_closed = false } = params;
+  for (const o of orgs) validateOrg(o);
+  return Promise.all(orgs.map(async (org) => {
+    const data = await githubGraphQL<{
+      organization: {
+        projectsV2: { nodes: OrgProject[] };
+      } | null;
+    }>(
+      token,
+      `query($org:String!,$first:Int!){
+        organization(login:$org){
+          projectsV2(first:$first, orderBy:{field:NUMBER,direction:DESC}){
+            nodes{ id number title url closed shortDescription }
+          }
+        }
+      }`,
+      { org, first },
+    );
+    const nodes = data.organization?.projectsV2.nodes ?? [];
+    const filtered = include_closed ? nodes : nodes.filter((p) => !p.closed);
+    return { org, projects: filtered };
+  }));
+}
+
+export interface ProjectRef {
+  org: string;
+  number: number;
+  title: string;
+  url: string;
+}
+
+/**
+ * Build a `repo#issueNumber → ProjectRef[]` map covering every open Project
+ * across the supplied orgs. Items that are PRs or draft issues are skipped
+ * (this map exists so the `/issues` page can flag which **issues** are on a
+ * board). One issue may show up in multiple Projects, hence the array value.
+ *
+ * Cost: one `projectsV2` list query per org, then one items query per open
+ * project — typically <20 GraphQL calls for the current orgs/projects volume,
+ * each well under 1 point of the 5000/h rate-limit budget.
+ */
+export async function fetchProjectIssueMap(
+  token: string,
+  params: { orgs: string[]; first?: number },
+): Promise<Map<string, ProjectRef[]>> {
+  const { orgs, first = 100 } = params;
+  const orgsProjects = await fetchOrgProjects(token, { orgs, include_closed: false });
+
+  const map = new Map<string, ProjectRef[]>();
+  await Promise.all(
+    orgsProjects.flatMap(({ org, projects }) =>
+      projects.map(async (p) => {
+        const data = await githubGraphQL<{
+          node: {
+            items: { nodes: Array<{
+              content: {
+                __typename: string;
+                number?: number;
+                repository?: { nameWithOwner: string };
+              } | null;
+            }> };
+          } | null;
+        }>(
+          token,
+          `query($id:ID!,$first:Int!){
+            node(id:$id){
+              ... on ProjectV2 {
+                items(first:$first){
+                  nodes{
+                    content{
+                      __typename
+                      ... on Issue { number repository{ nameWithOwner } }
+                    }
+                  }
+                }
+              }
+            }
+          }`,
+          { id: p.id, first },
+        );
+        const items = data.node?.items.nodes ?? [];
+        for (const item of items) {
+          const c = item.content;
+          if (!c || c.__typename !== "Issue") continue;
+          if (!c.repository || c.number === undefined) continue;
+          const key = `${c.repository.nameWithOwner}#${c.number}`;
+          const ref: ProjectRef = {
+            org, number: p.number, title: p.title, url: p.url,
+          };
+          const cur = map.get(key);
+          if (cur) cur.push(ref);
+          else map.set(key, [ref]);
+        }
+      }),
+    ),
+  );
+  return map;
+}
+
 export function registerProjectsTools(server: McpServer, token: string): void {
   // --------------------------------------------------------------------
   // Read tools
@@ -147,40 +274,20 @@ export function registerProjectsTools(server: McpServer, token: string): void {
       annotations: { readOnlyHint: true },
     },
     async ({ orgs, first, include_closed }) => {
-      for (const o of orgs) validateOrg(o);
-      const perOrg = await Promise.all(orgs.map(async (org) => {
-        const data = await githubGraphQL<{
-          organization: {
-            projectsV2: { nodes: Array<{
-              id: string; number: number; title: string;
-              url: string; closed: boolean; shortDescription: string | null;
-            }> };
-          } | null;
-        }>(
-          token,
-          `query($org:String!,$first:Int!){
-            organization(login:$org){
-              projectsV2(first:$first, orderBy:{field:NUMBER,direction:DESC}){
-                nodes{ id number title url closed shortDescription }
-              }
-            }
-          }`,
-          { org, first },
-        );
-        const nodes = data.organization?.projectsV2.nodes ?? [];
-        const filtered = include_closed ? nodes : nodes.filter((p) => !p.closed);
-        return {
-          org,
-          projects: filtered.map((p) => ({
-            number: p.number,
-            title: p.title,
-            url: p.url,
-            closed: p.closed,
-            shortDescription: p.shortDescription,
-          })),
-        };
+      const perOrg = await fetchOrgProjects(token, { orgs, first, include_closed });
+      // Tool shape stays the same (number/title/url/closed/shortDescription)
+      // — the `id` is internal-only and dropped here.
+      const result = perOrg.map(({ org, projects }) => ({
+        org,
+        projects: projects.map((p) => ({
+          number: p.number,
+          title: p.title,
+          url: p.url,
+          closed: p.closed,
+          shortDescription: p.shortDescription,
+        })),
       }));
-      return { content: [{ type: "text" as const, text: JSON.stringify(perOrg, null, 2) }] };
+      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
     },
   );
 
