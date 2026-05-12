@@ -166,14 +166,19 @@ describe("GET /issues", () => {
     expect(main!).toContain("org:ohishi-exp");
     expect(main!).not.toContain("repo:yhonda-ohishi/claude-");
 
-    // yhonda-ohishi call: org:yhonda-ohishi + repo: qualifiers (OR) for the
-    // two active claude tooling repos only.
-    const yhonda = decoded.find((d) => d.includes("org:yhonda-ohishi"));
+    // yhonda-ohishi call: repo: qualifiers (OR) for the two active claude
+    // tooling repos only — and CRUCIALLY no `org:yhonda-ohishi`. GitHub Search
+    // silently drops `repo:` when combined with `org:` (it widens the result
+    // to the entire org), so fetchOrgIssues must omit `org:` whenever the
+    // caller-supplied query contains a `repo:` qualifier. Regression guard
+    // for issue #53.
+    const yhonda = decoded.find((d) => d.includes("repo:yhonda-ohishi/claude-skills"));
     expect(yhonda).toBeDefined();
     expect(yhonda!).toContain("is:issue");
     expect(yhonda!).toContain("state:open");
     expect(yhonda!).toContain("repo:yhonda-ohishi/claude-skills");
     expect(yhonda!).toContain("repo:yhonda-ohishi/claude-hooks");
+    expect(yhonda!).not.toContain("org:yhonda-ohishi");
 
     for (const u of urls) expect(u).toContain("per_page=100");
   });

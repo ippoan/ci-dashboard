@@ -324,7 +324,10 @@ export function registerIssuesTools(server: McpServer, token: string): void {
     {
       description:
         "List issues across multiple orgs in one call (uses GitHub search). " +
-        "Filters by state/labels/assignee. PRs are excluded.",
+        "Filters by state/labels/assignee. PRs are excluded. " +
+        "If `query` contains `repo:owner/name`, the `orgs` allowlist is still " +
+        "validated but `org:` is omitted from the search (GitHub silently " +
+        "drops `repo:` when combined with `org:`).",
       inputSchema: {
         orgs: z.array(z.string()).min(1)
           .describe("Organization names (e.g. ['ippoan', 'ohishi-exp'])"),
@@ -390,9 +393,18 @@ export async function fetchOrgIssues(
 
   for (const o of orgs) validateOrg(o);
 
+  // GitHub Search silently drops `repo:` qualifiers when `org:` is also
+  // present in the same query — the result widens to the entire org. When
+  // the caller-supplied `query` already pins specific repos via `repo:`, omit
+  // the `org:` qualifier (the `repo:` already implies the owner). The
+  // `validateOrg` allowlist check above still runs, so this is safe.
+  const queryHasRepoFilter = !!query && /\brepo:/.test(query);
+
   const parts: string[] = ["is:issue"];
   if (state !== "all") parts.push(`state:${state}`);
-  for (const o of orgs) parts.push(`org:${o}`);
+  if (!queryHasRepoFilter) {
+    for (const o of orgs) parts.push(`org:${o}`);
+  }
   if (labels) for (const l of labels) parts.push(`label:"${l}"`);
   if (assignee) parts.push(`assignee:${assignee}`);
   if (query) parts.push(query);
