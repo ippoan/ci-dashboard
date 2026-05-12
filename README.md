@@ -88,6 +88,13 @@ wrangler secret put GITHUB_TOKEN
 
 `repo` / `workflow` スコープが必要 (issue 書込・PR マージ・workflow dispatch のため)。
 
+## 開発ルール
+
+- branch / worktree 命名: [`CLAUDE.md`](CLAUDE.md)
+- PR description / commit message のキーワード規約と release 時の close
+  フロー: [`docs/branch-issue-linking.md`](docs/branch-issue-linking.md)
+- PR テンプレート: [`.github/pull_request_template.md`](.github/pull_request_template.md)
+
 ## ツール追加手順
 
 1. `src/mcp/tools/<category>.ts` の `registerXxxTools` 関数内に `server.registerTool(...)` を追加
