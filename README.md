@@ -38,6 +38,7 @@ src/
 | `list_org_issues` | issues | read | List issues across multiple orgs in one call (search-backed, PRs excluded). |
 | `get_issue` | issues | read | Get issue details including body and comments. |
 | `create_issue` | issues | write | Create a new issue in a repository. |
+| `update_issue` | issues | write | Update title/body/labels/assignees/milestone of an existing issue. |
 | `add_issue_comment` | issues | write | Add a comment to an existing issue or PR. |
 | `add_labels` | issues | write | Add labels to an issue or PR. |
 | `remove_label` | issues | write | Remove a single label from an issue or PR. |

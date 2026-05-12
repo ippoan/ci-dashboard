@@ -126,6 +126,59 @@ export function registerIssuesTools(server: McpServer, token: string): void {
   );
 
   server.registerTool(
+    "update_issue",
+    {
+      description:
+        "Update an existing issue's title / body / labels / assignees / milestone. " +
+        "State changes are intentionally not supported here — use close_issue / reopen_issue.",
+      inputSchema: {
+        repo: z.string().describe("Repository (e.g. 'rust-alc-api')"),
+        issue_number: z.number().describe("Issue number"),
+        title: z.string().optional().describe("New title"),
+        body: z.string().optional().describe("New body (markdown). Pass '' to clear."),
+        labels: z.array(z.string()).optional()
+          .describe("Replace labels with this list (pass [] to remove all)"),
+        assignees: z.array(z.string()).optional()
+          .describe("Replace assignees with this list (pass [] to clear)"),
+        milestone: z.number().nullable().optional()
+          .describe("Milestone number, or null to detach"),
+      },
+      annotations: { destructiveHint: true },
+    },
+    async ({ repo, issue_number, title, body, labels, assignees, milestone }) => {
+      const { owner, repo: name } = parseRepo(repo);
+      validateOrg(owner);
+
+      const payload: Record<string, unknown> = {};
+      if (title !== undefined) payload.title = title;
+      if (body !== undefined) payload.body = body;
+      if (labels !== undefined) payload.labels = labels;
+      if (assignees !== undefined) payload.assignees = assignees;
+      if (milestone !== undefined) payload.milestone = milestone;
+
+      if (Object.keys(payload).length === 0) {
+        throw new Error(
+          "update_issue: at least one of title/body/labels/assignees/milestone must be provided",
+        );
+      }
+
+      const updated = await githubApi<Issue>(
+        token, "PATCH", `/repos/${owner}/${name}/issues/${issue_number}`, payload,
+      );
+
+      const result = {
+        number: updated.number,
+        title: updated.title,
+        state: updated.state,
+        labels: updated.labels.map((l) => l.name),
+        url: updated.html_url,
+      };
+
+      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    },
+  );
+
+  server.registerTool(
     "add_issue_comment",
     {
       description: "Add a comment to an existing issue or pull request.",
