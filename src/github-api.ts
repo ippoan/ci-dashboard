@@ -1,5 +1,5 @@
 const GITHUB_API = "https://api.github.com";
-const ALLOWED_ORGS = ["ippoan", "ohishi-exp"];
+const ALLOWED_ORGS = ["ippoan", "ohishi-exp", "yhonda-ohishi"];
 const DEFAULT_ORG = "ippoan";
 
 export function parseRepo(repo: string): { owner: string; repo: string } {
