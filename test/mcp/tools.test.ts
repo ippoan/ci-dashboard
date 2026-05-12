@@ -390,6 +390,48 @@ describe("Issues write tool logic", () => {
     expect(fetchSpy.mock.calls[0]![1]!.method).toBe("PATCH");
   });
 
+  it("update_issue PATCHes only fields that were provided", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({
+        number: 99,
+        title: "new title",
+        state: "open",
+        labels: [{ name: "bug" }],
+        html_url: "https://github.com/ippoan/ci-dashboard/issues/99",
+      }),
+    );
+
+    const { owner, repo } = parseRepo("ci-dashboard");
+    await githubApi("token", "PATCH", `/repos/${owner}/${repo}/issues/99`,
+      { title: "new title", body: "new body" });
+
+    const body = JSON.parse(fetchSpy.mock.calls[0]![1]!.body as string);
+    expect(body.title).toBe("new title");
+    expect(body.body).toBe("new body");
+    expect(body.labels).toBeUndefined();
+    expect(body.assignees).toBeUndefined();
+    expect(body.state).toBeUndefined();
+    expect(fetchSpy.mock.calls[0]![1]!.method).toBe("PATCH");
+  });
+
+  it("update_issue forwards empty arrays so labels/assignees can be cleared", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({
+        number: 99, title: "t", state: "open", labels: [],
+        html_url: "https://github.com/ippoan/ci-dashboard/issues/99",
+      }),
+    );
+
+    const { owner, repo } = parseRepo("ci-dashboard");
+    await githubApi("token", "PATCH", `/repos/${owner}/${repo}/issues/99`,
+      { labels: [], assignees: [], milestone: null });
+
+    const body = JSON.parse(fetchSpy.mock.calls[0]![1]!.body as string);
+    expect(body.labels).toEqual([]);
+    expect(body.assignees).toEqual([]);
+    expect(body.milestone).toBeNull();
+  });
+
   it("reopen_issue PATCHes state=open without state_reason", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       Response.json({
