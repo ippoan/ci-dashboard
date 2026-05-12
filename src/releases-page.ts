@@ -9,6 +9,11 @@ import {
 } from "./release-helpers";
 import { renderTabs, TAB_STYLES } from "./nav-tabs";
 
+// `/releases` (no params) renders a list of "recent releases" — every watched
+// repo (from Hub `/statuses`) with its latest semver-sorted tags, each linking
+// to the detailed candidate view. The lookup form is appended below as a
+// fallback for older / arbitrary tags.
+//
 // `/releases?repo=owner/name&tag=vX.Y.Z` renders the release confirmation
 // view: every issue touched by commits in this tag's range, with a checkbox
 // per row so the operator can close them in one POST after eyeballing the
@@ -20,7 +25,7 @@ import { renderTabs, TAB_STYLES } from "./nav-tabs";
 
 export async function handleReleasesPage(
   req: Request,
-  env: { GITHUB_TOKEN: string },
+  env: { GITHUB_TOKEN: string; CI_HUB: DurableObjectNamespace },
 ): Promise<Response> {
   const url = new URL(req.url);
   const repoParam = url.searchParams.get("repo");
@@ -30,6 +35,13 @@ export async function handleReleasesPage(
   const closedFlash = numericList(url.searchParams.get("closed"));
   const failedFlash = numericList(url.searchParams.get("failed"));
 
+  // No params at all → "Recent releases" landing page driven by Hub.
+  if (!repoParam && !tag) {
+    return await handleIndexPage(env);
+  }
+
+  // Only one of repo/tag given → keep the lookup form so the operator can
+  // finish filling in the missing field.
   if (!repoParam || !tag) {
     return html(renderForm(repoParam, tag), 200);
   }
@@ -46,6 +58,51 @@ export async function handleReleasesPage(
   }
 
   return html(renderHtml(result, closedFlash, failedFlash), 200);
+}
+
+// --------------------------------------------------------------------------
+// "Recent releases" landing page (no params)
+// --------------------------------------------------------------------------
+
+interface RepoTags { repo: string; tags: string[] }
+
+async function handleIndexPage(
+  env: { GITHUB_TOKEN: string; CI_HUB: DurableObjectNamespace },
+): Promise<Response> {
+  // 1. Watched repos come from the Hub's status cache — every repo that has
+  //    ever fired a CI run lives there, which is the same source the
+  //    dashboard sidebar uses.
+  let repos: string[] = [];
+  try {
+    const hubId = env.CI_HUB.idFromName("singleton");
+    const hub = env.CI_HUB.get(hubId);
+    const res = await hub.fetch(new Request("http://hub/statuses"));
+    if (res.ok) {
+      const statuses = await res.json<Array<{ repo: string }>>();
+      repos = [...new Set(statuses.map((s) => s.repo))].sort();
+    }
+  } catch { /* empty list → page falls back to lookup form only */ }
+
+  // 2. Latest 5 semver tags per repo in parallel. Per-repo failures are
+  //    swallowed: a deleted repo or rate-limited org shouldn't sink the page.
+  const items: RepoTags[] = await Promise.all(repos.map(async (repo) => {
+    try {
+      const { owner, repo: name } = parseRepo(repo);
+      validateOrg(owner);
+      const tags = await githubApi<TagListItem[]>(
+        env.GITHUB_TOKEN, "GET", `/repos/${owner}/${name}/tags`, undefined,
+        { per_page: "10" },
+      );
+      return {
+        repo,
+        tags: sortSemverDesc(tags.map((t) => t.name)).slice(0, 5),
+      };
+    } catch {
+      return { repo, tags: [] };
+    }
+  }));
+
+  return html(renderIndex(items), 200);
 }
 
 // --------------------------------------------------------------------------
@@ -319,11 +376,50 @@ function renderForm(repo: string | null, tag: string | null): string {
 <title>Release confirmation</title><style>${STYLES}</style>
 </head><body>
 <header>
-  <div class="nav"><a href="/">← CI Dashboard</a> · <a href="/issues">📋 Open Issues</a></div>
+  ${renderTabs("releases")}
   <h1>🏷️ Release confirmation</h1>
   <div class="summary">Enter a release tag to review the issues it touched.</div>
 </header>
-<form method="GET" action="/releases" class="lookup">
+${renderLookupForm(repo, tag)}
+</body></html>`;
+}
+
+function renderIndex(items: RepoTags[]): string {
+  const populated = items.filter((i) => i.tags.length > 0);
+  const repoBlocks = populated.length === 0
+    ? `<div class="empty">🤷 No watched repos with releases yet. Look one up below.</div>`
+    : populated.map((i) => renderIndexRepo(i)).join("\n");
+
+  return `<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Releases — CI Dashboard</title><style>${STYLES}</style>
+</head><body>
+<header>
+  ${renderTabs("releases")}
+  <h1>🏷️ Releases</h1>
+  <div class="summary">Pick a tag to review the issues it touched.</div>
+</header>
+${repoBlocks}
+<h2 class="lookup-header">Look up another release</h2>
+${renderLookupForm(null, null)}
+</body></html>`;
+}
+
+function renderIndexRepo(item: RepoTags): string {
+  const tagLinks = item.tags.map((t) =>
+    `<li><a href="/releases?repo=${encodeURIComponent(item.repo)}&tag=${encodeURIComponent(t)}">${escapeHtml(t)}</a></li>`,
+  ).join("");
+  return `<section class="repo-card">
+    <h2><a href="https://github.com/${escapeHtml(item.repo)}/releases" target="_blank" rel="noopener">${escapeHtml(item.repo)}</a></h2>
+    <ul class="tag-list">${tagLinks}</ul>
+  </section>`;
+}
+
+// Bare `<form>` extracted so both the index landing page and the
+// one-param-given page share the same input layout.
+function renderLookupForm(repo: string | null, tag: string | null): string {
+  return `<form method="GET" action="/releases" class="lookup">
   <label>repo (<code>owner/name</code>)
     <input name="repo" required placeholder="ippoan/ci-dashboard"
       value="${escapeHtml(repo ?? "")}">
@@ -333,8 +429,7 @@ function renderForm(repo: string | null, tag: string | null): string {
       value="${escapeHtml(tag ?? "")}">
   </label>
   <button type="submit">Look up</button>
-</form>
-</body></html>`;
+</form>`;
 }
 
 function renderError(msg: string): string {
@@ -404,6 +499,29 @@ const STYLES = `
   .flash.ok  { background: #1f3d28; border: 1px solid #238636; color: #a3e3b0; }
   .flash.err { background: #341a1f; border: 1px solid #f85149; color: #ffa198; }
   .flash a { color: inherit; text-decoration: underline; }
+
+  /* Recent releases landing page */
+  .repo-card {
+    background: #161b22; border: 1px solid #30363d;
+    border-radius: 8px; padding: 12px 16px; margin-bottom: 12px;
+  }
+  .repo-card h2 { font-size: 14px; font-weight: 600; margin-bottom: 8px; }
+  .repo-card h2 a { color: #c9d1d9; text-decoration: none; }
+  .repo-card h2 a:hover { color: #58a6ff; }
+  ul.tag-list { list-style: none; display: flex; flex-wrap: wrap; gap: 8px; }
+  ul.tag-list li a {
+    display: inline-block; padding: 4px 10px;
+    background: #0d1117; border: 1px solid #30363d;
+    border-radius: 12px; color: #58a6ff;
+    text-decoration: none; font-size: 13px;
+    font-variant-numeric: tabular-nums;
+  }
+  ul.tag-list li a:hover { background: #1f6feb22; border-color: #58a6ff; }
+  .lookup-header {
+    font-size: 12px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.5px; color: #8b949e;
+    margin: 24px 0 8px 0;
+  }
 `;
 
 // Minimal HTML escape, exported for tests.
