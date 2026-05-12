@@ -539,6 +539,52 @@ describe("GET /releases", () => {
     expect(html).not.toContain("yhonda-ohishi/claude-hooks");
   });
 
+  // #59: once every referenced issue in a repo card is closed, the
+  // "✅ Close selected as released" button has nothing to act on and
+  // round-trips empty. Hide it; keep the closed-history <details> as
+  // audit context.
+  it("hides the close button when all visible candidates are already closed", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (req) => {
+      const url = typeof req === "string" ? req : (req as Request).url;
+      if (url.includes("/repos/ippoan/ci-dashboard/tags")) {
+        return Response.json([
+          { name: "v1.0.0", commit: { sha: "a" } },
+          { name: "v0.9.0", commit: { sha: "b" } },
+        ]);
+      }
+      if (url.includes("/compare/v0.9.0...v1.0.0")) {
+        return Response.json({
+          commits: [{ sha: "x", commit: { message: "feat\n\nRefs #1" } }],
+        });
+      }
+      // The referenced issue is already closed → block.issues is non-empty
+      // (so the tag block renders) but hasVisibleCandidate is false.
+      if (url.endsWith("/repos/ippoan/ci-dashboard/issues/1")) {
+        return Response.json({
+          number: 1, title: "old work", state: "closed",
+          labels: [], assignees: [],
+          html_url: "https://github.com/ippoan/ci-dashboard/issues/1",
+          updated_at: "2026-05-01T00:00:00Z",
+        });
+      }
+      return new Response(`not stubbed: ${url}`, { status: 500 });
+    });
+
+    const e = testEnv({ watched: ["ippoan/ci-dashboard"] });
+    const req = new Request("http://localhost/releases");
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(req, e, ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    // Card itself still renders so the closed-history <details> stays visible.
+    expect(html).toContain("ippoan/ci-dashboard");
+    expect(html).toContain("1 closed issue");
+    // But the actions row (and its button) is gone.
+    expect(html).not.toContain("Close selected as released");
+  });
+
   it("does not turn an unallowlisted tag-less repo into a synthetic block", async () => {
     // Guard against the auto-merge regression the user called out: a PR repo
     // briefly without tags must NOT show its main-branch commits here.
