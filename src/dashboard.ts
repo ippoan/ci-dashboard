@@ -234,11 +234,60 @@ export function handleDashboard(): Response {
     .recheck-btn:disabled { opacity: 0.5; cursor: not-allowed; }
     .recheck-btn.loading { animation: pulse 1.5s infinite; }
     .btn-group { display: flex; gap: 6px; }
+
+    /* Release alert banners — appear after a Tag Release workflow completes
+       when the release range references at least one still-open issue. They
+       sit between the page title and the status bar so the operator sees
+       them as soon as they open the dashboard. */
+    .release-banners { margin-bottom: 16px; }
+    .release-banner {
+      background: #3b2c0e;
+      border: 1px solid #d29922;
+      border-left: 4px solid #d29922;
+      border-radius: 6px;
+      padding: 10px 14px;
+      margin-bottom: 8px;
+      font-size: 13px;
+      color: #e6cf80;
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .release-banner .repo-tag {
+      font-weight: 600;
+      color: #f5deb3;
+    }
+    .release-banner .repo-tag code {
+      background: #0d1117;
+      padding: 1px 6px;
+      border-radius: 4px;
+      color: #d2a8ff;
+      font-family: monospace;
+    }
+    .release-banner .review-link {
+      color: #58a6ff;
+      text-decoration: none;
+      font-weight: 600;
+      margin-left: auto;
+    }
+    .release-banner .review-link:hover { text-decoration: underline; }
+    .release-banner .issue-chip {
+      background: #0d1117;
+      border: 1px solid #30363d;
+      border-radius: 10px;
+      padding: 1px 8px;
+      font-size: 11px;
+      color: #c9d1d9;
+      text-decoration: none;
+    }
+    .release-banner .issue-chip:hover { color: #58a6ff; border-color: #58a6ff; }
   </style>
 </head>
 <body>
   ${renderTabs("dashboard")}
   <h1>CI Dashboard</h1>
+  <div id="release-banner-list" class="release-banners"></div>
   <div class="status-bar">
     WS: <span id="sse-status" class="disconnected">connecting...</span>
     &middot; Last update: <span id="last-update">-</span>
@@ -258,9 +307,47 @@ export function handleDashboard(): Response {
     const repoList = document.getElementById("repo-list");
     const sseStatus = document.getElementById("sse-status");
     const lastUpdate = document.getElementById("last-update");
+    const bannerList = document.getElementById("release-banner-list");
 
     let lastStatuses = [];
     let activeFilter = null;
+
+    function escapeHtml(s) {
+      return String(s)
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+    }
+
+    function renderBanners(alerts) {
+      if (!Array.isArray(alerts) || alerts.length === 0) {
+        bannerList.innerHTML = "";
+        return;
+      }
+      // Sort newest detectedAt first so the latest release floats to the top.
+      const sorted = [...alerts].sort((a, b) =>
+        (b.detectedAt || "").localeCompare(a.detectedAt || "")
+      );
+      bannerList.innerHTML = sorted.map(a => {
+        const reviewUrl = "/releases?repo=" + encodeURIComponent(a.repo)
+          + "&tag=" + encodeURIComponent(a.tag);
+        const chips = (a.openIssues || []).slice(0, 8).map(i =>
+          '<a class="issue-chip" href="' + escapeHtml(i.url)
+            + '" target="_blank" rel="noopener" title="' + escapeHtml(i.title) + '">'
+            + '#' + i.number + '</a>'
+        ).join("");
+        const more = (a.openIssues || []).length > 8
+          ? ' <span class="issue-chip">+' + ((a.openIssues.length) - 8) + '</span>'
+          : "";
+        const n = (a.openIssues || []).length;
+        return '<div class="release-banner">'
+          + '<span class="repo-tag">\\uD83C\\uDFF7\\uFE0F '
+          + escapeHtml(a.repo) + ' <code>' + escapeHtml(a.tag) + '</code> released</span>'
+          + chips + more
+          + '<a class="review-link" href="' + reviewUrl + '">'
+          + n + ' open related issue' + (n === 1 ? '' : 's') + ' \\u2192 review</a>'
+          + '</div>';
+      }).join("");
+    }
 
     function badgeClass(status, conclusion) {
       if (status === "completed") return conclusion || "success";
@@ -392,6 +479,42 @@ export function handleDashboard(): Response {
       }).join("");
     }
 
+    // Pull both endpoints in parallel. Used on initial connect, periodic
+    // poll (safety net for missed broadcasts), visibilitychange, and WS
+    // reconnect. Skipped while the tab is hidden to avoid wasted requests.
+    async function refreshAll() {
+      if (document.hidden) return;
+      try {
+        const [statuses, alerts] = await Promise.all([
+          fetch("/status").then(r => r.json()),
+          fetch("/release-alerts").then(r => r.json()).catch(() => []),
+        ]);
+        render(statuses);
+        renderBanners(alerts);
+        lastUpdate.textContent = new Date().toLocaleTimeString();
+      } catch {
+        // Ignore — next poll / event will retry
+      }
+    }
+
+    // Periodic safety-net poll. WS broadcasts can be missed during a network
+    // blip / CF Worker WebSocket idle timeout, so we re-fetch every 30s
+    // unconditionally while the tab is visible. Cost: 2 req/30s × visible tab.
+    let pollHandle = null;
+    function startPoll() {
+      if (pollHandle) return;
+      pollHandle = setInterval(refreshAll, 30000);
+    }
+    function stopPoll() {
+      if (pollHandle) { clearInterval(pollHandle); pollHandle = null; }
+    }
+
+    // Tab returned to foreground → catch up immediately. Covers the
+    // "PC slept overnight, dashboard is stale" case.
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) refreshAll();
+    });
+
     function connect() {
       const proto = location.protocol === "https:" ? "wss:" : "ws:";
       const ws = new WebSocket(proto + "//" + location.host + "/ws");
@@ -403,20 +526,35 @@ export function handleDashboard(): Response {
         pingInterval = setInterval(() => {
           if (ws.readyState === WebSocket.OPEN) ws.send("ping");
         }, 30000);
-        // Request initial data
-        fetch("/status").then(r => r.json()).then(data => {
-          render(data);
-          lastUpdate.textContent = new Date().toLocaleTimeString();
-        });
+        // Catch up + start safety-net polling
+        refreshAll();
+        startPoll();
       };
       ws.onmessage = (e) => {
         if (e.data === "pong") return;
-        const data = JSON.parse(e.data);
-        render(data);
-        lastUpdate.textContent = new Date().toLocaleTimeString();
+        try {
+          const msg = JSON.parse(e.data);
+          // Typed envelope (current server format).
+          if (msg && typeof msg === "object" && msg.type === "ci-statuses") {
+            render(msg.data);
+            lastUpdate.textContent = new Date().toLocaleTimeString();
+            return;
+          }
+          if (msg && typeof msg === "object" && msg.type === "release-alerts") {
+            renderBanners(msg.data);
+            lastUpdate.textContent = new Date().toLocaleTimeString();
+            return;
+          }
+          // Legacy fallback: bare CIStatus[] array (older Hub versions).
+          if (Array.isArray(msg)) {
+            render(msg);
+            lastUpdate.textContent = new Date().toLocaleTimeString();
+          }
+        } catch { /* ignore malformed message */ }
       };
       ws.onclose = () => {
         if (pingInterval) clearInterval(pingInterval);
+        stopPoll();
         sseStatus.textContent = "reconnecting...";
         sseStatus.className = "disconnected";
         setTimeout(connect, 3000);

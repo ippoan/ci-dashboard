@@ -1,5 +1,5 @@
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import worker from "../src/index";
 import type { Env } from "../src/index";
 import type { CIStatus, JobStatus } from "../src/webhook";
@@ -42,11 +42,32 @@ function makePayload(overrides: Record<string, unknown> = {}) {
   });
 }
 
+// Tracks calls forwarded to the Hub. Tests use this to assert that side
+// effects (e.g. release-alert-detect on a Tag Release completion) actually
+// fire on top of the primary update-run path.
+const hubCalls: Array<{ path: string; body: unknown }> = [];
+
+function resetHubCalls() { hubCalls.length = 0; }
+
 // Mock Hub DO that performs KV operations like the real Hub
 function mockHub(kv: KVNamespace): DurableObjectStub {
   return {
     fetch: async (req: Request) => {
       const url = new URL(req.url);
+      // Record every dispatch for cross-handler assertions. Body is best-effort
+      // — non-JSON requests are kept as raw text.
+      try {
+        const text = await req.clone().text();
+        let parsed: unknown = text;
+        try { parsed = JSON.parse(text); } catch { /* keep raw */ }
+        hubCalls.push({ path: url.pathname, body: parsed });
+      } catch { /* ignore */ }
+
+      if (url.pathname === "/release-alert-detect") {
+        // Side-channel for Tag Release completion. The real Hub fans out to
+        // GitHub; the mock just acks.
+        return new Response("OK");
+      }
 
       if (url.pathname === "/update-run") {
         const payload = await req.json() as {
@@ -133,6 +154,8 @@ function testEnv(): Env {
 }
 
 describe("POST /webhook", () => {
+  beforeEach(() => { resetHubCalls(); });
+
   it("rejects missing signature", async () => {
     const req = new Request("http://localhost/webhook", {
       method: "POST",
@@ -370,5 +393,96 @@ describe("POST /webhook", () => {
     );
     await waitOnExecutionContext(ctx);
     expect(res.status).toBe(200);
+  });
+
+  // Tag Release detection: when the `Tag Release` workflow finishes
+  // successfully we side-channel a /release-alert-detect to the Hub so the
+  // dashboard banner can pick up any open `Refs #N` issues.
+  it("triggers release-alert-detect on a successful Tag Release completion", async () => {
+    const body = makePayload({
+      action: "completed",
+      workflow_run: {
+        id: 77777, name: "Tag Release", head_branch: "main",
+        status: "completed", conclusion: "success",
+        html_url: "https://github.com/ippoan/foo/actions/runs/77777",
+        actor: { login: "yhonda" },
+        updated_at: "2026-05-12T10:00:00Z",
+        run_started_at: "2026-05-12T09:59:00Z",
+      },
+      repository: { full_name: "ippoan/foo" },
+    });
+    const sig = await sign(body, WEBHOOK_SECRET);
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(
+      new Request("http://localhost/webhook", {
+        method: "POST",
+        body,
+        headers: { "X-Hub-Signature-256": sig, "X-GitHub-Event": "workflow_run" },
+      }),
+      testEnv(),
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+    expect(res.status).toBe(200);
+
+    const detectCalls = hubCalls.filter((c) => c.path === "/release-alert-detect");
+    expect(detectCalls.length).toBe(1);
+    expect(detectCalls[0]!.body).toMatchObject({ repo: "ippoan/foo" });
+  });
+
+  it("does NOT trigger release-alert-detect for non-Tag-Release workflows", async () => {
+    const body = makePayload({
+      action: "completed",
+      workflow_run: {
+        id: 11111, name: "CI", head_branch: "main",
+        status: "completed", conclusion: "success",
+        html_url: "https://github.com/ippoan/foo/actions/runs/11111",
+        actor: { login: "yhonda" },
+        updated_at: "2026-05-12T10:00:00Z",
+        run_started_at: "2026-05-12T09:59:00Z",
+      },
+      repository: { full_name: "ippoan/foo" },
+    });
+    const sig = await sign(body, WEBHOOK_SECRET);
+    const ctx = createExecutionContext();
+    await worker.fetch(
+      new Request("http://localhost/webhook", {
+        method: "POST",
+        body,
+        headers: { "X-Hub-Signature-256": sig, "X-GitHub-Event": "workflow_run" },
+      }),
+      testEnv(),
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+    expect(hubCalls.filter((c) => c.path === "/release-alert-detect")).toHaveLength(0);
+  });
+
+  it("does NOT trigger release-alert-detect for failed Tag Release runs", async () => {
+    const body = makePayload({
+      action: "completed",
+      workflow_run: {
+        id: 22222, name: "Tag Release", head_branch: "main",
+        status: "completed", conclusion: "failure",
+        html_url: "https://github.com/ippoan/foo/actions/runs/22222",
+        actor: { login: "yhonda" },
+        updated_at: "2026-05-12T10:00:00Z",
+        run_started_at: "2026-05-12T09:59:00Z",
+      },
+      repository: { full_name: "ippoan/foo" },
+    });
+    const sig = await sign(body, WEBHOOK_SECRET);
+    const ctx = createExecutionContext();
+    await worker.fetch(
+      new Request("http://localhost/webhook", {
+        method: "POST",
+        body,
+        headers: { "X-Hub-Signature-256": sig, "X-GitHub-Event": "workflow_run" },
+      }),
+      testEnv(),
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+    expect(hubCalls.filter((c) => c.path === "/release-alert-detect")).toHaveLength(0);
   });
 });

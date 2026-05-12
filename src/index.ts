@@ -37,8 +37,12 @@ app.get("/issues", (c) => handleIssuesPage(c.env));
 // Release confirmation view (SSR + POST close action)
 // See issue #35 + CLAUDE.md `release / close フロー`.
 app.get("/releases", (c) => handleReleasesPage(c.req.raw, c.env));
-app.post("/api/release-close", (c) => handleReleaseClose(c.req.raw, c.env));
-app.post("/api/release-close-batch", (c) => handleReleaseCloseBatch(c.req.raw, c.env));
+// Pass hub + executionCtx so the close handlers can fire-and-forget a
+// `/release-alert-recompute` to refresh the dashboard banner.
+app.post("/api/release-close",
+  (c) => handleReleaseClose(c.req.raw, c.env, getHub(c.env), c.executionCtx));
+app.post("/api/release-close-batch",
+  (c) => handleReleaseCloseBatch(c.req.raw, c.env, getHub(c.env), c.executionCtx));
 
 // WebSocket
 app.get("/ws", (c) => getHub(c.env).fetch(c.req.raw));
@@ -49,6 +53,19 @@ app.post("/webhook", (c) => handleWebhook(c.req.raw, c.env, getHub(c.env)));
 // Status
 app.get("/status", async (c) => {
   const res = await getHub(c.env).fetch(new Request("http://hub/statuses"));
+  const body = await res.text();
+  return new Response(body, {
+    headers: {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*",
+    },
+  });
+});
+
+// Release banner alerts (consumed by dashboard JS for the post-tag-release
+// banner). Same proxy pattern as /status — Hub holds the in-memory cache.
+app.get("/release-alerts", async (c) => {
+  const res = await getHub(c.env).fetch(new Request("http://hub/release-alerts"));
   const body = await res.text();
   return new Response(body, {
     headers: {
