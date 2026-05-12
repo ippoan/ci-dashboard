@@ -574,6 +574,94 @@ export function registerProjectsTools(server: McpServer, token: string): void {
       return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
     },
   );
+
+  server.registerTool(
+    "create_project",
+    {
+      description:
+        "Create a new Projects v2 project under an organization. Returns the new " +
+        "project's id/number/title/url — `number` can be fed directly into " +
+        "`add_issue_to_project` / `set_project_item_field` / `create_project_field`. " +
+        "If `short_description` is provided, a follow-up `updateProjectV2` mutation " +
+        "is issued (the create mutation does not accept it). On that follow-up " +
+        "failing, the created project is still returned with a `warning` field.",
+      inputSchema: {
+        org: z.string().describe("Organization login (e.g. 'ippoan')"),
+        title: z.string().min(1).describe("Project title"),
+        short_description: z.string().optional()
+          .describe("Optional short description (applied via a second updateProjectV2 mutation)"),
+      },
+      annotations: { destructiveHint: true },
+    },
+    async ({ org, title, short_description }) => {
+      validateOrg(org);
+
+      // Step 1: resolve the org's GraphQL node ID (needed as ownerId).
+      const ownerResult = await githubGraphQL<{
+        organization: { id: string } | null;
+      }>(
+        token,
+        `query($org:String!){ organization(login:$org){ id } }`,
+        { org },
+      );
+      const ownerId = ownerResult.organization?.id;
+      if (!ownerId) throw new GitHubApiError(404, `Organization not found: ${org}`);
+
+      // Step 2: createProjectV2 (title only — shortDescription is not part of CreateProjectV2Input).
+      const created = await githubGraphQL<{
+        createProjectV2: { projectV2: {
+          id: string; number: number; title: string; url: string;
+          shortDescription: string | null;
+        } };
+      }>(
+        token,
+        `mutation($ownerId:ID!,$title:String!){
+          createProjectV2(input:{ownerId:$ownerId, title:$title}){
+            projectV2{ id number title url shortDescription }
+          }
+        }`,
+        { ownerId, title },
+      );
+      const project = created.createProjectV2.projectV2;
+
+      const result: {
+        id: string; number: number; title: string; url: string;
+        shortDescription: string | null; warning?: string;
+      } = {
+        id: project.id,
+        number: project.number,
+        title: project.title,
+        url: project.url,
+        shortDescription: project.shortDescription,
+      };
+
+      // Step 3 (optional): apply shortDescription. If this fails the project
+      // already exists — surface that fact via `warning` instead of throwing so
+      // the caller knows to retry only the description.
+      if (short_description !== undefined) {
+        try {
+          const updated = await githubGraphQL<{
+            updateProjectV2: { projectV2: { shortDescription: string | null } };
+          }>(
+            token,
+            `mutation($id:ID!,$desc:String!){
+              updateProjectV2(input:{projectId:$id, shortDescription:$desc}){
+                projectV2{ shortDescription }
+              }
+            }`,
+            { id: project.id, desc: short_description },
+          );
+          result.shortDescription = updated.updateProjectV2.projectV2.shortDescription;
+        } catch (err) {
+          result.warning =
+            `Project created (number=${project.number}) but setting shortDescription failed: ` +
+            (err instanceof Error ? err.message : String(err));
+        }
+      }
+
+      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    },
+  );
 }
 
 // --------------------------------------------------------------------------

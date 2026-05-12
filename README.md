@@ -60,6 +60,7 @@ src/
 | `remove_project_item` | projects | write | Remove an item from a Project (does not delete the issue). |
 | `set_project_item_field` | projects | write | Update a field value on a Project item (single_select/iteration resolved by name). |
 | `create_project_field` | projects | write | Create a custom field (text/number/date/single_select). |
+| `create_project` | projects | write | Create a new Project under an org; optional `short_description` is applied via a follow-up `updateProjectV2`. |
 | `get_file_tree` | repository | read | Get the file tree of a repository. |
 | `get_file_content` | repository | read | Get file content with optional line range. |
 | `search_code` | repository | read | grep-like code search. |
