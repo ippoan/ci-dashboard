@@ -7,6 +7,7 @@ import {
   previousTag,
   computeWarnings,
 } from "./release-helpers";
+import { renderTabs, TAB_STYLES } from "./nav-tabs";
 
 // `/releases?repo=owner/name&tag=vX.Y.Z` renders the release confirmation
 // view: every issue touched by commits in this tag's range, with a checkbox
@@ -255,7 +256,7 @@ function renderHtml(
 </head>
 <body>
   <header>
-    <div class="nav"><a href="/">← CI Dashboard</a> · <a href="/issues">📋 Open Issues</a></div>
+    ${renderTabs("releases")}
     <h1>🏷️ Release confirmation</h1>
     <div class="summary">${summary}</div>
   </header>
@@ -340,7 +341,7 @@ function renderError(msg: string): string {
   return `<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><title>Release confirmation — Error</title>
 <style>${STYLES}</style></head><body>
-<header><div class="nav"><a href="/">← CI Dashboard</a></div>
+<header>${renderTabs("releases")}
 <h1>🏷️ Release confirmation</h1></header>
 <div class="flash err">${escapeHtml(msg)}</div>
 </body></html>`;
@@ -357,9 +358,7 @@ const STYLES = `
     max-width: 1200px; margin: 0 auto;
   }
   header { margin-bottom: 16px; }
-  header .nav { font-size: 13px; margin-bottom: 8px; }
-  header .nav a { color: #58a6ff; text-decoration: none; }
-  header .nav a:hover { text-decoration: underline; }
+  ${TAB_STYLES}
   h1 { font-size: 20px; color: #58a6ff; }
   .summary { font-size: 13px; color: #8b949e; margin-top: 4px; }
   .summary code { background: #161b22; padding: 1px 6px; border-radius: 4px; color: #d2a8ff; }
