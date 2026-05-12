@@ -432,4 +432,111 @@ describe("Projects v2 tools — integration via MCP server", () => {
     expect(items[0]!.content.repo).toBe("ippoan/ci-dashboard");
     expect(items[0]!.fields).toEqual({ Status: "In Progress", Epic: "epic-001" });
   });
+
+  it("create_project resolves ownerId then creates and returns id/number/title/url", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(Response.json({
+        data: { organization: { id: "O_ippoan" } },
+      }))
+      .mockResolvedValueOnce(Response.json({
+        data: { createProjectV2: { projectV2: {
+          id: "PVT_new", number: 7, title: "監視カメラ死活管理",
+          url: "https://github.com/orgs/ippoan/projects/7",
+          shortDescription: null,
+        } } },
+      }));
+
+    const result = await callTool("create_project", {
+      org: "ippoan", title: "監視カメラ死活管理",
+    }) as { id: string; number: number; title: string; url: string };
+
+    expect(result.id).toBe("PVT_new");
+    expect(result.number).toBe(7);
+    expect(result.title).toBe("監視カメラ死活管理");
+    expect(result.url).toBe("https://github.com/orgs/ippoan/projects/7");
+
+    // ownerId query
+    const ownerQ = JSON.parse(fetchSpy.mock.calls[0]![1]!.body as string);
+    expect(ownerQ.query).toContain("organization(login:$org)");
+    expect(ownerQ.variables).toEqual({ org: "ippoan" });
+
+    // createProjectV2 mutation
+    const createQ = JSON.parse(fetchSpy.mock.calls[1]![1]!.body as string);
+    expect(createQ.query).toContain("createProjectV2");
+    expect(createQ.variables.ownerId).toBe("O_ippoan");
+    expect(createQ.variables.title).toBe("監視カメラ死活管理");
+  });
+
+  it("create_project applies short_description via a second updateProjectV2 mutation", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(Response.json({
+        data: { organization: { id: "O_ippoan" } },
+      }))
+      .mockResolvedValueOnce(Response.json({
+        data: { createProjectV2: { projectV2: {
+          id: "PVT_new", number: 7, title: "T",
+          url: "https://github.com/orgs/ippoan/projects/7",
+          shortDescription: null,
+        } } },
+      }))
+      .mockResolvedValueOnce(Response.json({
+        data: { updateProjectV2: { projectV2: { shortDescription: "epic-001 横断管理" } } },
+      }));
+
+    const result = await callTool("create_project", {
+      org: "ippoan", title: "T", short_description: "epic-001 横断管理",
+    }) as { number: number; shortDescription: string | null; warning?: string };
+
+    expect(result.number).toBe(7);
+    expect(result.shortDescription).toBe("epic-001 横断管理");
+    expect(result.warning).toBeUndefined();
+
+    const updateQ = JSON.parse(fetchSpy.mock.calls[2]![1]!.body as string);
+    expect(updateQ.query).toContain("updateProjectV2");
+    expect(updateQ.variables).toEqual({ id: "PVT_new", desc: "epic-001 横断管理" });
+  });
+
+  it("create_project returns the project + warning when shortDescription update fails", async () => {
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(Response.json({
+        data: { organization: { id: "O_ippoan" } },
+      }))
+      .mockResolvedValueOnce(Response.json({
+        data: { createProjectV2: { projectV2: {
+          id: "PVT_new", number: 7, title: "T",
+          url: "https://github.com/orgs/ippoan/projects/7",
+          shortDescription: null,
+        } } },
+      }))
+      .mockResolvedValueOnce(Response.json({
+        errors: [{ message: "rate limited" }],
+      }));
+
+    const result = await callTool("create_project", {
+      org: "ippoan", title: "T", short_description: "x",
+    }) as { number: number; shortDescription: string | null; warning?: string };
+
+    // Project still surfaced — caller can retry just the description.
+    expect(result.number).toBe(7);
+    expect(result.shortDescription).toBeNull();
+    expect(result.warning).toMatch(/Project created \(number=7\).*rate limited/);
+  });
+
+  it("create_project throws 404 when org not found", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(Response.json({
+      data: { organization: null },
+    }));
+
+    await expect(callTool("create_project", {
+      org: "ippoan", title: "T",
+    })).rejects.toThrow(/Organization not found: ippoan/);
+  });
+
+  it("create_project rejects disallowed orgs (no fetch issued)", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    await expect(callTool("create_project", {
+      org: "evil-org", title: "T",
+    })).rejects.toThrow(/not allowed/);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
 });
