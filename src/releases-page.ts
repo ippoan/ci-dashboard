@@ -595,6 +595,17 @@ function renderIndexRepo(view: RepoView): string {
     .map((b) => renderTagBlock(view.repo, b))
     .join("\n");
 
+  // When every referenced issue across the visible tag blocks is already
+  // closed, the form has nothing to actually do — clicking the button would
+  // just round-trip with an empty selection. Drop the actions row so the
+  // historical `<details>` blocks remain as audit context without inviting a
+  // no-op click (#59). The `<form>` itself stays so future closes (e.g. if
+  // an issue is reopened) still have a working submit path; the operator
+  // would just need a tick + a manual page refresh to re-render the button.
+  const hasVisibleCandidate = view.tagBlocks.some((b) =>
+    b.issues.some((i) => i.state !== "closed"),
+  );
+
   const olderHtml = view.olderTags.length === 0
     ? ""
     : `<div class="older-tags">older: ${view.olderTags
@@ -602,6 +613,13 @@ function renderIndexRepo(view: RepoView): string {
           `<a href="/releases?repo=${encodeURIComponent(view.repo)}&tag=${encodeURIComponent(t)}">${escapeHtml(t)}</a>`,
         )
         .join(" · ")}</div>`;
+
+  const actions = hasVisibleCandidate
+    ? `<div class="actions">
+        <button type="submit">✅ Close selected as released</button>
+        <span class="hint">⚠️ rows start unchecked.</span>
+      </div>`
+    : "";
 
   // Whole repo card is one form so the operator can tick across tags and
   // close them in one shot; the POST handler groups by tag for comment
@@ -611,10 +629,7 @@ function renderIndexRepo(view: RepoView): string {
     <form method="POST" action="/api/release-close-batch" class="batch-close-form">
       <input type="hidden" name="repo" value="${escapeHtml(view.repo)}">
       ${tagSections}
-      <div class="actions">
-        <button type="submit">✅ Close selected as released</button>
-        <span class="hint">⚠️ rows start unchecked.</span>
-      </div>
+      ${actions}
     </form>
     ${olderHtml}
   </section>`;
