@@ -13,13 +13,37 @@ function testEnv(): Env {
   };
 }
 
-// Stub a /search/issues response with two issues across two repos and one PR
-// that must be filtered out. Includes a hostile title to verify escaping.
+// Stub /search/issues. The handler fires two queries (main orgs + yhonda repo
+// filter) so we branch on the `q` param to return different items per call.
+// Main response covers two repos and a PR that must be filtered out; yhonda
+// response covers one claude-skills issue. A hostile title verifies escaping.
 function stubSearchIssues() {
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (req) => {
     const url = typeof req === "string" ? req : (req as Request).url;
     if (!url.includes("/search/issues")) {
       return new Response("not stubbed: " + url, { status: 500 });
+    }
+    const decoded = decodeURIComponent(url);
+    if (decoded.includes("repo:yhonda-ohishi/claude-skills")) {
+      return Response.json({
+        total_count: 1,
+        incomplete_results: false,
+        items: [
+          {
+            number: 1,
+            title: "claude-skills issue",
+            state: "open",
+            user: { login: "yhonda-ohishi" },
+            labels: [],
+            assignees: [],
+            comments: 0,
+            created_at: "2026-05-12T00:00:00Z",
+            updated_at: "2026-05-12T00:00:00Z",
+            html_url: "https://github.com/yhonda-ohishi/claude-skills/issues/1",
+            repository_url: "https://api.github.com/repos/yhonda-ohishi/claude-skills",
+          },
+        ],
+      });
     }
     return Response.json({
       total_count: 3,
@@ -86,12 +110,13 @@ describe("GET /issues", () => {
     const html = await res.text();
     expect(html).toContain("<!DOCTYPE html>");
     expect(html).toContain("Open Issues");
-    // Both repos rendered as separate <section>
+    // All three repos rendered as separate <section>: 2 from main call +
+    // 1 from yhonda-ohishi claude-skills call (merged via Promise.all).
     expect(html).toContain("ippoan/rust-alc-api");
     expect(html).toContain("ohishi-exp/daiun-salary");
-    // Both <section class="repo"> blocks must be present (= 2)
+    expect(html).toContain("yhonda-ohishi/claude-skills");
     const sectionCount = (html.match(/<section class="repo">/g) ?? []).length;
-    expect(sectionCount).toBe(2);
+    expect(sectionCount).toBe(3);
     // Issue numbers + dates
     expect(html).toContain("#7");
     expect(html).toContain("#3");
@@ -121,23 +146,36 @@ describe("GET /issues", () => {
     expect(html).toContain("&amp;");
   });
 
-  it("queries GitHub Search with the expected org filter and state=open", async () => {
+  it("queries GitHub Search twice: main orgs and yhonda-ohishi/claude-* repo filter", async () => {
     const spy = stubSearchIssues();
     const req = new Request("http://localhost/issues");
     const ctx = createExecutionContext();
     await worker.fetch(req, testEnv(), ctx);
     await waitOnExecutionContext(ctx);
 
-    expect(spy).toHaveBeenCalledTimes(1);
-    const url = spy.mock.calls[0]![0] as string;
-    expect(url).toContain("/search/issues");
-    // q param contains is:issue, state:open, both orgs
-    const decoded = decodeURIComponent(url);
-    expect(decoded).toContain("is:issue");
-    expect(decoded).toContain("state:open");
-    expect(decoded).toContain("org:ippoan");
-    expect(decoded).toContain("org:ohishi-exp");
-    expect(url).toContain("per_page=100");
+    expect(spy).toHaveBeenCalledTimes(2);
+    const urls = spy.mock.calls.map((c) => c[0] as string);
+    const decoded = urls.map((u) => decodeURIComponent(u));
+
+    // Main call: ippoan + ohishi-exp orgs without a repo: qualifier.
+    const main = decoded.find((d) => d.includes("org:ippoan"));
+    expect(main).toBeDefined();
+    expect(main!).toContain("is:issue");
+    expect(main!).toContain("state:open");
+    expect(main!).toContain("org:ippoan");
+    expect(main!).toContain("org:ohishi-exp");
+    expect(main!).not.toContain("repo:yhonda-ohishi/claude-");
+
+    // yhonda-ohishi call: org:yhonda-ohishi + repo: qualifiers (OR) for the
+    // two active claude tooling repos only.
+    const yhonda = decoded.find((d) => d.includes("org:yhonda-ohishi"));
+    expect(yhonda).toBeDefined();
+    expect(yhonda!).toContain("is:issue");
+    expect(yhonda!).toContain("state:open");
+    expect(yhonda!).toContain("repo:yhonda-ohishi/claude-skills");
+    expect(yhonda!).toContain("repo:yhonda-ohishi/claude-hooks");
+
+    for (const u of urls) expect(u).toContain("per_page=100");
   });
 
   it("returns a friendly error page when GitHub API fails", async () => {
@@ -157,7 +195,9 @@ describe("GET /issues", () => {
   });
 
   it("renders an empty-state message when no issues match", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    // Use mockImplementation, not mockResolvedValue: handleIssuesPage fires two
+    // fetches in parallel and a single Response instance has a one-shot body.
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
       Response.json({ total_count: 0, incomplete_results: false, items: [] }),
     );
     const req = new Request("http://localhost/issues");

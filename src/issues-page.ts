@@ -1,17 +1,35 @@
 import { fetchOrgIssues, type OrgIssue } from "./mcp/tools/issues";
 
-// Same allowlist as github-api.ts. We do not import ALLOWED_ORGS from there
-// because it isn't exported; if that list grows the two should be kept in sync.
+// Orgs fetched in full. Same allowlist as github-api.ts (not imported because
+// ALLOWED_ORGS isn't exported; keep the two in sync if either grows).
 const ORGS = ["ippoan", "ohishi-exp"];
 
+// yhonda-ohishi org has many old personal repos (2023-2024 lineworks_bot /
+// nginx / authjs-nuxt-test etc.) that would create noise. Only surface the
+// active claude-tooling repos by filtering on `repo:` qualifiers.
+const YHONDA_REPOS = ["yhonda-ohishi/claude-skills", "yhonda-ohishi/claude-hooks"];
+
 export async function handleIssuesPage(env: { GITHUB_TOKEN: string }): Promise<Response> {
-  let data;
+  let merged;
   try {
-    data = await fetchOrgIssues(env.GITHUB_TOKEN, {
-      orgs: ORGS,
-      state: "open",
-      per_page: 100,
-    });
+    const [main, yhonda] = await Promise.all([
+      fetchOrgIssues(env.GITHUB_TOKEN, {
+        orgs: ORGS,
+        state: "open",
+        per_page: 100,
+      }),
+      fetchOrgIssues(env.GITHUB_TOKEN, {
+        orgs: ["yhonda-ohishi"],
+        state: "open",
+        per_page: 100,
+        query: YHONDA_REPOS.map((r) => `repo:${r}`).join(" "),
+      }),
+    ]);
+    merged = {
+      total_count: main.total_count + yhonda.total_count,
+      incomplete: main.incomplete || yhonda.incomplete,
+      items: [...main.items, ...yhonda.items],
+    };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return new Response(renderError(msg), {
@@ -21,7 +39,7 @@ export async function handleIssuesPage(env: { GITHUB_TOKEN: string }): Promise<R
   }
 
   const grouped = new Map<string, OrgIssue[]>();
-  for (const item of data.items) {
+  for (const item of merged.items) {
     if (!grouped.has(item.repo)) grouped.set(item.repo, []);
     grouped.get(item.repo)!.push(item);
   }
@@ -34,7 +52,7 @@ export async function handleIssuesPage(env: { GITHUB_TOKEN: string }): Promise<R
       [...items].sort((a, b) => b.updated_at.localeCompare(a.updated_at)),
     ] as const);
 
-  return new Response(renderHtml(data.total_count, data.incomplete, repos), {
+  return new Response(renderHtml(merged.total_count, merged.incomplete, repos), {
     headers: { "Content-Type": "text/html; charset=utf-8" },
   });
 }
@@ -162,7 +180,8 @@ function renderHtml(
     <div class="summary">
       ${escapeHtml(String(total))} issue${total === 1 ? "" : "s"} across
       ${escapeHtml(String(repos.length))} repo${repos.length === 1 ? "" : "s"}
-      (orgs: ${ORGS.map((o) => escapeHtml(o)).join(", ")})
+      (orgs: ${ORGS.map((o) => escapeHtml(o)).join(", ")}
+      + ${YHONDA_REPOS.map((r) => escapeHtml(r)).join(", ")})
     </div>
   </header>
   ${incompleteBanner}
