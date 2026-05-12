@@ -107,6 +107,23 @@ export async function handleWebhook(
         repo: payload.repository.full_name,
       }),
     }));
+
+    // Side channel: a successful `Tag Release` workflow run means a new tag
+    // was just pushed. Trigger alert computation in the Hub so the dashboard
+    // banner can flag any open `Refs #N` issues that the operator forgot to
+    // close. We don't await the response — alert compute fans out to GitHub
+    // and we don't want it blocking webhook delivery.
+    if (
+      payload.action === "completed" &&
+      payload.workflow_run.name === "Tag Release" &&
+      payload.workflow_run.conclusion === "success"
+    ) {
+      await hub.fetch(new Request("http://hub/release-alert-detect", {
+        method: "POST",
+        body: JSON.stringify({ repo: payload.repository.full_name }),
+      }));
+    }
+
     return new Response("OK", { status: 200 });
   }
 

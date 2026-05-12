@@ -1,12 +1,14 @@
 import { githubApi, parseRepo, validateOrg, GitHubApiError } from "./github-api";
 import {
   extractRefIssues,
-  extractPrNumber,
-  extractBranchIssue,
   sortSemverDesc,
   previousTag,
   computeWarnings,
 } from "./release-helpers";
+import {
+  collectIssueNumbersForRange,
+  fetchIssuesByNumbers,
+} from "./release-alert";
 import { renderTabs, TAB_STYLES } from "./nav-tabs";
 
 // `/releases` (no params) renders a list of "recent releases" — every watched
@@ -249,58 +251,19 @@ async function loadRelease(
   }
   const prev = previousTag(sortSemverDesc(tagNames), tag);
 
-  // 2. Get the commits introduced by this tag. With a previous tag we use
-  //    GitHub's compare endpoint (it stops at the merge base); without one
-  //    (first release ever) we bound to 50 commits walking back from `tag`.
-  const commits = prev
-    ? (await githubApi<CompareResponse>(
-        token, "GET", `/repos/${owner}/${name}/compare/${prev}...${tag}`,
-      )).commits
-    : await githubApi<RawCommit[]>(
-        token, "GET", `/repos/${owner}/${name}/commits`, undefined,
-        { sha: tag, per_page: "50" },
-      );
+  // 2. Walk the tag's compare range to harvest every issue number we can
+  //    attribute (Refs in commit message, PR body, branch prefix). Shared
+  //    with the dashboard banner path so the two views stay in lockstep.
+  const { issueNumbers, commitCount } = await collectIssueNumbersForRange(
+    token, owner, name, tag, prev,
+  );
 
-  // 3. Harvest issue numbers from commit messages directly, and collect the
-  //    PR numbers so we can do a second pass for branch-name + PR-body refs.
-  const issueNumbers = new Set<number>();
-  const prNumbers = new Set<number>();
-  for (const c of commits) {
-    const msg = c.commit.message;
-    for (const n of extractRefIssues(msg)) issueNumbers.add(n);
-    const pr = extractPrNumber(msg);
-    if (pr !== null) prNumbers.add(pr);
-  }
+  // 3. Hydrate candidates. The /issues/:n endpoint also returns PRs, so we
+  //    filter those out below (PRs carry a `pull_request` discriminator).
+  const issues = await fetchIssuesByNumbers(token, owner, name, issueNumbers);
 
-  // 4. Re-fetch each PR for its head.ref (branch name) and body. We swallow
-  //    per-PR failures so a missing/deleted PR doesn't sink the whole page.
-  await Promise.all([...prNumbers].map(async (n) => {
-    try {
-      const pr = await githubApi<PrResponse>(
-        token, "GET", `/repos/${owner}/${name}/pulls/${n}`,
-      );
-      const fromBranch = extractBranchIssue(pr.head.ref);
-      if (fromBranch !== null) issueNumbers.add(fromBranch);
-      if (pr.body) {
-        for (const ref of extractRefIssues(pr.body)) issueNumbers.add(ref);
-      }
-    } catch { /* ignore per-PR failure */ }
-  }));
-
-  // 5. Fetch each candidate issue. The /issues/:n endpoint also returns PRs,
-  //    so we filter those out (PRs have a `pull_request` discriminator).
-  const issueResults = await Promise.all([...issueNumbers].map(async (n) => {
-    try {
-      return await githubApi<RawIssue>(
-        token, "GET", `/repos/${owner}/${name}/issues/${n}`,
-      );
-    } catch {
-      return null;
-    }
-  }));
-
-  const rows: IssueRow[] = issueResults
-    .filter((i): i is RawIssue => i !== null && !i.pull_request)
+  const rows: IssueRow[] = issues
+    .filter((i) => !i.pull_request)
     .map((i) => {
       const labels = i.labels.map((l) => l.name);
       return {
@@ -320,7 +283,7 @@ async function loadRelease(
     repo: `${owner}/${name}`,
     tag,
     previousTag: prev,
-    commits: commits.length,
+    commits: commitCount,
     rows,
   };
 }
@@ -328,7 +291,6 @@ async function loadRelease(
 interface TagListItem { name: string; commit: { sha: string } }
 interface RawCommit { sha: string; commit: { message: string } }
 interface CompareResponse { commits: RawCommit[] }
-interface PrResponse { head: { ref: string }; body: string | null }
 interface RawIssue {
   number: number;
   title: string;

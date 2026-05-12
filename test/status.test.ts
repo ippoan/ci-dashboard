@@ -6,11 +6,24 @@ import type { CIStatus } from "../src/webhook";
 
 const WEBHOOK_SECRET = "test-secret";
 
-// Mock Hub that supports /statuses by reading from KV (like the real Hub's ensureCache)
+// Mock Hub that supports /statuses + /release-alerts by reading from KV
+// (like the real Hub's ensureCache + ensureAlerts).
 function mockHub(kv: KVNamespace): DurableObjectStub {
   return {
     fetch: async (req: Request) => {
       const url = new URL(req.url);
+
+      // Banner endpoint: parses release-alert:* keys and returns the cached
+      // payload list. Mirrors Hub.ensureAlerts() shape.
+      if (url.pathname === "/release-alerts") {
+        const list = await kv.list({ prefix: "release-alert:" });
+        const values = await Promise.all(list.keys.map((k) => kv.get(k.name)));
+        const alerts = values
+          .filter((v): v is string => v !== null)
+          .map((v) => JSON.parse(v));
+        return Response.json(alerts);
+      }
+
       if (url.pathname === "/statuses") {
         const list = await kv.list({ prefix: "run:" });
         const values = await Promise.all(
@@ -123,6 +136,45 @@ describe("GET /", () => {
     const html = await res.text();
     expect(html).toContain("CI Dashboard");
     expect(html).toContain("WebSocket");
+    // Banner mount point + supporting JS must be present.
+    expect(html).toContain('id="release-banner-list"');
+    expect(html).toContain("renderBanners");
+    // Polling fallback wiring.
+    expect(html).toContain("refreshAll");
+    expect(html).toContain("visibilitychange");
+  });
+});
+
+describe("GET /release-alerts", () => {
+  it("returns empty list when no alerts cached", async () => {
+    const req = new Request("http://localhost/release-alerts");
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(req, testEnv(), ctx);
+    await waitOnExecutionContext(ctx);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toBe("application/json");
+    const data = await res.json();
+    expect(data).toEqual([]);
+  });
+
+  it("returns cached alerts from KV", async () => {
+    await env.CI_STATUS.put("release-alert:ippoan/foo", JSON.stringify({
+      repo: "ippoan/foo",
+      tag: "v1.2.3",
+      prevTag: "v1.2.2",
+      openIssues: [{ number: 42, title: "still open", url: "https://example.com/42" }],
+      detectedAt: "2026-05-12T10:00:00Z",
+    }));
+
+    const req = new Request("http://localhost/release-alerts");
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(req, testEnv(), ctx);
+    await waitOnExecutionContext(ctx);
+    const data: Array<{ repo: string; tag: string; openIssues: unknown[] }> = await res.json();
+    expect(data).toHaveLength(1);
+    expect(data[0]!.repo).toBe("ippoan/foo");
+    expect(data[0]!.tag).toBe("v1.2.3");
+    expect(data[0]!.openIssues).toHaveLength(1);
   });
 });
 

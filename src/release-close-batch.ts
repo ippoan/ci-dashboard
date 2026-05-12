@@ -17,6 +17,8 @@ const PAIR_RE = /^(.+):(\d+)$/;
 export async function handleReleaseCloseBatch(
   req: Request,
   env: { GITHUB_TOKEN: string },
+  hub?: DurableObjectStub,
+  ctx?: ExecutionContext,
 ): Promise<Response> {
   if (req.method !== "POST") {
     return new Response("Method Not Allowed", { status: 405 });
@@ -88,6 +90,18 @@ export async function handleReleaseCloseBatch(
     if (r.status === "fulfilled") closed.push(r.value);
     else failed.push(ops[i]!.issue);
   });
+
+  // Kick Hub to recompute alert state for this repo when at least one close
+  // succeeded. Same waitUntil pattern as release-close.ts so the redirect
+  // stays snappy and the dashboard banner updates asynchronously.
+  if (hub && closed.length > 0) {
+    const recompute = hub.fetch(new Request("http://hub/release-alert-recompute", {
+      method: "POST",
+      body: JSON.stringify({ repo: repoParam }),
+    }));
+    if (ctx) ctx.waitUntil(recompute);
+    else { void recompute; }
+  }
 
   const params = new URLSearchParams({ repo: repoParam });
   if (closed.length > 0) params.set("closed", closed.join(","));

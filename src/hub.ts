@@ -1,11 +1,31 @@
 import { DurableObject } from "cloudflare:workers";
 import type { CIStatus, JobStatus } from "./webhook";
 import type { Env } from "./index";
+import {
+  type ReleaseAlert,
+  recomputeAlert,
+  computeReleaseAlert,
+} from "./release-alert";
+
+// WebSocket message envelope. All broadcasts now share `{ type, data }` so
+// the dashboard JS can dispatch by type. Two channels currently:
+//   - "ci-statuses"     → CIStatus[] (workflow run grid)
+//   - "release-alerts"  → ReleaseAlert[] (post-tag-release banner)
+type WsEnvelope =
+  | { type: "ci-statuses"; data: CIStatus[] }
+  | { type: "release-alerts"; data: ReleaseAlert[] };
+
+const ALERT_KEY_PREFIX = "release-alert:";
+const ALERT_TTL_SECONDS = 7 * 86400;
 
 export class CIDashboardHub extends DurableObject<Env> {
   // In-memory cache: run_id → CIStatus
   private cache = new Map<number, CIStatus>();
   private cacheLoaded = false;
+
+  // In-memory cache: "owner/name" → ReleaseAlert
+  private alerts = new Map<string, ReleaseAlert>();
+  private alertsLoaded = false;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -27,6 +47,22 @@ export class CIDashboardHub extends DurableObject<Env> {
       }
     }
     this.cacheLoaded = true;
+  }
+
+  private async ensureAlerts(): Promise<void> {
+    if (this.alertsLoaded) return;
+    const list = await this.env.CI_STATUS.list({ prefix: ALERT_KEY_PREFIX });
+    const values = await Promise.all(
+      list.keys.map((key) => this.env.CI_STATUS.get(key.name))
+    );
+    for (const v of values) {
+      if (!v) continue;
+      try {
+        const a = JSON.parse(v) as ReleaseAlert;
+        this.alerts.set(a.repo, a);
+      } catch { /* skip corrupt entry */ }
+    }
+    this.alertsLoaded = true;
   }
 
   private computeStatuses(): CIStatus[] {
@@ -81,6 +117,53 @@ export class CIDashboardHub extends DurableObject<Env> {
       await this.ensureCache();
       const statuses = this.computeStatuses();
       return Response.json(statuses);
+    }
+
+    // All release alerts from in-memory cache (for /release-alerts endpoint).
+    if (url.pathname === "/release-alerts") {
+      await this.ensureAlerts();
+      return Response.json([...this.alerts.values()]);
+    }
+
+    // Compute alert for a tag release that just shipped, store + broadcast.
+    // Called from webhook.ts after a `Tag Release` workflow_run completes.
+    if (url.pathname === "/release-alert-detect") {
+      const { repo, tag } = await request.json<{ repo: string; tag?: string }>();
+      await this.ensureAlerts();
+      try {
+        const alert = await computeReleaseAlert(this.env.GITHUB_TOKEN, repo, tag);
+        this.persistAlert(repo, alert);
+        this.broadcastAlerts();
+      } catch {
+        // Best-effort: a failed compute (e.g. token rate-limit) leaves any
+        // existing alert in place rather than wiping it.
+      }
+      return new Response("OK");
+    }
+
+    // Recompute alert for a repo whose state changed elsewhere (e.g. an
+    // operator just closed issues via /api/release-close{,-batch}). Drops
+    // the alert when no open issues remain.
+    if (url.pathname === "/release-alert-recompute") {
+      const { repo } = await request.json<{ repo: string }>();
+      await this.ensureAlerts();
+      const existing = this.alerts.get(repo);
+      if (!existing) {
+        // Nothing to recompute — but still broadcast an empty alerts list
+        // is unnecessary because nothing changed for the client.
+        return new Response("OK");
+      }
+      try {
+        const fresh = await recomputeAlert(
+          this.env.GITHUB_TOKEN, repo, existing.tag,
+        );
+        this.persistAlert(repo, fresh);
+        this.broadcastAlerts();
+      } catch {
+        // Leave the existing alert in place; the periodic dashboard poll
+        // will eventually pick up the right state.
+      }
+      return new Response("OK");
     }
 
     if (url.pathname === "/update-run") {
@@ -229,9 +312,38 @@ export class CIDashboardHub extends DurableObject<Env> {
     );
   }
 
+  // Persist (or delete, when fresh is null) the alert. Same KV-fire-and-forget
+  // pattern as the run cache. Caller is responsible for calling broadcast
+  // afterward.
+  private persistAlert(repo: string, fresh: ReleaseAlert | null): void {
+    const key = `${ALERT_KEY_PREFIX}${repo}`;
+    if (fresh === null) {
+      this.alerts.delete(repo);
+      this.ctx.waitUntil(this.env.CI_STATUS.delete(key));
+    } else {
+      this.alerts.set(repo, fresh);
+      this.ctx.waitUntil(
+        this.env.CI_STATUS.put(key, JSON.stringify(fresh), {
+          expirationTtl: ALERT_TTL_SECONDS,
+        }),
+      );
+    }
+  }
+
   private broadcastFromCache(): void {
     const statuses = this.computeStatuses();
-    this.broadcast(JSON.stringify(statuses));
+    this.broadcastEnvelope({ type: "ci-statuses", data: statuses });
+  }
+
+  private broadcastAlerts(): void {
+    this.broadcastEnvelope({
+      type: "release-alerts",
+      data: [...this.alerts.values()],
+    });
+  }
+
+  private broadcastEnvelope(envelope: WsEnvelope): void {
+    this.broadcast(JSON.stringify(envelope));
   }
 
   broadcast(data: string): void {

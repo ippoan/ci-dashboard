@@ -14,6 +14,8 @@ import { githubApi, parseRepo, validateOrg } from "./github-api";
 export async function handleReleaseClose(
   req: Request,
   env: { GITHUB_TOKEN: string },
+  hub?: DurableObjectStub,
+  ctx?: ExecutionContext,
 ): Promise<Response> {
   if (req.method !== "POST") {
     return new Response("Method Not Allowed", { status: 405 });
@@ -69,6 +71,18 @@ export async function handleReleaseClose(
     if (r.status === "fulfilled") closed.push(r.value);
     else failed.push(issueNumbers[i]!);
   });
+
+  // Kick the Hub to recompute the banner alert state for this repo when at
+  // least one issue actually closed. waitUntil keeps the user-facing redirect
+  // snappy — the banner update can land asynchronously.
+  if (hub && closed.length > 0) {
+    const recompute = hub.fetch(new Request("http://hub/release-alert-recompute", {
+      method: "POST",
+      body: JSON.stringify({ repo: repoParam }),
+    }));
+    if (ctx) ctx.waitUntil(recompute);
+    else { void recompute; }  // tests / cases without ctx: fire-and-forget
+  }
 
   const params = new URLSearchParams({ repo: repoParam, tag });
   if (closed.length > 0) params.set("closed", closed.join(","));
