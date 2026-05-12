@@ -227,7 +227,9 @@ describe("GET /releases", () => {
     expect(html).toContain('<form method="GET" action="/releases"');
   });
 
-  it("still serves the lookup form when only one of repo/tag is given", async () => {
+  it("falls back to the index page when only `repo` is given (no tag, no flash)", async () => {
+    // Pre-#45 this rendered a partial lookup form. Now any incomplete shape
+    // lands on the index so the operator never sees an empty form on its own.
     const req = new Request("http://localhost/releases?repo=ippoan/ci-dashboard");
     const ctx = createExecutionContext();
     const res = await worker.fetch(req, testEnv(), ctx);
@@ -235,9 +237,31 @@ describe("GET /releases", () => {
 
     expect(res.status).toBe(200);
     const html = await res.text();
-    expect(html).toContain("Enter a release tag");
-    // Pre-fills repo so the operator only types the tag.
-    expect(html).toMatch(/name="repo"[^>]*value="ippoan\/ci-dashboard"/);
+    // Empty-state landing copy (no watched repos in default testEnv).
+    expect(html).toContain("No releases with referenced issues");
+    // The lookup form is now appended at the bottom of the index page.
+    expect(html).toContain('<form method="GET" action="/releases"');
+  });
+
+  it("renders the flash banner on `?repo=X&closed=N` (post-batch-close redirect)", async () => {
+    // This is the exact URL shape /api/release-close-batch redirects to.
+    // The previous routing fell through to renderForm and hid the banner.
+    const req = new Request(
+      "http://localhost/releases?repo=ippoan/nuxt-pwa-carins&closed=23,24",
+    );
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(req, testEnv(), ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    // Flash banner present with both closed issue numbers.
+    expect(html).toContain("✅ Closed");
+    expect(html).toContain("#23");
+    expect(html).toContain("#24");
+    // Issue numbers link to the GitHub repo that came along on the redirect.
+    expect(html).toContain("https://github.com/ippoan/nuxt-pwa-carins/issues/23");
+    expect(html).toContain("https://github.com/ippoan/nuxt-pwa-carins/issues/24");
   });
 
   it("renders release candidates with merged ref sources", async () => {
