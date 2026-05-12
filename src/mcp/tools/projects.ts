@@ -131,9 +131,11 @@ export function registerProjectsTools(server: McpServer, token: string): void {
     "list_org_projects",
     {
       description:
-        "List GitHub Projects v2 across one or more organizations. " +
+        "List GitHub project boards / kanban boards / roadmaps (Projects v2) " +
+        "across one or more organizations. Use when you need to find existing " +
+        "planning boards, sprint boards, or cross-repo coordination views. " +
         "Returns number/title/url/closed for each project, grouped by org. " +
-        "Use `get_project` afterwards to inspect fields.",
+        "Use `get_project` afterwards to inspect fields / columns.",
       inputSchema: {
         orgs: z.array(z.string()).min(1)
           .describe("Organization logins (e.g. ['ippoan', 'ohishi-exp', 'yhonda-ohishi'])"),
@@ -186,9 +188,11 @@ export function registerProjectsTools(server: McpServer, token: string): void {
     "get_project",
     {
       description:
-        "Get a Projects v2 project's metadata and full field definitions " +
-        "(including single-select options and iteration values). Required " +
-        "before `set_project_item_field` if you need to know valid option names.",
+        "Inspect a GitHub project board / kanban / roadmap (Projects v2): " +
+        "metadata and full field / column definitions, including single-select " +
+        "options (Status: Todo/In Progress/Done etc.) and iteration values " +
+        "(sprints). Required before `set_project_item_field` if you need to " +
+        "know valid column/option names.",
       inputSchema: {
         org: z.string().describe("Organization login"),
         number: z.number().describe("Project number (the integer in the project URL)"),
@@ -246,8 +250,11 @@ export function registerProjectsTools(server: McpServer, token: string): void {
     "list_project_items",
     {
       description:
-        "List items (issues / PRs / draft issues) attached to a Projects v2 " +
-        "project. Each item includes its current field values.",
+        "List cards / items on a GitHub project board (Projects v2) — the " +
+        "issues, PRs, and draft items currently tracked on the kanban / " +
+        "roadmap. Each item includes its current field values (Status, " +
+        "Priority, Epic, Iteration, etc.), so use this to see what is in " +
+        "each kanban column or what is assigned to a given Epic.",
       inputSchema: {
         org: z.string().describe("Organization login"),
         number: z.number().describe("Project number"),
@@ -317,7 +324,10 @@ export function registerProjectsTools(server: McpServer, token: string): void {
     "add_issue_to_project",
     {
       description:
-        "Add an issue (or PR) to a Projects v2 project. Returns the new item's id, " +
+        "Add an issue (or PR) as a card to a GitHub project board / kanban " +
+        "(Projects v2). Use for cross-repo planning: putting issues from " +
+        "multiple repositories onto a single tracking board, assigning work " +
+        "to a sprint/Epic, or building a roadmap. Returns the new item's id, " +
         "which is needed by `set_project_item_field` and `remove_project_item`.",
       inputSchema: {
         org: z.string().describe("Project owner organization (e.g. 'ippoan')"),
@@ -361,7 +371,10 @@ export function registerProjectsTools(server: McpServer, token: string): void {
   server.registerTool(
     "remove_project_item",
     {
-      description: "Remove an item from a Projects v2 project (does not delete the underlying issue/PR).",
+      description:
+        "Remove a card / item from a GitHub project board / kanban " +
+        "(Projects v2). Detaches the issue from the board but does not " +
+        "delete the underlying issue/PR.",
       inputSchema: {
         org: z.string().describe("Project owner organization"),
         project_number: z.number().describe("Project number"),
@@ -391,11 +404,14 @@ export function registerProjectsTools(server: McpServer, token: string): void {
     "set_project_item_field",
     {
       description:
-        "Update a field value on a Projects v2 item. Specify the field by name; " +
-        "for single_select / iteration fields, pass the option name / iteration title " +
-        "in `value` (it is resolved to the underlying option/iteration ID internally). " +
-        "For text/number/date, pass the literal value. Pass `value: null` to clear " +
-        "the field.",
+        "Set or change a field on a card / item on a GitHub project board " +
+        "(Projects v2). Use to move a card between kanban columns (Status: " +
+        "Todo → In Progress → Done), set Priority (P0/P1), assign to an Epic, " +
+        "set a sprint/Iteration, or update any custom planning field. " +
+        "Specify the field by name; for single_select / iteration fields, " +
+        "pass the option name / iteration title in `value` (resolved to the " +
+        "underlying option/iteration ID internally). For text/number/date, " +
+        "pass the literal value. Pass `value: null` to clear the field.",
       inputSchema: {
         org: z.string().describe("Project owner organization"),
         project_number: z.number().describe("Project number"),
@@ -516,9 +532,12 @@ export function registerProjectsTools(server: McpServer, token: string): void {
     "create_project_field",
     {
       description:
-        "Create a custom field on a Projects v2 project. For `single_select`, " +
-        "supply `single_select_options` (array of option names). `iteration` " +
-        "fields are not supported here — create them in the GitHub UI.",
+        "Add a custom column / field to a GitHub project board (Projects v2): " +
+        "Status column (single_select), Priority, Epic label (text), due date, " +
+        "estimate (number), etc. For `single_select`, supply `single_select_options` " +
+        "(array of option names) — these become the kanban column values. " +
+        "`iteration` (sprint) fields cannot be created here — make them in the " +
+        "GitHub UI.",
       inputSchema: {
         org: z.string().describe("Project owner organization"),
         project_number: z.number().describe("Project number"),
@@ -579,12 +598,17 @@ export function registerProjectsTools(server: McpServer, token: string): void {
     "create_project",
     {
       description:
-        "Create a new Projects v2 project under an organization. Returns the new " +
-        "project's id/number/title/url — `number` can be fed directly into " +
-        "`add_issue_to_project` / `set_project_item_field` / `create_project_field`. " +
-        "If `short_description` is provided, a follow-up `updateProjectV2` mutation " +
-        "is issued (the create mutation does not accept it). On that follow-up " +
-        "failing, the created project is still returned with a `warning` field.",
+        "Create a new GitHub project board / kanban / roadmap / planning view " +
+        "(Projects v2) under an organization. Use for spinning up a new " +
+        "tracking board, a sprint planning surface, a milestone board, or a " +
+        "cross-repo coordination view (e.g. one Epic spanning multiple " +
+        "repositories). Returns the new project's id/number/title/url — " +
+        "`number` can be fed directly into `add_issue_to_project` / " +
+        "`set_project_item_field` / `create_project_field`. If " +
+        "`short_description` is provided, a follow-up `updateProjectV2` " +
+        "mutation is issued (the create mutation does not accept it). On " +
+        "that follow-up failing, the created project is still returned with " +
+        "a `warning` field.",
       inputSchema: {
         org: z.string().describe("Organization login (e.g. 'ippoan')"),
         title: z.string().min(1).describe("Project title"),
