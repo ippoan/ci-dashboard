@@ -243,6 +243,68 @@ describe("GET /releases", () => {
     expect(html).toContain('<form method="GET" action="/releases"');
   });
 
+  it("collapses already-closed issues into a <details> section on the index", async () => {
+    // Same minimal index-flow stub as above, but issue #2 is already closed.
+    // It must NOT be in the main <table> rows; it should live inside a
+    // <details> wrapper labeled "1 closed issue".
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (req) => {
+      const url = typeof req === "string" ? req : (req as Request).url;
+      if (url.includes("/repos/ippoan/ci-dashboard/tags")) {
+        return Response.json([
+          { name: "v1.2.0", commit: { sha: "a" } },
+          { name: "v1.1.0", commit: { sha: "b" } },
+        ]);
+      }
+      if (url.includes("/repos/ippoan/ci-dashboard/compare/v1.1.0...v1.2.0")) {
+        return Response.json({
+          commits: [
+            { sha: "x", commit: { message: "feat\n\nRefs #1" } },
+            { sha: "y", commit: { message: "fix\n\nRefs #2" } },
+          ],
+        });
+      }
+      if (url.endsWith("/repos/ippoan/ci-dashboard/issues/1")) {
+        return Response.json({
+          number: 1, title: "still open", state: "open",
+          labels: [], assignees: [],
+          html_url: "https://github.com/ippoan/ci-dashboard/issues/1",
+          updated_at: "2026-05-01T00:00:00Z",
+        });
+      }
+      if (url.endsWith("/repos/ippoan/ci-dashboard/issues/2")) {
+        return Response.json({
+          number: 2, title: "already-done bug", state: "closed",
+          labels: [{ name: "bug" }], assignees: [],
+          html_url: "https://github.com/ippoan/ci-dashboard/issues/2",
+          updated_at: "2026-05-01T00:00:00Z",
+        });
+      }
+      return new Response("not stubbed", { status: 500 });
+    });
+
+    const e = testEnv({ watched: ["ippoan/ci-dashboard"] });
+    const req = new Request("http://localhost/releases");
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(req, e, ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(200);
+    const html = await res.text();
+
+    // The closed issue is still on the page (so it can be expanded)…
+    expect(html).toContain("already-done bug");
+    expect(html).toContain("#2");
+    // …but wrapped in a <details> with the right summary copy.
+    expect(html).toContain('<details class="closed-details">');
+    expect(html).toContain("<summary>1 closed issue</summary>");
+    // Open issue stays in the main candidate table outside the <details>;
+    // closed issue's checkbox row is below the <details> boundary.
+    const [beforeDetails, afterDetails] = html.split('<details class="closed-details">');
+    expect(beforeDetails).toMatch(/name="pair" value="v1\.2\.0:1"/);
+    expect(beforeDetails).not.toMatch(/name="pair" value="v1\.2\.0:2"/);
+    expect(afterDetails).toMatch(/name="pair" value="v1\.2\.0:2"/);
+  });
+
   it("renders the flash banner on `?repo=X&closed=N` (post-batch-close redirect)", async () => {
     // This is the exact URL shape /api/release-close-batch redirects to.
     // The previous routing fell through to renderForm and hid the banner.
