@@ -1,0 +1,85 @@
+import { githubApi, parseRepo, validateOrg } from "./github-api";
+
+// POST /api/release-close
+// Receives the form submitted from /releases?repo=...&tag=... and closes the
+// selected issues. For each issue we (1) drop a "Closed by release <tag>"
+// comment so the audit trail lives on the issue itself, (2) PATCH the issue
+// to closed/state_reason=completed (mirrors the close_issue MCP tool's
+// payload at src/mcp/tools/issues.ts).
+//
+// Auth: relies on Cloudflare Access in front of ci-dashboard (same trust
+// model as GET /releases). Server-side auth here would just double-gate the
+// same identity.
+
+export async function handleReleaseClose(
+  req: Request,
+  env: { GITHUB_TOKEN: string },
+): Promise<Response> {
+  if (req.method !== "POST") {
+    return new Response("Method Not Allowed", { status: 405 });
+  }
+
+  const form = await req.formData();
+  const repoParam = String(form.get("repo") ?? "").trim();
+  const tag = String(form.get("tag") ?? "").trim();
+  const issueNumbers = form
+    .getAll("issue")
+    .map((v) => Number(v))
+    .filter((n) => Number.isInteger(n) && n > 0);
+
+  if (!repoParam || !tag) {
+    return new Response("Missing repo or tag", { status: 400 });
+  }
+
+  // No selections: send the user back without spamming GitHub.
+  if (issueNumbers.length === 0) {
+    return redirect(`/releases?repo=${encodeURIComponent(repoParam)}&tag=${encodeURIComponent(tag)}`);
+  }
+
+  let owner: string, name: string;
+  try {
+    ({ owner, repo: name } = parseRepo(repoParam));
+    validateOrg(owner);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return new Response(`Bad repo: ${msg}`, { status: 400 });
+  }
+
+  // Close in parallel; per-issue failures don't sink the whole batch. The
+  // result lists are surfaced as flash params on the redirect target.
+  const settled = await Promise.allSettled(
+    issueNumbers.map(async (n) => {
+      await githubApi(
+        env.GITHUB_TOKEN, "POST",
+        `/repos/${owner}/${name}/issues/${n}/comments`,
+        { body: `Closed by release ${tag}` },
+      );
+      await githubApi(
+        env.GITHUB_TOKEN, "PATCH",
+        `/repos/${owner}/${name}/issues/${n}`,
+        { state: "closed", state_reason: "completed" },
+      );
+      return n;
+    }),
+  );
+
+  const closed: number[] = [];
+  const failed: number[] = [];
+  settled.forEach((r, i) => {
+    if (r.status === "fulfilled") closed.push(r.value);
+    else failed.push(issueNumbers[i]!);
+  });
+
+  const params = new URLSearchParams({ repo: repoParam, tag });
+  if (closed.length > 0) params.set("closed", closed.join(","));
+  if (failed.length > 0) params.set("failed", failed.join(","));
+  return redirect(`/releases?${params.toString()}`);
+}
+
+function redirect(location: string): Response {
+  // 303 See Other so the browser swaps POST → GET on the redirect target.
+  return new Response(null, {
+    status: 303,
+    headers: { Location: location },
+  });
+}

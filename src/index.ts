@@ -3,6 +3,8 @@ import { cors } from "hono/cors";
 import { handleWebhook } from "./webhook";
 import { handleDashboard } from "./dashboard";
 import { handleIssuesPage } from "./issues-page";
+import { handleReleasesPage } from "./releases-page";
+import { handleReleaseClose } from "./release-close";
 import { handleRecheck } from "./recheck";
 import { handleTagRelease } from "./tag-release";
 import { handleMcpRequest } from "./mcp/server";
@@ -30,6 +32,11 @@ app.get("/", () => handleDashboard());
 
 // Open issues (SSR, cross-org)
 app.get("/issues", (c) => handleIssuesPage(c.env));
+
+// Release confirmation view (SSR + POST close action)
+// See issue #35 + CLAUDE.md `release / close フロー`.
+app.get("/releases", (c) => handleReleasesPage(c.req.raw, c.env));
+app.post("/api/release-close", (c) => handleReleaseClose(c.req.raw, c.env));
 
 // WebSocket
 app.get("/ws", (c) => getHub(c.env).fetch(c.req.raw));
