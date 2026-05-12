@@ -64,7 +64,21 @@ export async function handleReleasesPage(
 // "Recent releases" landing page (no params)
 // --------------------------------------------------------------------------
 
-interface RepoTags { repo: string; tags: string[] }
+interface RepoView {
+  repo: string;
+  tagBlocks: TagBlock[];
+  olderTags: string[];   // tags beyond the displayed top N
+}
+
+interface TagBlock {
+  tag: string;
+  prevTag: string | null;
+  issues: IssueRow[];    // already-fetched and warning-annotated
+}
+
+// Top tags shown inline per repo (each fans out compare + per-issue fetches).
+// Older tags collapse to a link strip pointing at the detail page.
+const TOP_TAGS_INLINE = 5;
 
 async function handleIndexPage(
   env: { GITHUB_TOKEN: string; CI_HUB: DurableObjectNamespace },
@@ -83,26 +97,103 @@ async function handleIndexPage(
     }
   } catch { /* empty list → page falls back to lookup form only */ }
 
-  // 2. Latest 5 semver tags per repo in parallel. Per-repo failures are
-  //    swallowed: a deleted repo or rate-limited org shouldn't sink the page.
-  const items: RepoTags[] = await Promise.all(repos.map(async (repo) => {
+  // 2. Per-repo data load in parallel; whole-repo failures get a null view
+  //    we drop in the renderer.
+  const views = await Promise.all(repos.map(async (repo) => {
     try {
-      const { owner, repo: name } = parseRepo(repo);
-      validateOrg(owner);
-      const tags = await githubApi<TagListItem[]>(
-        env.GITHUB_TOKEN, "GET", `/repos/${owner}/${name}/tags`, undefined,
-        { per_page: "10" },
-      );
-      return {
-        repo,
-        tags: sortSemverDesc(tags.map((t) => t.name)).slice(0, 5),
-      };
+      return await loadRepoView(env.GITHUB_TOKEN, repo);
     } catch {
-      return { repo, tags: [] };
+      return null;
     }
   }));
 
-  return html(renderIndex(items), 200);
+  return html(
+    renderIndex(views.filter((v): v is RepoView => v !== null)),
+    200,
+  );
+}
+
+async function loadRepoView(token: string, repo: string): Promise<RepoView | null> {
+  const { owner, repo: name } = parseRepo(repo);
+  validateOrg(owner);
+
+  // 1. Recent semver tags. 10 gives us 5 inline + room for the predecessor
+  //    pairing on the oldest of those 5 + a small "older" strip.
+  const allTags = await githubApi<TagListItem[]>(
+    token, "GET", `/repos/${owner}/${name}/tags`, undefined,
+    { per_page: "10" },
+  );
+  const sorted = sortSemverDesc(allTags.map((t) => t.name));
+  const topTags = sorted.slice(0, TOP_TAGS_INLINE);
+  if (topTags.length === 0) {
+    return { repo: `${owner}/${name}`, tagBlocks: [], olderTags: [] };
+  }
+
+  // 2. For each inline tag, compare to its immediate predecessor (next in
+  //    sorted-desc) and harvest issue refs from commit messages. We skip the
+  //    PR-fetch heuristic the detail page uses, to keep the index sub-request
+  //    budget bounded (fans out across N repos).
+  const rawBlocks = await Promise.all(topTags.map(async (tag, i) => {
+    const prevTag = sorted[i + 1] ?? null;
+    if (!prevTag) {
+      return { tag, prevTag: null, refs: [] as number[] };
+    }
+    try {
+      const cmp = await githubApi<CompareResponse>(
+        token, "GET", `/repos/${owner}/${name}/compare/${prevTag}...${tag}`,
+      );
+      const refs = new Set<number>();
+      for (const c of cmp.commits) {
+        for (const n of extractRefIssues(c.commit.message)) refs.add(n);
+      }
+      return { tag, prevTag, refs: [...refs] };
+    } catch {
+      return { tag, prevTag, refs: [] };
+    }
+  }));
+
+  // 3. Deduplicate issue numbers across blocks so the same issue referenced
+  //    by two tags only triggers one GitHub fetch.
+  const uniqueRefs = new Set<number>();
+  for (const b of rawBlocks) for (const n of b.refs) uniqueRefs.add(n);
+
+  const issueByNum = new Map<number, IssueRow | null>();
+  await Promise.all([...uniqueRefs].map(async (n) => {
+    try {
+      const issue = await githubApi<RawIssue>(
+        token, "GET", `/repos/${owner}/${name}/issues/${n}`,
+      );
+      if (issue.pull_request) { issueByNum.set(n, null); return; }
+      const labels = issue.labels.map((l) => l.name);
+      issueByNum.set(n, {
+        number: issue.number,
+        title: issue.title,
+        state: issue.state,
+        labels,
+        assignees: issue.assignees.map((a) => a.login),
+        url: issue.html_url,
+        updated_at: issue.updated_at,
+        warnings: computeWarnings({ state: issue.state, labels }),
+      });
+    } catch {
+      issueByNum.set(n, null);
+    }
+  }));
+
+  const tagBlocks: TagBlock[] = rawBlocks.map((b) => ({
+    tag: b.tag,
+    prevTag: b.prevTag,
+    issues: b.refs
+      .map((n) => issueByNum.get(n) ?? null)
+      .filter((i): i is IssueRow => i !== null)
+      .sort((a, c) => a.number - c.number),
+  }));
+
+  return {
+    repo: `${owner}/${name}`,
+    tagBlocks,
+    olderTags: sorted.slice(TOP_TAGS_INLINE),
+  };
 }
 
 // --------------------------------------------------------------------------
@@ -384,11 +475,16 @@ ${renderLookupForm(repo, tag)}
 </body></html>`;
 }
 
-function renderIndex(items: RepoTags[]): string {
-  const populated = items.filter((i) => i.tags.length > 0);
-  const repoBlocks = populated.length === 0
-    ? `<div class="empty">🤷 No watched repos with releases yet. Look one up below.</div>`
-    : populated.map((i) => renderIndexRepo(i)).join("\n");
+function renderIndex(views: RepoView[]): string {
+  // Show repos with at least one referenced issue in their displayed tag
+  // window; repos that haven't had a Refs-bearing release yet would just
+  // be a noise card.
+  const populated = views.filter((v) =>
+    v.tagBlocks.some((b) => b.issues.length > 0),
+  );
+  const body = populated.length === 0
+    ? `<div class="empty">🤷 No releases with referenced issues in the recent window. Look one up below.</div>`
+    : populated.map(renderIndexRepo).join("\n");
 
   return `<!DOCTYPE html>
 <html lang="en"><head>
@@ -398,22 +494,93 @@ function renderIndex(items: RepoTags[]): string {
 <header>
   ${renderTabs("releases")}
   <h1>🏷️ Releases</h1>
-  <div class="summary">Pick a tag to review the issues it touched.</div>
+  <div class="summary">Tick the issues that this release actually closed; one button per repo closes them all.</div>
 </header>
-${repoBlocks}
+${body}
 <h2 class="lookup-header">Look up another release</h2>
 ${renderLookupForm(null, null)}
 </body></html>`;
 }
 
-function renderIndexRepo(item: RepoTags): string {
-  const tagLinks = item.tags.map((t) =>
-    `<li><a href="/releases?repo=${encodeURIComponent(item.repo)}&tag=${encodeURIComponent(t)}">${escapeHtml(t)}</a></li>`,
-  ).join("");
+function renderIndexRepo(view: RepoView): string {
+  const tagSections = view.tagBlocks
+    .filter((b) => b.issues.length > 0)
+    .map((b) => renderTagBlock(view.repo, b))
+    .join("\n");
+
+  const olderHtml = view.olderTags.length === 0
+    ? ""
+    : `<div class="older-tags">older: ${view.olderTags
+        .map((t) =>
+          `<a href="/releases?repo=${encodeURIComponent(view.repo)}&tag=${encodeURIComponent(t)}">${escapeHtml(t)}</a>`,
+        )
+        .join(" · ")}</div>`;
+
+  // Whole repo card is one form so the operator can tick across tags and
+  // close them in one shot; the POST handler groups by tag for comment
+  // attribution.
   return `<section class="repo-card">
-    <h2><a href="https://github.com/${escapeHtml(item.repo)}/releases" target="_blank" rel="noopener">${escapeHtml(item.repo)}</a></h2>
-    <ul class="tag-list">${tagLinks}</ul>
+    <h2><a href="https://github.com/${escapeHtml(view.repo)}/releases" target="_blank" rel="noopener">${escapeHtml(view.repo)}</a></h2>
+    <form method="POST" action="/api/release-close-batch" class="batch-close-form">
+      <input type="hidden" name="repo" value="${escapeHtml(view.repo)}">
+      ${tagSections}
+      <div class="actions">
+        <button type="submit">✅ Close selected as released</button>
+        <span class="hint">⚠️ rows start unchecked.</span>
+      </div>
+    </form>
+    ${olderHtml}
   </section>`;
+}
+
+function renderTagBlock(repo: string, block: TagBlock): string {
+  const rows = block.issues.map((i) => renderIndexRow(block.tag, i)).join("\n");
+  const since = block.prevTag
+    ? `<span class="since">since <code>${escapeHtml(block.prevTag)}</code></span>`
+    : "";
+  return `<div class="tag-block">
+    <div class="tag-block-header">
+      <strong>${escapeHtml(block.tag)}</strong>
+      ${since}
+      <a class="detail-link"
+         href="/releases?repo=${encodeURIComponent(repo)}&tag=${encodeURIComponent(block.tag)}">
+        → detail
+      </a>
+    </div>
+    <table>
+      <thead><tr>
+        <th class="col-check"></th>
+        <th>#</th>
+        <th>Title</th>
+        <th>State</th>
+        <th>Labels</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </div>`;
+}
+
+function renderIndexRow(tag: string, r: IssueRow): string {
+  const hasWarn = r.warnings.length > 0;
+  const checked = hasWarn ? "" : " checked";
+  const pair = `${tag}:${r.number}`;
+  const warnIcon = hasWarn
+    ? `<span class="warn" title="${escapeHtml(r.warnings.join(", "))}">⚠️</span>`
+    : "";
+  const labelChips = r.labels.length > 0
+    ? `<div class="labels">${r.labels
+        .map((l) => `<span class="label">${escapeHtml(l)}</span>`).join("")}</div>`
+    : "—";
+  const stateChip =
+    `<span class="state state-${escapeHtml(r.state)}">${escapeHtml(r.state)}</span>`;
+
+  return `<tr>
+    <td class="col-check"><input type="checkbox" name="pair" value="${escapeHtml(pair)}"${checked}></td>
+    <td class="num"><a href="${escapeHtml(r.url)}" target="_blank" rel="noopener">#${r.number}</a></td>
+    <td class="title">${warnIcon}<a href="${escapeHtml(r.url)}" target="_blank" rel="noopener">${escapeHtml(r.title)}</a></td>
+    <td>${stateChip}</td>
+    <td>${labelChips}</td>
+  </tr>`;
 }
 
 // Bare `<form>` extracted so both the index landing page and the
@@ -500,23 +667,44 @@ const STYLES = `
   .flash.err { background: #341a1f; border: 1px solid #f85149; color: #ffa198; }
   .flash a { color: inherit; text-decoration: underline; }
 
-  /* Recent releases landing page */
+  /* Recent releases landing page — repo card with stacked tag blocks */
   .repo-card {
     background: #161b22; border: 1px solid #30363d;
-    border-radius: 8px; padding: 12px 16px; margin-bottom: 12px;
+    border-radius: 8px; padding: 16px; margin-bottom: 16px;
   }
-  .repo-card h2 { font-size: 14px; font-weight: 600; margin-bottom: 8px; }
-  .repo-card h2 a { color: #c9d1d9; text-decoration: none; }
-  .repo-card h2 a:hover { color: #58a6ff; }
-  ul.tag-list { list-style: none; display: flex; flex-wrap: wrap; gap: 8px; }
-  ul.tag-list li a {
-    display: inline-block; padding: 4px 10px;
+  .repo-card > h2 { font-size: 14px; font-weight: 600; margin-bottom: 12px; }
+  .repo-card > h2 a { color: #c9d1d9; text-decoration: none; }
+  .repo-card > h2 a:hover { color: #58a6ff; }
+  .batch-close-form { display: block; }
+  .tag-block { margin-bottom: 14px; }
+  .tag-block-header {
+    display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap;
+    font-size: 13px; margin-bottom: 4px; color: #c9d1d9;
+  }
+  .tag-block-header strong {
+    color: #d2a8ff; font-variant-numeric: tabular-nums; font-weight: 600;
+  }
+  .tag-block-header .since { color: #8b949e; font-size: 12px; }
+  .tag-block-header .since code { background: #0d1117; padding: 1px 4px;
+    border-radius: 4px; color: #d2a8ff; }
+  .tag-block-header .detail-link {
+    margin-left: auto; color: #58a6ff; text-decoration: none; font-size: 12px;
+  }
+  .tag-block-header .detail-link:hover { text-decoration: underline; }
+  .tag-block table {
     background: #0d1117; border: 1px solid #30363d;
-    border-radius: 12px; color: #58a6ff;
-    text-decoration: none; font-size: 13px;
+    border-radius: 6px; overflow: hidden;
+  }
+  .older-tags {
+    margin-top: 8px; font-size: 12px; color: #8b949e;
+    border-top: 1px dashed #30363d; padding-top: 8px;
+  }
+  .older-tags a {
+    color: #58a6ff; text-decoration: none;
+    padding: 1px 6px; border-radius: 4px;
     font-variant-numeric: tabular-nums;
   }
-  ul.tag-list li a:hover { background: #1f6feb22; border-color: #58a6ff; }
+  .older-tags a:hover { background: #1f6feb22; }
   .lookup-header {
     font-size: 12px; font-weight: 600; text-transform: uppercase;
     letter-spacing: 0.5px; color: #8b949e;

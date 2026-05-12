@@ -112,16 +112,19 @@ describe("GET /releases", () => {
     expect(res.status).toBe(200);
     const html = await res.text();
     // No watched repos → empty hint + lookup form at the bottom.
-    expect(html).toContain("No watched repos");
+    expect(html).toContain("No releases with referenced issues");
     expect(html).toContain('<form method="GET" action="/releases"');
     expect(html).toContain('name="repo"');
     expect(html).toContain('name="tag"');
   });
 
-  it("lists recent releases for every watched repo on /releases (no params)", async () => {
-    // Stub /tags per watched repo so we can verify the merge.
+  it("renders per-repo tables with stacked tag blocks and pair-encoded checkboxes", async () => {
+    // Index data flow per repo: /tags → /compare/prev...current per top-N tag →
+    // /issues/:n for each unique referenced issue. The stub answers each step.
     vi.spyOn(globalThis, "fetch").mockImplementation(async (req) => {
       const url = typeof req === "string" ? req : (req as Request).url;
+
+      // ci-dashboard: 3 tags, 2 inline blocks (v1.2.0..v1.1.0..v1.0.0)
       if (url.includes("/repos/ippoan/ci-dashboard/tags")) {
         return Response.json([
           { name: "v1.2.0", commit: { sha: "a" } },
@@ -129,13 +132,55 @@ describe("GET /releases", () => {
           { name: "v1.0.0", commit: { sha: "c" } },
         ]);
       }
+      if (url.includes("/repos/ippoan/ci-dashboard/compare/v1.1.0...v1.2.0")) {
+        return Response.json({
+          commits: [{ sha: "x", commit: { message: "feat: do thing\n\nRefs #1" } }],
+        });
+      }
+      if (url.includes("/repos/ippoan/ci-dashboard/compare/v1.0.0...v1.1.0")) {
+        return Response.json({
+          commits: [{ sha: "y", commit: { message: "fix: bug-y\n\nRefs #2" } }],
+        });
+      }
+      if (url.endsWith("/repos/ippoan/ci-dashboard/issues/1")) {
+        return Response.json({
+          number: 1, title: "clean issue", state: "open",
+          labels: [], assignees: [],
+          html_url: "https://github.com/ippoan/ci-dashboard/issues/1",
+          updated_at: "2026-05-01T00:00:00Z",
+        });
+      }
+      if (url.endsWith("/repos/ippoan/ci-dashboard/issues/2")) {
+        return Response.json({
+          number: 2, title: "warning-flagged", state: "open",
+          labels: [{ name: "bug" }], assignees: [],
+          html_url: "https://github.com/ippoan/ci-dashboard/issues/2",
+          updated_at: "2026-05-01T00:00:00Z",
+        });
+      }
+
+      // nuxt-notify: 2 tags, 1 block
       if (url.includes("/repos/ippoan/nuxt-notify/tags")) {
         return Response.json([
           { name: "v0.5.0", commit: { sha: "d" } },
+          { name: "v0.4.0", commit: { sha: "e" } },
         ]);
       }
-      // ohishi-exp tag fetch is allowed to fail (rate limit / 404) — the page
-      // must not crash, that repo just renders no card.
+      if (url.includes("/repos/ippoan/nuxt-notify/compare/v0.4.0...v0.5.0")) {
+        return Response.json({
+          commits: [{ sha: "z", commit: { message: "feat\n\nRefs #100" } }],
+        });
+      }
+      if (url.endsWith("/repos/ippoan/nuxt-notify/issues/100")) {
+        return Response.json({
+          number: 100, title: "feature", state: "open",
+          labels: [], assignees: [],
+          html_url: "https://github.com/ippoan/nuxt-notify/issues/100",
+          updated_at: "2026-05-01T00:00:00Z",
+        });
+      }
+
+      // dead-repo: /tags 403 → loadRepoView throws → repo card omitted.
       return new Response("rate limit", { status: 403 });
     });
 
@@ -152,18 +197,33 @@ describe("GET /releases", () => {
     expect(res.status).toBe(200);
     const html = await res.text();
 
-    // Both populated repos rendered as their own cards.
+    // Both populated repos rendered as cards; dead-repo dropped.
     expect(html).toContain("ippoan/ci-dashboard");
     expect(html).toContain("ippoan/nuxt-notify");
-    // Tags in semver-desc order with detail-page links (% encoded).
-    expect(html).toMatch(/href="\/releases\?repo=ippoan%2Fci-dashboard&tag=v1\.2\.0"/);
-    expect(html).toMatch(/href="\/releases\?repo=ippoan%2Fnuxt-notify&tag=v0\.5\.0"/);
+    expect(html).not.toContain("dead-repo");
+
+    // Tag headers + previous-tag chips.
     expect(html).toContain("v1.2.0");
     expect(html).toContain("v1.1.0");
     expect(html).toContain("v0.5.0");
-    // Repos whose tag fetch failed don't even show up as a card.
-    expect(html).not.toContain("dead-repo");
-    // Lookup form is still appended for arbitrary-tag access.
+
+    // Issue rows show titles inline (no longer just chips).
+    expect(html).toContain("clean issue");
+    expect(html).toContain("warning-flagged");
+    expect(html).toContain("feature");
+
+    // Detail-page link per tag block ("→ detail").
+    expect(html).toMatch(/href="\/releases\?repo=ippoan%2Fci-dashboard&tag=v1\.2\.0"/);
+
+    // Checkbox values are `tag:issue` pairs; clean rows checked, warning OFF.
+    expect(html).toMatch(/name="pair" value="v1\.2\.0:1" checked/);
+    expect(html).toMatch(/name="pair" value="v1\.1\.0:2"(?! checked)/);
+    expect(html).toMatch(/name="pair" value="v0\.5\.0:100" checked/);
+
+    // Batch-close form per repo points at the new endpoint.
+    expect(html).toContain('action="/api/release-close-batch"');
+
+    // Lookup form still present at the bottom for arbitrary-tag access.
     expect(html).toContain('<form method="GET" action="/releases"');
   });
 

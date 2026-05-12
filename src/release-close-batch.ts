@@ -1,0 +1,104 @@
+import { githubApi, parseRepo, validateOrg } from "./github-api";
+
+// POST /api/release-close-batch
+//
+// The `/releases` index page renders one form per repo, but inside that form
+// the operator picks issues across several tags. The form encodes each
+// selection as `pair=<tag>:<issue>`, so this handler groups by tag in order
+// to attribute each "Closed by release <tag>" comment to the right tag, then
+// closes the issues.
+//
+// Single-tag close still lives at POST /api/release-close (used by the
+// detail page) — that handler's payload shape is the older `tag` + `issue[]`
+// form and we keep it for backward compatibility.
+
+const PAIR_RE = /^(.+):(\d+)$/;
+
+export async function handleReleaseCloseBatch(
+  req: Request,
+  env: { GITHUB_TOKEN: string },
+): Promise<Response> {
+  if (req.method !== "POST") {
+    return new Response("Method Not Allowed", { status: 405 });
+  }
+
+  const form = await req.formData();
+  const repoParam = String(form.get("repo") ?? "").trim();
+  const rawPairs = form.getAll("pair").map((v) => String(v));
+
+  if (!repoParam) {
+    return new Response("Missing repo", { status: 400 });
+  }
+
+  // Parse `tag:issue` pairs; silently drop anything malformed.
+  const grouped = new Map<string, number[]>();
+  for (const raw of rawPairs) {
+    const m = raw.match(PAIR_RE);
+    if (!m) continue;
+    const tag = m[1]!;
+    const n = Number(m[2]);
+    if (!Number.isInteger(n) || n <= 0) continue;
+    const list = grouped.get(tag);
+    if (list) list.push(n);
+    else grouped.set(tag, [n]);
+  }
+
+  // Nothing selected → bounce straight back to /releases without spamming
+  // GitHub. This is the "user submitted an empty form" path.
+  if (grouped.size === 0) {
+    return redirect("/releases");
+  }
+
+  let owner: string, name: string;
+  try {
+    ({ owner, repo: name } = parseRepo(repoParam));
+    validateOrg(owner);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return new Response(`Bad repo: ${msg}`, { status: 400 });
+  }
+
+  // Flatten the grouped map into one operation list so failures per issue
+  // can be tracked back to the right number for the flash query.
+  type Operation = { tag: string; issue: number };
+  const ops: Operation[] = [];
+  for (const [tag, issues] of grouped) {
+    for (const issue of issues) ops.push({ tag, issue });
+  }
+
+  const settled = await Promise.allSettled(
+    ops.map(async ({ tag, issue }) => {
+      await githubApi(
+        env.GITHUB_TOKEN, "POST",
+        `/repos/${owner}/${name}/issues/${issue}/comments`,
+        { body: `Closed by release ${tag}` },
+      );
+      await githubApi(
+        env.GITHUB_TOKEN, "PATCH",
+        `/repos/${owner}/${name}/issues/${issue}`,
+        { state: "closed", state_reason: "completed" },
+      );
+      return issue;
+    }),
+  );
+
+  const closed: number[] = [];
+  const failed: number[] = [];
+  settled.forEach((r, i) => {
+    if (r.status === "fulfilled") closed.push(r.value);
+    else failed.push(ops[i]!.issue);
+  });
+
+  const params = new URLSearchParams({ repo: repoParam });
+  if (closed.length > 0) params.set("closed", closed.join(","));
+  if (failed.length > 0) params.set("failed", failed.join(","));
+  return redirect(`/releases?${params.toString()}`);
+}
+
+function redirect(location: string): Response {
+  // 303 so the browser swaps POST → GET on the redirect target.
+  return new Response(null, {
+    status: 303,
+    headers: { Location: location },
+  });
+}
