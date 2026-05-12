@@ -66,6 +66,41 @@ export async function githubApi<T>(
   return res.json() as Promise<T>;
 }
 
+/**
+ * GitHub GraphQL API caller. Used by Projects v2 tools (REST has no Projects v2
+ * surface). On `errors[]` in the response, throws `GitHubApiError(400, ...)`
+ * with the concatenated error messages so callers don't have to peek inside.
+ */
+export async function githubGraphQL<T>(
+  token: string,
+  query: string,
+  variables?: Record<string, unknown>,
+): Promise<T> {
+  const res = await fetch(`${GITHUB_API}/graphql`, {
+    method: "POST",
+    headers: {
+      ...headers(token),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ query, variables: variables ?? {} }),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new GitHubApiError(res.status, `GitHub GraphQL ${res.status}: ${text}`);
+  }
+
+  const json = (await res.json()) as { data?: T; errors?: Array<{ message: string }> };
+  if (json.errors && json.errors.length > 0) {
+    const msg = json.errors.map((e) => e.message).join("; ");
+    throw new GitHubApiError(400, `GitHub GraphQL error: ${msg}`);
+  }
+  if (json.data === undefined) {
+    throw new GitHubApiError(500, "GitHub GraphQL: empty data");
+  }
+  return json.data;
+}
+
 export async function githubApiRaw(
   token: string,
   method: string,
