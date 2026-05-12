@@ -3,14 +3,25 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import worker from "../src/index";
 import type { Env } from "../src/index";
 
-function testEnv(): Env {
+// `watched` populates the Hub `/statuses` response so the no-params index
+// page can enumerate repos. Defaults to empty so existing tests keep their
+// pre-#41 behavior (form-only).
+function testEnv(opts: { watched?: string[] } = {}): Env {
+  const watched = opts.watched ?? [];
   return {
     CI_STATUS: env.CI_STATUS,
     WEBHOOK_SECRET: "test-secret",
     GITHUB_TOKEN: "test-token",
     CI_HUB: {
       idFromName: () => ({}),
-      get: () => ({ fetch: async () => new Response("OK") }),
+      get: () => ({
+        fetch: async (req: Request) => {
+          if (new URL(req.url).pathname === "/statuses") {
+            return Response.json(watched.map((repo) => ({ repo })));
+          }
+          return new Response("OK");
+        },
+      }),
     } as unknown as DurableObjectNamespace,
   };
 }
@@ -92,7 +103,7 @@ function stubGithubApi(opts: { tagExists?: boolean; failPr?: boolean } = {}) {
 describe("GET /releases", () => {
   afterEach(() => { vi.restoreAllMocks(); });
 
-  it("renders the lookup form when repo+tag are missing", async () => {
+  it("renders the empty-state landing page when nothing is watched yet", async () => {
     const req = new Request("http://localhost/releases");
     const ctx = createExecutionContext();
     const res = await worker.fetch(req, testEnv(), ctx);
@@ -100,10 +111,73 @@ describe("GET /releases", () => {
 
     expect(res.status).toBe(200);
     const html = await res.text();
-    expect(html).toContain("Enter a release tag");
+    // No watched repos → empty hint + lookup form at the bottom.
+    expect(html).toContain("No watched repos");
     expect(html).toContain('<form method="GET" action="/releases"');
     expect(html).toContain('name="repo"');
     expect(html).toContain('name="tag"');
+  });
+
+  it("lists recent releases for every watched repo on /releases (no params)", async () => {
+    // Stub /tags per watched repo so we can verify the merge.
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (req) => {
+      const url = typeof req === "string" ? req : (req as Request).url;
+      if (url.includes("/repos/ippoan/ci-dashboard/tags")) {
+        return Response.json([
+          { name: "v1.2.0", commit: { sha: "a" } },
+          { name: "v1.1.0", commit: { sha: "b" } },
+          { name: "v1.0.0", commit: { sha: "c" } },
+        ]);
+      }
+      if (url.includes("/repos/ippoan/nuxt-notify/tags")) {
+        return Response.json([
+          { name: "v0.5.0", commit: { sha: "d" } },
+        ]);
+      }
+      // ohishi-exp tag fetch is allowed to fail (rate limit / 404) — the page
+      // must not crash, that repo just renders no card.
+      return new Response("rate limit", { status: 403 });
+    });
+
+    const e = testEnv({ watched: [
+      "ippoan/ci-dashboard",
+      "ippoan/nuxt-notify",
+      "ohishi-exp/dead-repo",
+    ] });
+    const req = new Request("http://localhost/releases");
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(req, e, ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(200);
+    const html = await res.text();
+
+    // Both populated repos rendered as their own cards.
+    expect(html).toContain("ippoan/ci-dashboard");
+    expect(html).toContain("ippoan/nuxt-notify");
+    // Tags in semver-desc order with detail-page links (% encoded).
+    expect(html).toMatch(/href="\/releases\?repo=ippoan%2Fci-dashboard&tag=v1\.2\.0"/);
+    expect(html).toMatch(/href="\/releases\?repo=ippoan%2Fnuxt-notify&tag=v0\.5\.0"/);
+    expect(html).toContain("v1.2.0");
+    expect(html).toContain("v1.1.0");
+    expect(html).toContain("v0.5.0");
+    // Repos whose tag fetch failed don't even show up as a card.
+    expect(html).not.toContain("dead-repo");
+    // Lookup form is still appended for arbitrary-tag access.
+    expect(html).toContain('<form method="GET" action="/releases"');
+  });
+
+  it("still serves the lookup form when only one of repo/tag is given", async () => {
+    const req = new Request("http://localhost/releases?repo=ippoan/ci-dashboard");
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(req, testEnv(), ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain("Enter a release tag");
+    // Pre-fills repo so the operator only types the tag.
+    expect(html).toMatch(/name="repo"[^>]*value="ippoan\/ci-dashboard"/);
   });
 
   it("renders release candidates with merged ref sources", async () => {
