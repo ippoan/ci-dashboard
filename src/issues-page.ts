@@ -1,4 +1,5 @@
 import { fetchOrgIssues, type OrgIssue } from "./mcp/tools/issues";
+import { renderTabs, TAB_STYLES } from "./nav-tabs";
 
 // Orgs fetched in full. Same allowlist as github-api.ts (not imported because
 // ALLOWED_ORGS isn't exported; keep the two in sync if either grows).
@@ -87,9 +88,7 @@ function renderHtml(
       margin: 0 auto;
     }
     header { margin-bottom: 24px; }
-    header .nav { font-size: 13px; margin-bottom: 8px; }
-    header .nav a { color: #58a6ff; text-decoration: none; }
-    header .nav a:hover { text-decoration: underline; }
+    ${TAB_STYLES}
     h1 { font-size: 20px; color: #58a6ff; }
     .summary { font-size: 13px; color: #8b949e; margin-top: 4px; }
     .banner {
@@ -175,7 +174,7 @@ function renderHtml(
 </head>
 <body>
   <header>
-    <div class="nav"><a href="/">← CI Dashboard</a></div>
+    ${renderTabs("issues")}
     <h1>📋 Open Issues</h1>
     <div class="summary">
       ${escapeHtml(String(total))} issue${total === 1 ? "" : "s"} across
