@@ -31,33 +31,30 @@ export async function handleReleasesPage(
   const repoParam = url.searchParams.get("repo");
   const tag = url.searchParams.get("tag");
 
-  // Flash params populated by POST /api/release-close redirect.
+  // Flash params populated by POST /api/release-close{,-batch} redirects.
   const closedFlash = numericList(url.searchParams.get("closed"));
   const failedFlash = numericList(url.searchParams.get("failed"));
 
-  // No params at all → "Recent releases" landing page driven by Hub.
-  if (!repoParam && !tag) {
-    return await handleIndexPage(env);
-  }
-
-  // Only one of repo/tag given → keep the lookup form so the operator can
-  // finish filling in the missing field.
-  if (!repoParam || !tag) {
-    return html(renderForm(repoParam, tag), 200);
-  }
-
-  let result: ReleasePayload;
-  try {
-    result = await loadRelease(env.GITHUB_TOKEN, repoParam, tag);
-  } catch (err) {
-    if (err instanceof GitHubApiError && err.status === 404) {
-      return html(renderError(`Not found: ${err.message}`), 404);
+  // Only the fully-specified pair opens the detail page; every other shape
+  // (no params / partial / post-close redirect) falls through to the index so
+  // the operator never lands on an empty form by accident (issue #45).
+  if (repoParam && tag) {
+    let result: ReleasePayload;
+    try {
+      result = await loadRelease(env.GITHUB_TOKEN, repoParam, tag);
+    } catch (err) {
+      if (err instanceof GitHubApiError && err.status === 404) {
+        return html(renderError(`Not found: ${err.message}`), 404);
+      }
+      const msg = err instanceof Error ? err.message : String(err);
+      return html(renderError(msg), 502);
     }
-    const msg = err instanceof Error ? err.message : String(err);
-    return html(renderError(msg), 502);
+    return html(renderHtml(result, closedFlash, failedFlash), 200);
   }
 
-  return html(renderHtml(result, closedFlash, failedFlash), 200);
+  // Index page; `repoParam` (when set without tag, e.g. from the batch-close
+  // redirect) tags along so flash links can point at the right GitHub repo.
+  return await handleIndexPage(env, closedFlash, failedFlash, repoParam);
 }
 
 // --------------------------------------------------------------------------
@@ -82,6 +79,9 @@ const TOP_TAGS_INLINE = 5;
 
 async function handleIndexPage(
   env: { GITHUB_TOKEN: string; CI_HUB: DurableObjectNamespace },
+  closedFlash: number[],
+  failedFlash: number[],
+  flashRepo: string | null,
 ): Promise<Response> {
   // 1. Watched repos come from the Hub's status cache — every repo that has
   //    ever fired a CI run lives there, which is the same source the
@@ -108,7 +108,12 @@ async function handleIndexPage(
   }));
 
   return html(
-    renderIndex(views.filter((v): v is RepoView => v !== null)),
+    renderIndex(
+      views.filter((v): v is RepoView => v !== null),
+      closedFlash,
+      failedFlash,
+      flashRepo,
+    ),
     200,
   );
 }
@@ -444,38 +449,29 @@ function renderRow(r: IssueRow): string {
 function renderFlash(
   closed: number[],
   failed: number[],
-  repo: string,
+  repo: string | null,
 ): string {
   if (closed.length === 0 && failed.length === 0) return "";
+  // When the redirect carried a repo (single-tag detail close, batch close),
+  // each issue number links to GitHub; otherwise we render bare `#N` text.
+  const issueLink = (n: number): string => repo
+    ? `<a href="https://github.com/${escapeHtml(repo)}/issues/${n}" target="_blank" rel="noopener">#${n}</a>`
+    : `#${n}`;
   const closedList = closed.length > 0
-    ? `<div class="flash ok">✅ Closed: ${closed
-        .map((n) => `<a href="https://github.com/${escapeHtml(repo)}/issues/${n}" target="_blank" rel="noopener">#${n}</a>`)
-        .join(" ")}</div>`
+    ? `<div class="flash ok">✅ Closed: ${closed.map(issueLink).join(" ")}</div>`
     : "";
   const failedList = failed.length > 0
-    ? `<div class="flash err">❌ Failed to close: ${failed
-        .map((n) => `<a href="https://github.com/${escapeHtml(repo)}/issues/${n}" target="_blank" rel="noopener">#${n}</a>`)
-        .join(" ")} (try again)</div>`
+    ? `<div class="flash err">❌ Failed to close: ${failed.map(issueLink).join(" ")} (try again)</div>`
     : "";
   return closedList + failedList;
 }
 
-function renderForm(repo: string | null, tag: string | null): string {
-  return `<!DOCTYPE html>
-<html lang="en"><head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Release confirmation</title><style>${STYLES}</style>
-</head><body>
-<header>
-  ${renderTabs("releases")}
-  <h1>🏷️ Release confirmation</h1>
-  <div class="summary">Enter a release tag to review the issues it touched.</div>
-</header>
-${renderLookupForm(repo, tag)}
-</body></html>`;
-}
-
-function renderIndex(views: RepoView[]): string {
+function renderIndex(
+  views: RepoView[],
+  closedFlash: number[],
+  failedFlash: number[],
+  flashRepo: string | null,
+): string {
   // Show repos with at least one referenced issue in their displayed tag
   // window; repos that haven't had a Refs-bearing release yet would just
   // be a noise card.
@@ -485,6 +481,10 @@ function renderIndex(views: RepoView[]): string {
   const body = populated.length === 0
     ? `<div class="empty">🤷 No releases with referenced issues in the recent window. Look one up below.</div>`
     : populated.map(renderIndexRepo).join("\n");
+
+  // Banner sits above the cards so a successful batch close redirect always
+  // lands the operator on the list with confirmation of what got closed.
+  const flash = renderFlash(closedFlash, failedFlash, flashRepo);
 
   return `<!DOCTYPE html>
 <html lang="en"><head>
@@ -496,6 +496,7 @@ function renderIndex(views: RepoView[]): string {
   <h1>🏷️ Releases</h1>
   <div class="summary">Tick the issues that this release actually closed; one button per repo closes them all.</div>
 </header>
+${flash}
 ${body}
 <h2 class="lookup-header">Look up another release</h2>
 ${renderLookupForm(null, null)}
