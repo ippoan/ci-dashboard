@@ -96,11 +96,12 @@ describe("computeWarnings", () => {
       .toContain("already closed");
   });
 
-  it("flags bug / regression labels (case-insensitive)", () => {
-    expect(computeWarnings({ state: "open", labels: ["bug"] }))
-      .toContain("bug label");
-    expect(computeWarnings({ state: "open", labels: ["Regression"] }))
-      .toContain("Regression label");
+  it("does NOT flag bug / regression labels on open issues (dropped in #77)", () => {
+    // bug-labeled open issues are the common case for fix-PR-driven closes;
+    // warning on them just added manual ticking without catching anything.
+    expect(computeWarnings({ state: "open", labels: ["bug"] })).toEqual([]);
+    expect(computeWarnings({ state: "open", labels: ["Regression"] })).toEqual([]);
+    expect(computeWarnings({ state: "open", labels: ["bug", "regression"] })).toEqual([]);
   });
 
   it("returns [] for a clean open issue", () => {
@@ -108,8 +109,8 @@ describe("computeWarnings", () => {
       .toEqual([]);
   });
 
-  it("stacks warnings", () => {
+  it("closed state remains the sole warning regardless of labels", () => {
     const w = computeWarnings({ state: "closed", labels: ["bug", "regression"] });
-    expect(w.length).toBe(3);
+    expect(w).toEqual(["already closed"]);
   });
 });
