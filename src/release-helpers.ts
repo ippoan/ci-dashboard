@@ -66,20 +66,23 @@ export function previousTag(tagsDescending: readonly string[], current: string):
 }
 
 // Warning flags drive whether a candidate row's checkbox defaults to OFF.
-// The list is intentionally narrow for the MVP — comment-after-merge and
-// reaction-based heuristics need extra API calls and can come later.
+// Currently the sole flag is `state === "closed"` — that one is a sanity
+// net so the operator notices an issue that was already manually closed
+// before the release went out (re-closing is harmless but the row should
+// not look like a fresh action).
+//
+// We previously also warned on `bug` / `regression` labels under the
+// "have a human re-check fix issues at release time" rationale, but in
+// practice every fix PR touches a bug-labeled issue so the warning fired
+// on the rows the operator most needed to tick — adding manual work
+// without catching anything. Dropped in #77.
 export interface IssueLike {
   state: string;
   labels: ReadonlyArray<string>;
 }
 
-const WARN_LABELS = new Set(["bug", "regression"]);
-
 export function computeWarnings(issue: IssueLike): string[] {
   const out: string[] = [];
   if (issue.state === "closed") out.push("already closed");
-  for (const l of issue.labels) {
-    if (WARN_LABELS.has(l.toLowerCase())) out.push(`${l} label`);
-  }
   return out;
 }

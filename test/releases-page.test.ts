@@ -215,9 +215,11 @@ describe("GET /releases", () => {
     // Detail-page link per tag block ("→ detail").
     expect(html).toMatch(/href="\/releases\?repo=ippoan%2Fci-dashboard&tag=v1\.2\.0"/);
 
-    // Checkbox values are `tag:issue` pairs; clean rows checked, warning OFF.
+    // Checkbox values are `tag:issue` pairs. Per #77 bug-labeled open
+    // issues are no longer warned, so #2 starts checked too. (A closed
+    // row would still be `(?! checked)`; none in this fixture.)
     expect(html).toMatch(/name="pair" value="v1\.2\.0:1" checked/);
-    expect(html).toMatch(/name="pair" value="v1\.1\.0:2"(?! checked)/);
+    expect(html).toMatch(/name="pair" value="v1\.1\.0:2" checked/);
     expect(html).toMatch(/name="pair" value="v0\.5\.0:100" checked/);
 
     // Batch-close form per repo points at the new endpoint.
@@ -354,7 +356,7 @@ describe("GET /releases", () => {
     expect(html).toContain('action="/api/release-close"');
   });
 
-  it("warning rows are NOT checked by default; clean rows ARE", async () => {
+  it("closed rows are NOT checked by default; open rows (including bug-labeled) ARE", async () => {
     stubGithubApi();
     const req = new Request("http://localhost/releases?repo=ippoan/ci-dashboard&tag=v1.2.0");
     const ctx = createExecutionContext();
@@ -364,14 +366,16 @@ describe("GET /releases", () => {
 
     // #42 has no warnings → checkbox starts checked.
     expect(html).toMatch(/name="issue" value="42" checked/);
-    // #50 is closed, #99 has bug label → both start unchecked.
+    // #50 is closed → still unchecked.
     expect(html).toMatch(/name="issue" value="50"(?! checked)/);
-    expect(html).toMatch(/name="issue" value="99"(?! checked)/);
+    // #99 has the `bug` label but is open. Per #77 the label no longer
+    // triggers a warning, so the checkbox starts checked.
+    expect(html).toMatch(/name="issue" value="99" checked/);
 
-    // Warning icon + tooltip present for warning rows.
+    // Warning icon + tooltip remain for the closed row only.
     expect(html).toContain("⚠️");
     expect(html).toContain("already closed");
-    expect(html).toContain("bug label");
+    expect(html).not.toContain("bug label");
   });
 
   it("returns 404 when the tag is not in the recent list", async () => {
