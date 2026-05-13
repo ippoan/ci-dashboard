@@ -37,7 +37,7 @@ function stubFetch(opts: { withProjects?: boolean } = {}) {
         // these fixtures; the other orgs return an empty list.
         if (body.includes('"ippoan"') && withProjects) {
           return Response.json({
-            data: { organization: { projectsV2: { nodes: [
+            data: { repositoryOwner: { projectsV2: { nodes: [
               { id: "PVT_1", number: 1, title: "Camera Monitoring",
                 url: "https://github.com/orgs/ippoan/projects/1",
                 closed: false, shortDescription: null },
@@ -45,7 +45,7 @@ function stubFetch(opts: { withProjects?: boolean } = {}) {
           });
         }
         return Response.json({
-          data: { organization: { projectsV2: { nodes: [] } } },
+          data: { repositoryOwner: { projectsV2: { nodes: [] } } },
         });
       }
       if (body.includes("items(first:")) {
@@ -63,7 +63,7 @@ function stubFetch(opts: { withProjects?: boolean } = {}) {
           ] } } },
         });
       }
-      return Response.json({ data: { organization: null } });
+      return Response.json({ data: { repositoryOwner: null } });
     }
 
     if (!url.includes("/search/issues")) {
@@ -267,10 +267,10 @@ describe("GET /issues", () => {
       if (url.includes("/graphql")) {
         if (body.includes("projectsV2(first:")) {
           return Response.json({
-            data: { organization: { projectsV2: { nodes: [] } } },
+            data: { repositoryOwner: { projectsV2: { nodes: [] } } },
           });
         }
-        return Response.json({ data: { organization: null } });
+        return Response.json({ data: { repositoryOwner: null } });
       }
       return Response.json({ total_count: 0, incomplete_results: false, items: [] });
     });
@@ -335,7 +335,7 @@ describe("GET /issues — Project section", () => {
         if (body.includes("projectsV2(first:")) {
           if (body.includes('"ippoan"')) {
             return Response.json({
-              data: { organization: { projectsV2: { nodes: [
+              data: { repositoryOwner: { projectsV2: { nodes: [
                 { id: "PVT_1", number: 1, title: "Board A",
                   url: "https://github.com/orgs/ippoan/projects/1",
                   closed: false, shortDescription: null },
@@ -346,7 +346,7 @@ describe("GET /issues — Project section", () => {
             });
           }
           return Response.json({
-            data: { organization: { projectsV2: { nodes: [] } } },
+            data: { repositoryOwner: { projectsV2: { nodes: [] } } },
           });
         }
         // Both projects claim the same issue #7. Map both project IDs to

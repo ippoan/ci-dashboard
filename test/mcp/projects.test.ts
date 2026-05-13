@@ -53,7 +53,7 @@ describe("resolveProjectId", () => {
 
   it("returns project id when present", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      Response.json({ data: { organization: { projectV2: { id: "PVT_abc" } } } }),
+      Response.json({ data: { repositoryOwner: { projectV2: { id: "PVT_abc" } } } }),
     );
     const id = await resolveProjectId("token", "ippoan", 7);
     expect(id).toBe("PVT_abc");
@@ -61,7 +61,7 @@ describe("resolveProjectId", () => {
 
   it("throws 404 when project missing", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      Response.json({ data: { organization: { projectV2: null } } }),
+      Response.json({ data: { repositoryOwner: { projectV2: null } } }),
     );
     await expect(resolveProjectId("token", "ippoan", 99))
       .rejects.toMatchObject({ status: 404 });
@@ -78,7 +78,7 @@ describe("resolveProjectId", () => {
     // Each call gets its own Response (a Response body can only be consumed once).
     vi.spyOn(globalThis, "fetch").mockImplementation(() =>
       Promise.resolve(Response.json({
-        data: { organization: { projectV2: { id: "PVT_x" } } },
+        data: { repositoryOwner: { projectV2: { id: "PVT_x" } } },
       })),
     );
     for (const org of ["ippoan", "ohishi-exp", "yhonda-ohishi"]) {
@@ -145,13 +145,13 @@ describe("Projects v2 tools — integration via MCP server", () => {
   it("list_org_projects groups results per org and filters closed by default", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(Response.json({
-        data: { organization: { projectsV2: { nodes: [
+        data: { repositoryOwner: { projectsV2: { nodes: [
           { id: "PVT_1", number: 1, title: "Active", url: "https://github.com/orgs/ippoan/projects/1", closed: false, shortDescription: null },
           { id: "PVT_2", number: 2, title: "Done", url: "https://github.com/orgs/ippoan/projects/2", closed: true, shortDescription: null },
         ] } } },
       }))
       .mockResolvedValueOnce(Response.json({
-        data: { organization: { projectsV2: { nodes: [
+        data: { repositoryOwner: { projectsV2: { nodes: [
           { id: "PVT_3", number: 1, title: "Exp", url: "https://github.com/orgs/ohishi-exp/projects/1", closed: false, shortDescription: "exp" },
         ] } } },
       }));
@@ -171,7 +171,7 @@ describe("Projects v2 tools — integration via MCP server", () => {
 
   it("list_org_projects with include_closed=true returns closed projects too", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({
-      data: { organization: { projectsV2: { nodes: [
+      data: { repositoryOwner: { projectsV2: { nodes: [
         { id: "PVT_1", number: 1, title: "A", url: "u", closed: false, shortDescription: null },
         { id: "PVT_2", number: 2, title: "B", url: "u", closed: true, shortDescription: null },
       ] } } },
@@ -190,9 +190,38 @@ describe("Projects v2 tools — integration via MCP server", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  it("list_org_projects works for user-owned logins (yhonda-ohishi is a User, not an Organization)", async () => {
+    // GitHub's `organization(login:)` resolver throws "Could not resolve to
+    // an Organization" for user logins. The tool must use `repositoryOwner`
+    // and accept the `User`-branch fragment. Regression guard for #75.
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({
+      data: { repositoryOwner: { projectsV2: { nodes: [
+        { id: "PVT_y", number: 3, title: "Personal Roadmap",
+          url: "https://github.com/users/yhonda-ohishi/projects/3",
+          closed: false, shortDescription: null },
+      ] } } },
+    }));
+
+    const result = await callTool("list_org_projects", {
+      orgs: ["yhonda-ohishi"],
+    }) as Array<{ org: string; projects: Array<{ number: number; title: string }> }>;
+
+    expect(result[0]!.org).toBe("yhonda-ohishi");
+    expect(result[0]!.projects[0]!.number).toBe(3);
+    expect(result[0]!.projects[0]!.title).toBe("Personal Roadmap");
+
+    // The outgoing query must use repositoryOwner with both fragments — the
+    // production bug was that the User branch was missing entirely.
+    const query = JSON.parse(fetchSpy.mock.calls[0]![1]!.body as string).query as string;
+    expect(query).toContain("repositoryOwner(login:$login)");
+    expect(query).toContain("... on Organization");
+    expect(query).toContain("... on User");
+    expect(query).not.toContain("organization(login:");
+  });
+
   it("get_project returns fields with options for single_select", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({
-      data: { organization: { projectV2: {
+      data: { repositoryOwner: { projectV2: {
         id: "PVT_1", number: 1, title: "P", url: "u", closed: false, shortDescription: null,
         fields: { nodes: [
           { __typename: "ProjectV2FieldCommon", id: "F_t", name: "Title", dataType: "TITLE" },
@@ -218,7 +247,7 @@ describe("Projects v2 tools — integration via MCP server", () => {
   it("add_issue_to_project resolves projectId + contentId then mutates", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(Response.json({
-        data: { organization: { projectV2: { id: "PVT_1" } } },
+        data: { repositoryOwner: { projectV2: { id: "PVT_1" } } },
       }))
       .mockResolvedValueOnce(Response.json({
         data: { repository: { issueOrPullRequest: { id: "I_42" } } },
@@ -246,7 +275,7 @@ describe("Projects v2 tools — integration via MCP server", () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch")
       // resolveProjectId
       .mockResolvedValueOnce(Response.json({
-        data: { organization: { projectV2: { id: "PVT_1" } } },
+        data: { repositoryOwner: { projectV2: { id: "PVT_1" } } },
       }))
       // getProjectFields
       .mockResolvedValueOnce(Response.json({
@@ -280,7 +309,7 @@ describe("Projects v2 tools — integration via MCP server", () => {
   it("set_project_item_field surfaces a useful error when option missing", async () => {
     vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(Response.json({
-        data: { organization: { projectV2: { id: "PVT_1" } } },
+        data: { repositoryOwner: { projectV2: { id: "PVT_1" } } },
       }))
       .mockResolvedValueOnce(Response.json({
         data: { node: { fields: { nodes: [
@@ -298,7 +327,7 @@ describe("Projects v2 tools — integration via MCP server", () => {
   it("set_project_item_field with text field passes value as text", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(Response.json({
-        data: { organization: { projectV2: { id: "PVT_1" } } },
+        data: { repositoryOwner: { projectV2: { id: "PVT_1" } } },
       }))
       .mockResolvedValueOnce(Response.json({
         data: { node: { fields: { nodes: [
@@ -321,7 +350,7 @@ describe("Projects v2 tools — integration via MCP server", () => {
   it("set_project_item_field with value=null calls clearProjectV2ItemFieldValue", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(Response.json({
-        data: { organization: { projectV2: { id: "PVT_1" } } },
+        data: { repositoryOwner: { projectV2: { id: "PVT_1" } } },
       }))
       .mockResolvedValueOnce(Response.json({
         data: { node: { fields: { nodes: [
@@ -345,7 +374,7 @@ describe("Projects v2 tools — integration via MCP server", () => {
   it("remove_project_item issues deleteProjectV2Item mutation", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(Response.json({
-        data: { organization: { projectV2: { id: "PVT_1" } } },
+        data: { repositoryOwner: { projectV2: { id: "PVT_1" } } },
       }))
       .mockResolvedValueOnce(Response.json({
         data: { deleteProjectV2Item: { deletedItemId: "PVTI_xyz" } },
@@ -364,7 +393,7 @@ describe("Projects v2 tools — integration via MCP server", () => {
   it("create_project_field for single_select sends options with default color", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(Response.json({
-        data: { organization: { projectV2: { id: "PVT_1" } } },
+        data: { repositoryOwner: { projectV2: { id: "PVT_1" } } },
       }))
       .mockResolvedValueOnce(Response.json({
         data: { createProjectV2Field: { projectV2Field: {
@@ -390,7 +419,7 @@ describe("Projects v2 tools — integration via MCP server", () => {
 
   it("create_project_field rejects single_select without options", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(Response.json({
-      data: { organization: { projectV2: { id: "PVT_1" } } },
+      data: { repositoryOwner: { projectV2: { id: "PVT_1" } } },
     }));
     await expect(callTool("create_project_field", {
       org: "ippoan", project_number: 1,
@@ -400,7 +429,7 @@ describe("Projects v2 tools — integration via MCP server", () => {
 
   it("list_project_items flattens content + field values", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({
-      data: { organization: { projectV2: { items: { nodes: [
+      data: { repositoryOwner: { projectV2: { items: { nodes: [
         {
           id: "PVTI_1", type: "ISSUE",
           content: {
@@ -436,7 +465,7 @@ describe("Projects v2 tools — integration via MCP server", () => {
   it("create_project resolves ownerId then creates and returns id/number/title/url", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(Response.json({
-        data: { organization: { id: "O_ippoan" } },
+        data: { repositoryOwner: { id: "O_ippoan" } },
       }))
       .mockResolvedValueOnce(Response.json({
         data: { createProjectV2: { projectV2: {
@@ -455,10 +484,11 @@ describe("Projects v2 tools — integration via MCP server", () => {
     expect(result.title).toBe("監視カメラ死活管理");
     expect(result.url).toBe("https://github.com/orgs/ippoan/projects/7");
 
-    // ownerId query
+    // ownerId query — uses `repositoryOwner(login:)` so both User and
+    // Organization logins resolve.
     const ownerQ = JSON.parse(fetchSpy.mock.calls[0]![1]!.body as string);
-    expect(ownerQ.query).toContain("organization(login:$org)");
-    expect(ownerQ.variables).toEqual({ org: "ippoan" });
+    expect(ownerQ.query).toContain("repositoryOwner(login:$login)");
+    expect(ownerQ.variables).toEqual({ login: "ippoan" });
 
     // createProjectV2 mutation
     const createQ = JSON.parse(fetchSpy.mock.calls[1]![1]!.body as string);
@@ -470,7 +500,7 @@ describe("Projects v2 tools — integration via MCP server", () => {
   it("create_project applies short_description via a second updateProjectV2 mutation", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(Response.json({
-        data: { organization: { id: "O_ippoan" } },
+        data: { repositoryOwner: { id: "O_ippoan" } },
       }))
       .mockResolvedValueOnce(Response.json({
         data: { createProjectV2: { projectV2: {
@@ -499,7 +529,7 @@ describe("Projects v2 tools — integration via MCP server", () => {
   it("create_project returns the project + warning when shortDescription update fails", async () => {
     vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(Response.json({
-        data: { organization: { id: "O_ippoan" } },
+        data: { repositoryOwner: { id: "O_ippoan" } },
       }))
       .mockResolvedValueOnce(Response.json({
         data: { createProjectV2: { projectV2: {
@@ -524,12 +554,12 @@ describe("Projects v2 tools — integration via MCP server", () => {
 
   it("create_project throws 404 when org not found", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(Response.json({
-      data: { organization: null },
+      data: { repositoryOwner: null },
     }));
 
     await expect(callTool("create_project", {
       org: "ippoan", title: "T",
-    })).rejects.toThrow(/Organization not found: ippoan/);
+    })).rejects.toThrow(/Owner not found: ippoan/);
   });
 
   it("create_project rejects disallowed orgs (no fetch issued)", async () => {

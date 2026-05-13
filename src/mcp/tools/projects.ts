@@ -12,6 +12,13 @@ import { githubGraphQL, parseRepo, validateOrg, GitHubApiError } from "../../git
 //   3. field name → fieldId (+ optionId)   (fetched via getProjectFields)
 // We hide these behind ergonomic tool inputs (name/number) so the caller
 // doesn't have to deal with node IDs.
+//
+// Owner type: every login-keyed query uses `repositoryOwner(login:)` with
+// inline fragments for both `Organization` and `User`. The `organization(...)`
+// resolver alone fails hard on user-account logins ("Could not resolve to an
+// Organization with the login of 'X'") — yhonda-ohishi is a user, not an
+// org, so we need both code paths. `User` and `Organization` both implement
+// `ProjectV2Owner`, exposing `projectsV2` / `projectV2(number:)` identically.
 // --------------------------------------------------------------------------
 
 interface ProjectField {
@@ -40,16 +47,19 @@ export async function resolveProjectId(
   token: string, org: string, number: number,
 ): Promise<string> {
   validateOrg(org);
-  const data = await githubGraphQL<{ organization: { projectV2: { id: string } | null } | null }>(
+  const data = await githubGraphQL<{
+    repositoryOwner: { projectV2?: { id: string } | null } | null;
+  }>(
     token,
-    `query($org:String!,$number:Int!){
-      organization(login:$org){
-        projectV2(number:$number){ id }
+    `query($login:String!,$number:Int!){
+      repositoryOwner(login:$login){
+        ... on Organization { projectV2(number:$number){ id } }
+        ... on User { projectV2(number:$number){ id } }
       }
     }`,
-    { org, number },
+    { login: org, number },
   );
-  const id = data.organization?.projectV2?.id;
+  const id = data.repositoryOwner?.projectV2?.id;
   if (!id) throw new GitHubApiError(404, `Project not found: ${org}/projects/${number}`);
   return id;
 }
@@ -154,21 +164,28 @@ export async function fetchOrgProjects(
   for (const o of orgs) validateOrg(o);
   return Promise.all(orgs.map(async (org) => {
     const data = await githubGraphQL<{
-      organization: {
-        projectsV2: { nodes: OrgProject[] };
+      repositoryOwner: {
+        projectsV2?: { nodes: OrgProject[] };
       } | null;
     }>(
       token,
-      `query($org:String!,$first:Int!){
-        organization(login:$org){
-          projectsV2(first:$first, orderBy:{field:NUMBER,direction:DESC}){
-            nodes{ id number title url closed shortDescription }
+      `query($login:String!,$first:Int!){
+        repositoryOwner(login:$login){
+          ... on Organization {
+            projectsV2(first:$first, orderBy:{field:NUMBER,direction:DESC}){
+              nodes{ id number title url closed shortDescription }
+            }
+          }
+          ... on User {
+            projectsV2(first:$first, orderBy:{field:NUMBER,direction:DESC}){
+              nodes{ id number title url closed shortDescription }
+            }
           }
         }
       }`,
-      { org, first },
+      { login: org, first },
     );
-    const nodes = data.organization?.projectsV2.nodes ?? [];
+    const nodes = data.repositoryOwner?.projectsV2?.nodes ?? [];
     const filtered = include_closed ? nodes : nodes.filter((p) => !p.closed);
     return { org, projects: filtered };
   }));
@@ -308,37 +325,43 @@ export function registerProjectsTools(server: McpServer, token: string): void {
     },
     async ({ org, number }) => {
       validateOrg(org);
+      // Named fragment on `ProjectV2Owner` so the big field-list block only
+      // lives once and the inline-fragment spread covers both User and
+      // Organization owners.
       const data = await githubGraphQL<{
-        organization: { projectV2: ProjectV2 | null } | null;
+        repositoryOwner: { projectV2?: ProjectV2 | null } | null;
       }>(
         token,
-        `query($org:String!,$number:Int!){
-          organization(login:$org){
-            projectV2(number:$number){
-              id number title url closed shortDescription
-              fields(first:50){
-                nodes{
-                  __typename
-                  ... on ProjectV2FieldCommon { id name dataType }
-                  ... on ProjectV2SingleSelectField {
-                    id name dataType
-                    options{ id name }
-                  }
-                  ... on ProjectV2IterationField {
-                    id name dataType
-                    configuration{
-                      iterations{ id title startDate duration }
-                      completedIterations{ id title startDate duration }
-                    }
+        `query($login:String!,$number:Int!){
+          repositoryOwner(login:$login){
+            ... ProjectDetail
+          }
+        }
+        fragment ProjectDetail on ProjectV2Owner {
+          projectV2(number:$number){
+            id number title url closed shortDescription
+            fields(first:50){
+              nodes{
+                __typename
+                ... on ProjectV2FieldCommon { id name dataType }
+                ... on ProjectV2SingleSelectField {
+                  id name dataType
+                  options{ id name }
+                }
+                ... on ProjectV2IterationField {
+                  id name dataType
+                  configuration{
+                    iterations{ id title startDate duration }
+                    completedIterations{ id title startDate duration }
                   }
                 }
               }
             }
           }
         }`,
-        { org, number },
+        { login: org, number },
       );
-      const p = data.organization?.projectV2;
+      const p = data.repositoryOwner?.projectV2;
       if (!p) throw new GitHubApiError(404, `Project not found: ${org}/projects/${number}`);
       const result = {
         id: p.id,
@@ -373,41 +396,44 @@ export function registerProjectsTools(server: McpServer, token: string): void {
     async ({ org, number, first }) => {
       validateOrg(org);
       const data = await githubGraphQL<{
-        organization: { projectV2: { items: { nodes: ProjectItemNode[] } } | null } | null;
+        repositoryOwner: { projectV2?: { items: { nodes: ProjectItemNode[] } } | null } | null;
       }>(
         token,
-        `query($org:String!,$number:Int!,$first:Int!){
-          organization(login:$org){
-            projectV2(number:$number){
-              items(first:$first){
-                nodes{
-                  id
-                  type
-                  content{
+        `query($login:String!,$number:Int!,$first:Int!){
+          repositoryOwner(login:$login){
+            ... ProjectItems
+          }
+        }
+        fragment ProjectItems on ProjectV2Owner {
+          projectV2(number:$number){
+            items(first:$first){
+              nodes{
+                id
+                type
+                content{
+                  __typename
+                  ... on Issue { number title url state repository{ nameWithOwner } }
+                  ... on PullRequest { number title url state repository{ nameWithOwner } }
+                  ... on DraftIssue { title }
+                }
+                fieldValues(first:30){
+                  nodes{
                     __typename
-                    ... on Issue { number title url state repository{ nameWithOwner } }
-                    ... on PullRequest { number title url state repository{ nameWithOwner } }
-                    ... on DraftIssue { title }
-                  }
-                  fieldValues(first:30){
-                    nodes{
-                      __typename
-                      ... on ProjectV2ItemFieldTextValue {
-                        text field{ ... on ProjectV2FieldCommon { name } }
-                      }
-                      ... on ProjectV2ItemFieldNumberValue {
-                        number field{ ... on ProjectV2FieldCommon { name } }
-                      }
-                      ... on ProjectV2ItemFieldDateValue {
-                        date field{ ... on ProjectV2FieldCommon { name } }
-                      }
-                      ... on ProjectV2ItemFieldSingleSelectValue {
-                        name optionId field{ ... on ProjectV2FieldCommon { name } }
-                      }
-                      ... on ProjectV2ItemFieldIterationValue {
-                        title iterationId
-                        field{ ... on ProjectV2FieldCommon { name } }
-                      }
+                    ... on ProjectV2ItemFieldTextValue {
+                      text field{ ... on ProjectV2FieldCommon { name } }
+                    }
+                    ... on ProjectV2ItemFieldNumberValue {
+                      number field{ ... on ProjectV2FieldCommon { name } }
+                    }
+                    ... on ProjectV2ItemFieldDateValue {
+                      date field{ ... on ProjectV2FieldCommon { name } }
+                    }
+                    ... on ProjectV2ItemFieldSingleSelectValue {
+                      name optionId field{ ... on ProjectV2FieldCommon { name } }
+                    }
+                    ... on ProjectV2ItemFieldIterationValue {
+                      title iterationId
+                      field{ ... on ProjectV2FieldCommon { name } }
                     }
                   }
                 }
@@ -415,9 +441,9 @@ export function registerProjectsTools(server: McpServer, token: string): void {
             }
           }
         }`,
-        { org, number, first },
+        { login: org, number, first },
       );
-      const nodes = data.organization?.projectV2?.items.nodes ?? [];
+      const nodes = data.repositoryOwner?.projectV2?.items.nodes ?? [];
       const result = nodes.map(formatItem);
       return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
     },
@@ -727,16 +753,17 @@ export function registerProjectsTools(server: McpServer, token: string): void {
     async ({ org, title, short_description }) => {
       validateOrg(org);
 
-      // Step 1: resolve the org's GraphQL node ID (needed as ownerId).
+      // Step 1: resolve the owner's GraphQL node ID (needed as ownerId).
+      // `repositoryOwner` handles both User and Organization logins.
       const ownerResult = await githubGraphQL<{
-        organization: { id: string } | null;
+        repositoryOwner: { id: string } | null;
       }>(
         token,
-        `query($org:String!){ organization(login:$org){ id } }`,
-        { org },
+        `query($login:String!){ repositoryOwner(login:$login){ id } }`,
+        { login: org },
       );
-      const ownerId = ownerResult.organization?.id;
-      if (!ownerId) throw new GitHubApiError(404, `Organization not found: ${org}`);
+      const ownerId = ownerResult.repositoryOwner?.id;
+      if (!ownerId) throw new GitHubApiError(404, `Owner not found: ${org}`);
 
       // Step 2: createProjectV2 (title only — shortDescription is not part of CreateProjectV2Input).
       const created = await githubGraphQL<{
