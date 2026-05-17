@@ -1,4 +1,4 @@
-import { githubApi, parseRepo, validateOrg, GitHubApiError } from "./github-api";
+import { parseRepo, validateOrg, GitHubApiError } from "./github-api";
 import {
   extractRefIssues,
   sortSemverDesc,
@@ -9,6 +9,13 @@ import {
   collectIssueNumbersForRange,
   fetchIssuesByNumbers,
 } from "./release-alert";
+import {
+  cachedTags,
+  cachedCompare,
+  cachedCommits,
+  cachedRepoMeta,
+  cachedIssue,
+} from "./release-cache";
 import { loadDirectPushAllowlist } from "./direct-push-allowlist";
 import { renderTabs, TAB_STYLES } from "./nav-tabs";
 import { PWA_HEAD_TAGS, PWA_REGISTER_SCRIPT } from "./pwa";
@@ -46,10 +53,15 @@ export async function handleReleasesPage(
   // Only the fully-specified pair opens the detail page; every other shape
   // (no params / partial / post-close redirect) falls through to the index so
   // the operator never lands on an empty form by accident (issue #45).
+  // Flash redirects must not be cached by the browser — they encode one-shot
+  // banner state. Same logic for empty post-close redirects (no flash params
+  // but the operator expects to see a fresh table).
+  const hasFlash = closedFlash.length > 0 || failedFlash.length > 0;
+
   if (repoParam && tag) {
     let result: ReleasePayload;
     try {
-      result = await loadRelease(env.GITHUB_TOKEN, repoParam, tag);
+      result = await loadRelease(env.GITHUB_TOKEN, repoParam, tag, env.CI_STATUS);
     } catch (err) {
       if (err instanceof GitHubApiError && err.status === 404) {
         return html(renderError(`Not found: ${err.message}`), 404);
@@ -57,12 +69,30 @@ export async function handleReleasesPage(
       const msg = err instanceof Error ? err.message : String(err);
       return html(renderError(msg), 502);
     }
-    return html(renderHtml(result, closedFlash, failedFlash), 200);
+    return html(
+      renderHtml(result, closedFlash, failedFlash),
+      200,
+      cacheControlFor(hasFlash, /* detail */ true),
+    );
   }
 
   // Index page; `repoParam` (when set without tag, e.g. from the batch-close
   // redirect) tags along so flash links can point at the right GitHub repo.
-  return await handleIndexPage(env, closedFlash, failedFlash, repoParam);
+  return await handleIndexPage(env, closedFlash, failedFlash, repoParam, hasFlash);
+}
+
+// Cache-Control policy:
+//   - Flash redirects: `no-store` so the banner doesn't get pinned in the
+//     browser's bfcache or revisited cache after a back-button click.
+//   - Detail page (single repo+tag): max-age 30, swr 120. Already-cached KV
+//     hits are usually <50ms but the HTML still costs CPU.
+//   - Index page: max-age 15, swr 60. Multi-repo fan-out means even cached
+//     paths are bigger; keep freshness tight so a new tag shows up quickly.
+function cacheControlFor(hasFlash: boolean, detail: boolean): string {
+  if (hasFlash) return "private, no-store";
+  return detail
+    ? "private, max-age=30, stale-while-revalidate=120"
+    : "private, max-age=15, stale-while-revalidate=60";
 }
 
 // --------------------------------------------------------------------------
@@ -99,6 +129,7 @@ async function handleIndexPage(
   closedFlash: number[],
   failedFlash: number[],
   flashRepo: string | null,
+  hasFlash: boolean,
 ): Promise<Response> {
   // 1. Watched repos come from two sources:
   //   (a) Hub status cache — every repo that has ever fired a CI run.
@@ -130,7 +161,7 @@ async function handleIndexPage(
   //    inside loadRepoView when they have no semver tags.
   const views = await Promise.all(repos.map(async (repo) => {
     try {
-      return await loadRepoView(env.GITHUB_TOKEN, repo, allowlist.has(repo));
+      return await loadRepoView(env.GITHUB_TOKEN, repo, allowlist.has(repo), env.CI_STATUS);
     } catch {
       return null;
     }
@@ -144,6 +175,7 @@ async function handleIndexPage(
       flashRepo,
     ),
     200,
+    cacheControlFor(hasFlash, /* detail */ false),
   );
 }
 
@@ -151,16 +183,14 @@ async function loadRepoView(
   token: string,
   repo: string,
   isDirectPush: boolean,
+  kv?: KVNamespace,
 ): Promise<RepoView | null> {
   const { owner, repo: name } = parseRepo(repo);
   validateOrg(owner);
 
   // 1. Recent semver tags. 10 gives us 5 inline + room for the predecessor
   //    pairing on the oldest of those 5 + a small "older" strip.
-  const allTags = await githubApi<TagListItem[]>(
-    token, "GET", `/repos/${owner}/${name}/tags`, undefined,
-    { per_page: "10" },
-  );
+  const allTags = await cachedTags(token, kv, owner, name, 10);
   const sorted = sortSemverDesc(allTags.map((t) => t.name));
   const topTags = sorted.slice(0, TOP_TAGS_INLINE);
   if (topTags.length === 0) {
@@ -170,7 +200,7 @@ async function loadRepoView(
     // empty as before so we don't accidentally treat an auto-merge repo as a
     // direct-push one mid-release.
     if (isDirectPush) {
-      const block = await loadSyntheticBlock(token, owner, name);
+      const block = await loadSyntheticBlock(token, owner, name, kv);
       return {
         repo: `${owner}/${name}`,
         tagBlocks: block ? [block] : [],
@@ -190,9 +220,7 @@ async function loadRepoView(
       return { tag, prevTag: null, refs: [] as number[] };
     }
     try {
-      const cmp = await githubApi<CompareResponse>(
-        token, "GET", `/repos/${owner}/${name}/compare/${prevTag}...${tag}`,
-      );
+      const cmp = await cachedCompare(token, kv, owner, name, prevTag, tag);
       const refs = new Set<number>();
       for (const c of cmp.commits) {
         for (const n of extractRefIssues(c.commit.message)) refs.add(n);
@@ -211,9 +239,7 @@ async function loadRepoView(
   const issueByNum = new Map<number, IssueRow | null>();
   await Promise.all([...uniqueRefs].map(async (n) => {
     try {
-      const issue = await githubApi<RawIssue>(
-        token, "GET", `/repos/${owner}/${name}/issues/${n}`,
-      );
+      const issue = await cachedIssue(token, kv, owner, name, n);
       if (issue.pull_request) { issueByNum.set(n, null); return; }
       const labels = issue.labels.map((l) => l.name);
       issueByNum.set(n, {
@@ -267,10 +293,11 @@ async function loadSyntheticBlock(
   token: string,
   owner: string,
   name: string,
+  kv?: KVNamespace,
 ): Promise<TagBlock | null> {
   let defaultBranch: string;
   try {
-    const meta = await githubApi<RepoMeta>(token, "GET", `/repos/${owner}/${name}`);
+    const meta = await cachedRepoMeta(token, kv, owner, name);
     defaultBranch = meta.default_branch;
   } catch {
     return null;
@@ -279,10 +306,7 @@ async function loadSyntheticBlock(
 
   let commits: RawCommit[] = [];
   try {
-    commits = await githubApi<RawCommit[]>(
-      token, "GET", `/repos/${owner}/${name}/commits`, undefined,
-      { sha: defaultBranch, per_page: String(SYNTHETIC_COMMIT_WINDOW) },
-    );
+    commits = await cachedCommits(token, kv, owner, name, defaultBranch, SYNTHETIC_COMMIT_WINDOW);
   } catch {
     return null;
   }
@@ -299,7 +323,7 @@ async function loadSyntheticBlock(
     return null;
   }
 
-  const issues = await fetchIssuesByNumbers(token, owner, name, refs);
+  const issues = await fetchIssuesByNumbers(token, owner, name, refs, kv);
   const openRows: IssueRow[] = issues
     .filter((i) => !i.pull_request && i.state === "open")
     .map((i) => {
@@ -355,6 +379,7 @@ async function loadRelease(
   token: string,
   repoParam: string,
   tag: string,
+  kv?: KVNamespace,
 ): Promise<ReleasePayload> {
   const { owner, repo: name } = parseRepo(repoParam);
   validateOrg(owner);
@@ -363,10 +388,7 @@ async function loadRelease(
   //    compare endpoint. 30 is plenty given typical release cadence; for
   //    older tags the operator can pass the URL anyway and we fall back to a
   //    bounded commit list below.
-  const tags = await githubApi<TagListItem[]>(
-    token, "GET", `/repos/${owner}/${name}/tags`, undefined,
-    { per_page: "30" },
-  );
+  const tags = await cachedTags(token, kv, owner, name, 30);
   const tagNames = tags.map((t) => t.name);
   if (!tagNames.includes(tag)) {
     throw new GitHubApiError(
@@ -380,12 +402,12 @@ async function loadRelease(
   //    attribute (Refs in commit message, PR body, branch prefix). Shared
   //    with the dashboard banner path so the two views stay in lockstep.
   const { issueNumbers, commitCount } = await collectIssueNumbersForRange(
-    token, owner, name, tag, prev,
+    token, owner, name, tag, prev, kv,
   );
 
   // 3. Hydrate candidates. The /issues/:n endpoint also returns PRs, so we
   //    filter those out below (PRs carry a `pull_request` discriminator).
-  const issues = await fetchIssuesByNumbers(token, owner, name, issueNumbers);
+  const issues = await fetchIssuesByNumbers(token, owner, name, issueNumbers, kv);
 
   const rows: IssueRow[] = issues
     .filter((i) => !i.pull_request)
@@ -413,19 +435,7 @@ async function loadRelease(
   };
 }
 
-interface TagListItem { name: string; commit: { sha: string } }
 interface RawCommit { sha: string; commit: { message: string } }
-interface CompareResponse { commits: RawCommit[] }
-interface RawIssue {
-  number: number;
-  title: string;
-  state: string;
-  labels: Array<{ name: string }>;
-  assignees: Array<{ login: string }>;
-  html_url: string;
-  updated_at: string;
-  pull_request?: unknown;
-}
 
 function numericList(s: string | null): number[] {
   if (!s) return [];
@@ -436,11 +446,12 @@ function numericList(s: string | null): number[] {
 // HTML
 // --------------------------------------------------------------------------
 
-function html(body: string, status: number): Response {
-  return new Response(body, {
-    status,
-    headers: { "Content-Type": "text/html; charset=utf-8" },
-  });
+function html(body: string, status: number, cacheControl?: string): Response {
+  const headers: Record<string, string> = {
+    "Content-Type": "text/html; charset=utf-8",
+  };
+  if (cacheControl) headers["Cache-Control"] = cacheControl;
+  return new Response(body, { status, headers });
 }
 
 function renderHtml(

@@ -131,7 +131,9 @@ export class CIDashboardHub extends DurableObject<Env> {
       const { repo, tag } = await request.json<{ repo: string; tag?: string }>();
       await this.ensureAlerts();
       try {
-        const alert = await computeReleaseAlert(this.env.GITHUB_TOKEN, repo, tag);
+        const alert = await computeReleaseAlert(
+          this.env.GITHUB_TOKEN, repo, tag, this.env.CI_STATUS,
+        );
         this.persistAlert(repo, alert);
         this.broadcastAlerts();
       } catch {
@@ -155,7 +157,7 @@ export class CIDashboardHub extends DurableObject<Env> {
       }
       try {
         const fresh = await recomputeAlert(
-          this.env.GITHUB_TOKEN, repo, existing.tag,
+          this.env.GITHUB_TOKEN, repo, existing.tag, this.env.CI_STATUS,
         );
         this.persistAlert(repo, fresh);
         this.broadcastAlerts();

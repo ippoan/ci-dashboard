@@ -1,4 +1,5 @@
 import { githubApi, parseRepo, validateOrg } from "./github-api";
+import { invalidateIssue } from "./release-cache";
 
 // POST /api/release-close-batch
 //
@@ -16,7 +17,7 @@ const PAIR_RE = /^(.+):(\d+)$/;
 
 export async function handleReleaseCloseBatch(
   req: Request,
-  env: { GITHUB_TOKEN: string },
+  env: { GITHUB_TOKEN: string; CI_STATUS?: KVNamespace },
   hub?: DurableObjectStub,
   ctx?: ExecutionContext,
 ): Promise<Response> {
@@ -90,6 +91,12 @@ export async function handleReleaseCloseBatch(
     if (r.status === "fulfilled") closed.push(r.value);
     else failed.push(ops[i]!.issue);
   });
+
+  // Invalidate cached issue snapshots so the next /releases load reflects the
+  // newly-closed state instead of the 60s-stale "open" row.
+  await Promise.all(
+    closed.map((n) => invalidateIssue(env.CI_STATUS, owner, name, n)),
+  );
 
   // Kick Hub to recompute alert state for this repo when at least one close
   // succeeded. Same waitUntil pattern as release-close.ts so the redirect
