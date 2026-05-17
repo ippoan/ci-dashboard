@@ -1,6 +1,7 @@
 import { fetchOrgIssues, type OrgIssue } from "./mcp/tools/issues";
 import { fetchProjectIssueMap, type ProjectRef } from "./mcp/tools/projects";
 import { renderTabs, TAB_STYLES } from "./nav-tabs";
+import { PWA_HEAD_TAGS, PWA_REGISTER_SCRIPT } from "./pwa";
 
 // Orgs fetched in full. Same allowlist as github-api.ts (not imported because
 // ALLOWED_ORGS isn't exported; keep the two in sync if either grows).
@@ -108,7 +109,7 @@ function renderHtml(
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Open Issues — CI Dashboard</title>
+  <title>Open Issues — CI Dashboard</title>${PWA_HEAD_TAGS}
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
@@ -248,6 +249,7 @@ function renderHtml(
   ${repos.length === 0 && projectTagged.length === 0
     ? `<div class="empty">🎉 No open issues. Nice work.</div>`
     : repoSections}
+  ${PWA_REGISTER_SCRIPT}
 </body>
 </html>`;
 }

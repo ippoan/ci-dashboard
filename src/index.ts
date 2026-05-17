@@ -9,6 +9,11 @@ import { handleReleaseCloseBatch } from "./release-close-batch";
 import { handleRecheck } from "./recheck";
 import { handleTagRelease } from "./tag-release";
 import { handleMcpRequest } from "./mcp/server";
+import {
+  handlePwaManifest,
+  handlePwaServiceWorker,
+  handlePwaIcon,
+} from "./pwa";
 
 export { CIDashboardHub } from "./hub";
 
@@ -92,6 +97,12 @@ app.post("/api/dismiss", async (c) => {
   );
   return c.json({ ok: true });
 });
+
+// PWA assets — manifest, service worker, icons. Served from the same origin
+// so the SW can claim scope "/".
+app.get("/manifest.webmanifest", () => handlePwaManifest());
+app.get("/sw.js", () => handlePwaServiceWorker());
+app.get("/icons/:file", (c) => handlePwaIcon("/icons/" + c.req.param("file")));
 
 // MCP endpoint (Streamable HTTP)
 app.all("/mcp", (c) => handleMcpRequest(c.req.raw, c.env.GITHUB_TOKEN));

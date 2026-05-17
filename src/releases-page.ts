@@ -11,6 +11,7 @@ import {
 } from "./release-alert";
 import { loadDirectPushAllowlist } from "./direct-push-allowlist";
 import { renderTabs, TAB_STYLES } from "./nav-tabs";
+import { PWA_HEAD_TAGS, PWA_REGISTER_SCRIPT } from "./pwa";
 
 // `/releases` (no params) renders a list of "recent releases" — every watched
 // repo (from Hub `/statuses`) with its latest semver-sorted tags, each linking
@@ -499,7 +500,7 @@ function renderHtml(
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Release ${escapeHtml(data.tag)} — ${escapeHtml(data.repo)}</title>
+  <title>Release ${escapeHtml(data.tag)} — ${escapeHtml(data.repo)}</title>${PWA_HEAD_TAGS}
   <style>${STYLES}</style>
 </head>
 <body>
@@ -511,6 +512,7 @@ function renderHtml(
   ${flash}
   ${empty}
   ${formInner}
+  ${PWA_REGISTER_SCRIPT}
 </body>
 </html>`;
 }
@@ -584,7 +586,7 @@ function renderIndex(
   return `<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Releases — CI Dashboard</title><style>${STYLES}</style>
+<title>Releases — CI Dashboard</title>${PWA_HEAD_TAGS}<style>${STYLES}</style>
 </head><body>
 <header>
   ${renderTabs("releases")}
@@ -595,6 +597,7 @@ ${flash}
 ${body}
 <h2 class="lookup-header">Look up another release</h2>
 ${renderLookupForm(null, null)}
+${PWA_REGISTER_SCRIPT}
 </body></html>`;
 }
 
