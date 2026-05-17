@@ -2,6 +2,7 @@ import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:
 import { describe, it, expect, vi, afterEach } from "vitest";
 import worker from "../src/index";
 import type { Env } from "../src/index";
+import { clearReleaseCache } from "../src/release-cache";
 
 // `watched` populates the Hub `/statuses` response so the no-params index
 // page can enumerate repos. Defaults to empty so existing tests keep their
@@ -101,7 +102,15 @@ function stubGithubApi(opts: { tagExists?: boolean; failPr?: boolean } = {}) {
 }
 
 describe("GET /releases", () => {
-  afterEach(() => { vi.restoreAllMocks(); });
+  // KV-backed release cache and the direct-push allowlist cache both persist
+  // across tests in the shared CI_STATUS namespace; wipe them so fixture-A
+  // doesn't leak into fixture-B (e.g. the synthetic-block test caching the
+  // claude-hooks allowlist entry).
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await clearReleaseCache(env.CI_STATUS);
+    await env.CI_STATUS.delete("direct-push-allowlist:v1");
+  });
 
   it("renders the empty-state landing page when nothing is watched yet", async () => {
     const req = new Request("http://localhost/releases");
@@ -612,6 +621,97 @@ describe("GET /releases", () => {
     expect(html).toContain("1 closed issue");
     // But the actions row (and its button) is gone.
     expect(html).not.toContain("Close selected as released");
+  });
+
+  it("sets browser-cacheable Cache-Control on the no-flash detail page", async () => {
+    stubGithubApi();
+    const req = new Request("http://localhost/releases?repo=ippoan/ci-dashboard&tag=v1.2.0");
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(req, testEnv(), ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(200);
+    // Detail page: longer TTL since a single repo+tag changes less often.
+    expect(res.headers.get("Cache-Control")).toMatch(/max-age=30/);
+    expect(res.headers.get("Cache-Control")).toMatch(/stale-while-revalidate/);
+  });
+
+  it("disables browser caching when flash params are present", async () => {
+    // Flash redirects must always re-render with fresh server state — a
+    // cached HTML response would show stale banner content on back/forward.
+    stubGithubApi();
+    const req = new Request(
+      "http://localhost/releases?repo=ippoan/ci-dashboard&tag=v1.2.0&closed=42",
+    );
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(req, testEnv(), ctx);
+    await waitOnExecutionContext(ctx);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+
+  it("re-uses cached GitHub responses on the second load (no duplicate fetches)", async () => {
+    // The whole point of the KV cache layer: the SSR page hits api.github.com
+    // once per fixture URL, then serves from KV on the next request. We count
+    // the fetch calls (which the cache helper bypasses on KV-hit) instead of
+    // asserting on KV internals.
+    let fetchCount = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (req) => {
+      const url = typeof req === "string" ? req : (req as Request).url;
+      fetchCount++;
+      // Empty allowlist so the synthetic path doesn't fire for any other repo.
+      // We cache it on success so the second load skips this round-trip too.
+      if (url.includes("/contents/wt-direct-push/config/direct-push-ok.txt")) {
+        // parseAllowlist drops empty content → repos.length === 0 → NO cache
+        // write. Return a placeholder entry that gets cached and resolves to
+        // a no-op (its tags fetch returns []).
+        return Response.json({ content: btoa("ippoan/placeholder\n"), encoding: "base64" });
+      }
+      if (url.includes("/repos/ippoan/placeholder/tags")) {
+        return Response.json([]);
+      }
+      if (url.match(/\/repos\/ippoan\/placeholder(\?|$)/)) {
+        return Response.json({ default_branch: "main" });
+      }
+      if (url.includes("/repos/ippoan/placeholder/commits")) {
+        return Response.json([]);
+      }
+      if (url.includes("/repos/ippoan/ci-dashboard/tags")) {
+        return Response.json([
+          { name: "v1.2.0", commit: { sha: "a" } },
+          { name: "v1.1.0", commit: { sha: "b" } },
+        ]);
+      }
+      if (url.includes("/compare/v1.1.0...v1.2.0")) {
+        return Response.json({
+          commits: [{ sha: "x", commit: { message: "feat\n\nRefs #1" } }],
+        });
+      }
+      if (url.endsWith("/issues/1")) {
+        return Response.json({
+          number: 1, title: "x", state: "open",
+          labels: [], assignees: [],
+          html_url: "https://github.com/ippoan/ci-dashboard/issues/1",
+          updated_at: "2026-05-01T00:00:00Z",
+        });
+      }
+      return new Response("not stubbed", { status: 500 });
+    });
+
+    const e = testEnv({ watched: ["ippoan/ci-dashboard"] });
+    const req1 = new Request("http://localhost/releases");
+    const ctx1 = createExecutionContext();
+    await worker.fetch(req1, e, ctx1);
+    await waitOnExecutionContext(ctx1);
+    const firstLoadCalls = fetchCount;
+    expect(firstLoadCalls).toBeGreaterThan(0);
+
+    const req2 = new Request("http://localhost/releases");
+    const ctx2 = createExecutionContext();
+    const res2 = await worker.fetch(req2, e, ctx2);
+    await waitOnExecutionContext(ctx2);
+    // Second load should be served entirely from KV — no new GitHub calls.
+    expect(fetchCount).toBe(firstLoadCalls);
+    expect(res2.status).toBe(200);
   });
 
   it("does not turn an unallowlisted tag-less repo into a synthetic block", async () => {

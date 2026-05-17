@@ -1,4 +1,5 @@
 import { githubApi, parseRepo, validateOrg } from "./github-api";
+import { invalidateIssue } from "./release-cache";
 
 // POST /api/release-close
 // Receives the form submitted from /releases?repo=...&tag=... and closes the
@@ -13,7 +14,7 @@ import { githubApi, parseRepo, validateOrg } from "./github-api";
 
 export async function handleReleaseClose(
   req: Request,
-  env: { GITHUB_TOKEN: string },
+  env: { GITHUB_TOKEN: string; CI_STATUS?: KVNamespace },
   hub?: DurableObjectStub,
   ctx?: ExecutionContext,
 ): Promise<Response> {
@@ -71,6 +72,13 @@ export async function handleReleaseClose(
     if (r.status === "fulfilled") closed.push(r.value);
     else failed.push(issueNumbers[i]!);
   });
+
+  // Drop the just-closed issues from the release cache so the next /releases
+  // load (and the banner recompute below) sees `state: "closed"` instead of
+  // the still-open snapshot from the 60s TTL window.
+  await Promise.all(
+    closed.map((n) => invalidateIssue(env.CI_STATUS, owner, name, n)),
+  );
 
   // Kick the Hub to recompute the banner alert state for this repo when at
   // least one issue actually closed. waitUntil keeps the user-facing redirect

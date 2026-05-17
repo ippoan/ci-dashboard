@@ -18,7 +18,6 @@
 // it doesn't show.
 
 import {
-  githubApi,
   parseRepo,
   validateOrg,
   GitHubApiError,
@@ -30,6 +29,14 @@ import {
   sortSemverDesc,
   previousTag,
 } from "./release-helpers";
+import {
+  cachedTags,
+  cachedCompare,
+  cachedCommits,
+  cachedPullRequest,
+  cachedIssue,
+  type RawIssue,
+} from "./release-cache";
 
 export interface ReleaseAlert {
   repo: string;          // "owner/name"
@@ -39,20 +46,7 @@ export interface ReleaseAlert {
   detectedAt: string;    // ISO
 }
 
-interface TagListItem { name: string; commit: { sha: string } }
-interface RawCommit { sha: string; commit: { message: string } }
-interface CompareResponse { commits: RawCommit[] }
-interface PrResponse { head: { ref: string }; body: string | null }
-export interface RawIssue {
-  number: number;
-  title: string;
-  state: string;
-  labels: Array<{ name: string }>;
-  assignees: Array<{ login: string }>;
-  html_url: string;
-  updated_at: string;
-  pull_request?: unknown;
-}
+export type { RawIssue };
 
 // Walk the commits introduced by `tag` (using compare against `prevTag` when
 // available, otherwise a bounded log walk for the first-ever release) and
@@ -63,15 +57,11 @@ export async function collectIssueNumbersForRange(
   name: string,
   tag: string,
   prevTag: string | null,
+  kv?: KVNamespace,
 ): Promise<{ issueNumbers: Set<number>; commitCount: number }> {
   const commits = prevTag
-    ? (await githubApi<CompareResponse>(
-        token, "GET", `/repos/${owner}/${name}/compare/${prevTag}...${tag}`,
-      )).commits
-    : await githubApi<RawCommit[]>(
-        token, "GET", `/repos/${owner}/${name}/commits`, undefined,
-        { sha: tag, per_page: "50" },
-      );
+    ? (await cachedCompare(token, kv, owner, name, prevTag, tag)).commits
+    : await cachedCommits(token, kv, owner, name, tag, 50);
 
   const issueNumbers = new Set<number>();
   const prNumbers = new Set<number>();
@@ -86,9 +76,7 @@ export async function collectIssueNumbersForRange(
   // squash-merge subject line drops.
   await Promise.all([...prNumbers].map(async (n) => {
     try {
-      const pr = await githubApi<PrResponse>(
-        token, "GET", `/repos/${owner}/${name}/pulls/${n}`,
-      );
+      const pr = await cachedPullRequest(token, kv, owner, name, n);
       const fromBranch = extractBranchIssue(pr.head.ref);
       if (fromBranch !== null) issueNumbers.add(fromBranch);
       if (pr.body) {
@@ -108,12 +96,11 @@ export async function fetchIssuesByNumbers(
   owner: string,
   name: string,
   numbers: Iterable<number>,
+  kv?: KVNamespace,
 ): Promise<RawIssue[]> {
   const results = await Promise.all([...numbers].map(async (n) => {
     try {
-      return await githubApi<RawIssue>(
-        token, "GET", `/repos/${owner}/${name}/issues/${n}`,
-      );
+      return await cachedIssue(token, kv, owner, name, n);
     } catch {
       return null;
     }
@@ -128,14 +115,12 @@ export async function computeReleaseAlert(
   token: string,
   repo: string,
   tagOverride?: string,
+  kv?: KVNamespace,
 ): Promise<ReleaseAlert | null> {
   const { owner, repo: name } = parseRepo(repo);
   validateOrg(owner);
 
-  const tags = await githubApi<TagListItem[]>(
-    token, "GET", `/repos/${owner}/${name}/tags`, undefined,
-    { per_page: "30" },
-  );
+  const tags = await cachedTags(token, kv, owner, name, 30);
   const tagNames = tags.map((t) => t.name);
   if (tagNames.length === 0) return null;
 
@@ -153,12 +138,12 @@ export async function computeReleaseAlert(
 
   const prevTag = previousTag(sorted, tag);
   const { issueNumbers } = await collectIssueNumbersForRange(
-    token, owner, name, tag, prevTag,
+    token, owner, name, tag, prevTag, kv,
   );
 
   if (issueNumbers.size === 0) return null;
 
-  const issues = await fetchIssuesByNumbers(token, owner, name, issueNumbers);
+  const issues = await fetchIssuesByNumbers(token, owner, name, issueNumbers, kv);
   const openIssues = issues
     .filter((i) => !i.pull_request && i.state === "open")
     .map((i) => ({ number: i.number, title: i.title, url: i.html_url }))
@@ -182,6 +167,7 @@ export async function recomputeAlert(
   token: string,
   repo: string,
   tag: string,
+  kv?: KVNamespace,
 ): Promise<ReleaseAlert | null> {
-  return computeReleaseAlert(token, repo, tag);
+  return computeReleaseAlert(token, repo, tag, kv);
 }
