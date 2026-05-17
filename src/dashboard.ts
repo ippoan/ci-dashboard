@@ -1,4 +1,5 @@
 import { renderTabs, TAB_STYLES } from "./nav-tabs";
+import { PWA_HEAD_TAGS, PWA_REGISTER_SCRIPT } from "./pwa";
 
 export function handleDashboard(): Response {
   const html = `<!DOCTYPE html>
@@ -6,7 +7,7 @@ export function handleDashboard(): Response {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>CI Dashboard</title>
+  <title>CI Dashboard</title>${PWA_HEAD_TAGS}
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     ${TAB_STYLES}
@@ -638,6 +639,7 @@ export function handleDashboard(): Response {
 
     connect();
   </script>
+  ${PWA_REGISTER_SCRIPT}
 </body>
 </html>`;
 

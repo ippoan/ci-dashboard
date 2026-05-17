@@ -1,0 +1,65 @@
+import { describe, it, expect } from "vitest";
+import {
+  PWA_HEAD_TAGS,
+  PWA_REGISTER_SCRIPT,
+  handlePwaManifest,
+  handlePwaServiceWorker,
+  handlePwaIcon,
+} from "../src/pwa";
+
+describe("PWA head + register snippets", () => {
+  it("links the manifest and registers the service worker", () => {
+    expect(PWA_HEAD_TAGS).toContain('rel="manifest"');
+    expect(PWA_HEAD_TAGS).toContain('href="/manifest.webmanifest"');
+    expect(PWA_HEAD_TAGS).toContain("theme-color");
+    expect(PWA_REGISTER_SCRIPT).toContain('navigator.serviceWorker.register("/sw.js")');
+  });
+});
+
+describe("handlePwaManifest", () => {
+  it("returns a valid manifest with required PWA fields", async () => {
+    const res = handlePwaManifest();
+    expect(res.headers.get("Content-Type")).toContain("application/manifest+json");
+    const json = await res.json() as Record<string, unknown>;
+    expect(json.name).toBeTruthy();
+    expect(json.short_name).toBeTruthy();
+    expect(json.start_url).toBe("/");
+    expect(json.display).toBe("standalone");
+    expect(Array.isArray(json.icons)).toBe(true);
+    const icons = json.icons as Array<{ purpose: string }>;
+    expect(icons.some((i) => i.purpose.includes("any"))).toBe(true);
+    expect(icons.some((i) => i.purpose.includes("maskable"))).toBe(true);
+  });
+});
+
+describe("handlePwaServiceWorker", () => {
+  it("returns JS with correct content-type and scope header", async () => {
+    const res = handlePwaServiceWorker();
+    expect(res.headers.get("Content-Type")).toContain("application/javascript");
+    expect(res.headers.get("Service-Worker-Allowed")).toBe("/");
+    const body = await res.text();
+    expect(body).toContain("addEventListener(\"install\"");
+    expect(body).toContain("addEventListener(\"fetch\"");
+    // Do not intercept live endpoints.
+    expect(body).toContain("/ws");
+    expect(body).toContain("/mcp");
+    expect(body).toContain("/webhook");
+    expect(body).toContain("/api/");
+  });
+});
+
+describe("handlePwaIcon", () => {
+  it("returns SVG with svg+xml content-type", async () => {
+    const res = handlePwaIcon("/icons/icon.svg");
+    expect(res.headers.get("Content-Type")).toContain("image/svg+xml");
+    const body = await res.text();
+    expect(body.startsWith("<svg")).toBe(true);
+  });
+
+  it("returns the maskable variant for the maskable path", async () => {
+    const normal = await handlePwaIcon("/icons/icon.svg").text();
+    const maskable = await handlePwaIcon("/icons/icon-maskable.svg").text();
+    expect(normal).not.toBe(maskable);
+    expect(maskable).toContain("scale(0.8)");
+  });
+});
