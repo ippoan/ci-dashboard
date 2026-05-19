@@ -26,7 +26,7 @@ const TABS: ReadonlyArray<TabDef> = [
   { key: "releases",  href: "/releases", label: "🏷️ Releases" },
   {
     key: "branch-protection",
-    href: "https://auth.ippoan.org/dashboard/branch-protection",
+    href: "https://auth-staging.ippoan.org/dashboard/branch-protection",
     label: "🛡️ Branch Protection",
     external: true,
   },
