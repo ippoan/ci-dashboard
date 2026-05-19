@@ -9,20 +9,35 @@
 export type TabKey = "dashboard" | "issues" | "releases";
 
 interface TabDef {
-  key: TabKey;
+  key: TabKey | "branch-protection";
   href: string;
   label: string;
+  // External tabs live on a different origin (auth-worker), so they open in a
+  // new tab and are never marked active here. The destination handler does its
+  // own auth gating — visiting `/dashboard/branch-protection` without an
+  // elevation flag bounces the browser into `/mcp/elevate`, so this is the
+  // single entry point operators need to click.
+  external?: boolean;
 }
 
 const TABS: ReadonlyArray<TabDef> = [
   { key: "dashboard", href: "/",         label: "📊 Dashboard" },
   { key: "issues",    href: "/issues",   label: "📋 Open Issues" },
   { key: "releases",  href: "/releases", label: "🏷️ Releases" },
+  {
+    key: "branch-protection",
+    href: "https://auth.ippoan.org/dashboard/branch-protection",
+    label: "🛡️ Branch Protection",
+    external: true,
+  },
 ];
 
 export function renderTabs(active: TabKey): string {
   const items = TABS.map((t) => {
     const cls = t.key === active ? "tab tab-active" : "tab";
+    if (t.external) {
+      return `<a href="${t.href}" class="${cls}" target="_blank" rel="noopener">${t.label}</a>`;
+    }
     return `<a href="${t.href}" class="${cls}">${t.label}</a>`;
   }).join("");
   return `<nav class="tabs">${items}</nav>`;
