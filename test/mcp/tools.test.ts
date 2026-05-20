@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { githubApi, githubApiRaw, parseRepo, validateOrg, GitHubApiError } from "../../src/github-api";
+import { buildUpdateIssuePayload } from "../../src/mcp/tools/issues";
 
 // Test MCP tool logic by calling the same functions the tools use.
 // The MCP protocol layer (JSON-RPC, transport) is tested by the SDK itself.
@@ -430,6 +431,25 @@ describe("Issues write tool logic", () => {
     expect(body.labels).toEqual([]);
     expect(body.assignees).toEqual([]);
     expect(body.milestone).toBeNull();
+  });
+
+  it("update_issue rejects an empty PATCH (no fields provided) — buildUpdateIssuePayload throws", () => {
+    expect(() => buildUpdateIssuePayload({})).toThrow(
+      /at least one of title\/body\/labels\/assignees\/milestone/,
+    );
+  });
+
+  it("buildUpdateIssuePayload preserves empty arrays and null milestone as intentional clears", () => {
+    expect(
+      buildUpdateIssuePayload({ labels: [], assignees: [], milestone: null }),
+    ).toEqual({ labels: [], assignees: [], milestone: null });
+  });
+
+  it("buildUpdateIssuePayload omits undefined fields entirely (partial update)", () => {
+    expect(buildUpdateIssuePayload({ title: "new", body: "" })).toEqual({
+      title: "new",
+      body: "",
+    });
   });
 
   it("reopen_issue PATCHes state=open without state_reason", async () => {

@@ -2,6 +2,32 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { githubApi, parseRepo, validateOrg } from "../../github-api";
 
+/** Build the PATCH body for `update_issue` from optional fields. Strips
+ *  fields the caller did not provide (= `undefined`); preserves empty
+ *  arrays and `null` (those are intentional clear-the-field signals).
+ *  Throws if no fields would be sent (= empty PATCH is rejected). */
+export function buildUpdateIssuePayload(input: {
+  title?: string;
+  body?: string;
+  labels?: string[];
+  assignees?: string[];
+  milestone?: number | null;
+}): Record<string, unknown> {
+  const payload: Record<string, unknown> = {};
+  if (input.title !== undefined) payload.title = input.title;
+  if (input.body !== undefined) payload.body = input.body;
+  if (input.labels !== undefined) payload.labels = input.labels;
+  if (input.assignees !== undefined) payload.assignees = input.assignees;
+  if (input.milestone !== undefined) payload.milestone = input.milestone;
+
+  if (Object.keys(payload).length === 0) {
+    throw new Error(
+      "update_issue: at least one of title/body/labels/assignees/milestone must be provided",
+    );
+  }
+  return payload;
+}
+
 export function registerIssuesTools(server: McpServer, token: string): void {
   server.registerTool(
     "list_issues",
@@ -149,18 +175,7 @@ export function registerIssuesTools(server: McpServer, token: string): void {
       const { owner, repo: name } = parseRepo(repo);
       validateOrg(owner);
 
-      const payload: Record<string, unknown> = {};
-      if (title !== undefined) payload.title = title;
-      if (body !== undefined) payload.body = body;
-      if (labels !== undefined) payload.labels = labels;
-      if (assignees !== undefined) payload.assignees = assignees;
-      if (milestone !== undefined) payload.milestone = milestone;
-
-      if (Object.keys(payload).length === 0) {
-        throw new Error(
-          "update_issue: at least one of title/body/labels/assignees/milestone must be provided",
-        );
-      }
+      const payload = buildUpdateIssuePayload({ title, body, labels, assignees, milestone });
 
       const updated = await githubApi<Issue>(
         token, "PATCH", `/repos/${owner}/${name}/issues/${issue_number}`, payload,
