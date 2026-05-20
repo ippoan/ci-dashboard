@@ -6,7 +6,7 @@
 // pages self-contained (no external stylesheet to fetch) and avoid the
 // CSS-classname coupling problem if pages grow apart later.
 
-export type TabKey = "dashboard" | "issues" | "releases";
+export type TabKey = "dashboard" | "issues" | "releases" | "secret-gen";
 
 interface TabDef {
   key: TabKey | "branch-protection";
@@ -21,9 +21,10 @@ interface TabDef {
 }
 
 const TABS: ReadonlyArray<TabDef> = [
-  { key: "dashboard", href: "/",         label: "📊 Dashboard" },
-  { key: "issues",    href: "/issues",   label: "📋 Open Issues" },
-  { key: "releases",  href: "/releases", label: "🏷️ Releases" },
+  { key: "dashboard",  href: "/",           label: "📊 Dashboard" },
+  { key: "issues",     href: "/issues",     label: "📋 Open Issues" },
+  { key: "releases",   href: "/releases",   label: "🏷️ Releases" },
+  { key: "secret-gen", href: "/secret-gen", label: "🔐 Secret Generator" },
   {
     key: "branch-protection",
     href: "https://auth-staging.ippoan.org/dashboard/branch-protection",

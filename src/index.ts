@@ -7,6 +7,7 @@ import { handleReleasesPage } from "./releases-page";
 import { handleReleaseClose } from "./release-close";
 import { handleReleaseCloseBatch } from "./release-close-batch";
 import { handleRecheck } from "./recheck";
+import { handleSecretGenPage } from "./secret-gen-page";
 import { handleTagRelease } from "./tag-release";
 import { handleMcpRequest } from "./mcp/server";
 import {
@@ -38,6 +39,11 @@ app.get("/", () => handleDashboard());
 
 // Open issues (SSR, cross-org)
 app.get("/issues", (c) => handleIssuesPage(c.env));
+
+// Cryptographically-strong random value generator (client-side, no server-side
+// state). Operators paste the output into Cloudflare Secrets Store / wrangler
+// secret put / GitHub Actions secrets.
+app.get("/secret-gen", () => handleSecretGenPage());
 
 // Release confirmation view (SSR + POST close action)
 // See issue #35 + CLAUDE.md `release / close フロー`.
