@@ -9,16 +9,21 @@
 export type TabKey = "dashboard" | "issues" | "releases" | "secret-gen";
 
 interface TabDef {
-  key: TabKey | "branch-protection";
+  key: TabKey | "branch-protection" | "gcp-secrets";
   href: string;
   label: string;
-  // External tabs live on a different origin (auth-worker), so they open in a
-  // new tab and are never marked active here. The destination handler does its
-  // own auth gating — visiting `/dashboard/branch-protection` without an
-  // elevation flag bounces the browser into `/mcp/elevate`, so this is the
-  // single entry point operators need to click.
+  // External tabs live on a different origin, so they open in a new tab and
+  // are never marked active here. The destination handler does its own auth
+  // gating — `branch-protection` bounces non-elevated browsers into
+  // `/mcp/elevate`; `gcp-secrets` requires Google IAM (the operator already
+  // has accessor permissions on the project).
   external?: boolean;
 }
+
+// secrets-inventory (ippoan/secrets-inventory) で source of truth として扱う
+// GCP project。値取得 1-click の入口として GCP Secret Manager コンソールに
+// 直接飛ばす。project を変える場合はここを差し替える。
+const SECRETS_GCP_PROJECT = "cloudsql-sv";
 
 const TABS: ReadonlyArray<TabDef> = [
   { key: "dashboard",  href: "/",           label: "📊 Dashboard" },
@@ -29,6 +34,12 @@ const TABS: ReadonlyArray<TabDef> = [
     key: "branch-protection",
     href: "https://auth-staging.ippoan.org/dashboard/branch-protection",
     label: "🛡️ Branch Protection",
+    external: true,
+  },
+  {
+    key: "gcp-secrets",
+    href: `https://console.cloud.google.com/security/secret-manager?project=${encodeURIComponent(SECRETS_GCP_PROJECT)}`,
+    label: "🗝️ GCP Secrets",
     external: true,
   },
 ];
