@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { githubApi, githubApiRaw, parseRepo, validateOrg, GitHubApiError } from "../../src/github-api";
-import { buildUpdateIssuePayload } from "../../src/mcp/tools/issues";
+import { buildUpdateIssuePayload, fetchOrgIssues } from "../../src/mcp/tools/issues";
 
 // Test MCP tool logic by calling the same functions the tools use.
 // The MCP protocol layer (JSON-RPC, transport) is tested by the SDK itself.
@@ -559,6 +559,36 @@ describe("list_org_issues tool logic", () => {
     expect(() => {
       for (const o of ["ippoan", "evil-org"]) validateOrg(o);
     }).toThrow(GitHubApiError);
+  });
+
+  it("appends archived:false to the search q by default", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({ total_count: 0, incomplete_results: false, items: [] }),
+    );
+
+    await fetchOrgIssues("token", { orgs: ["ippoan"], state: "open" });
+
+    const url = fetchSpy.mock.calls[0]![0] as string;
+    const decoded = decodeURIComponent(url.replace(/\+/g, " "));
+    expect(decoded).toContain("archived:false");
+  });
+
+  it("does not append archived:false when caller already passed archived: in query", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({ total_count: 0, incomplete_results: false, items: [] }),
+    );
+
+    await fetchOrgIssues("token", {
+      orgs: ["ippoan"],
+      state: "open",
+      query: "archived:true",
+    });
+
+    const url = fetchSpy.mock.calls[0]![0] as string;
+    const decoded = decodeURIComponent(url.replace(/\+/g, " "));
+    // Caller override must be the only `archived:` qualifier in the query.
+    expect(decoded).toContain("archived:true");
+    expect(decoded).not.toContain("archived:false");
   });
 });
 

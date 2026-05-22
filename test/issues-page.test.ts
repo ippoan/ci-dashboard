@@ -242,6 +242,12 @@ describe("GET /issues", () => {
     expect(yhonda!).toContain("repo:yhonda-ohishi/claude-hooks");
     expect(yhonda!).not.toContain("org:yhonda-ohishi");
 
+    // Both calls must exclude archived repos so old projects (e.g.
+    // ippoan/cf-secrets-mcp) don't leak open issues into the dashboard.
+    // Regression guard for issue #99.
+    expect(main!).toContain("archived:false");
+    expect(yhonda!).toContain("archived:false");
+
     for (const u of urls) expect(u).toContain("per_page=100");
   });
 
