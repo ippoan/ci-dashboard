@@ -414,12 +414,18 @@ export async function fetchOrgIssues(
   // the `org:` qualifier (the `repo:` already implies the owner). The
   // `validateOrg` allowlist check above still runs, so this is safe.
   const queryHasRepoFilter = !!query && /\brepo:/.test(query);
+  // Default-exclude archived repos so old projects like cf-secrets-mcp don't
+  // leak open issues into the dashboard. Caller can still opt back in (or
+  // request archived-only) by passing `archived:true` / `archived:false` in
+  // `query`.
+  const queryHasArchivedFilter = !!query && /\barchived:/.test(query);
 
   const parts: string[] = ["is:issue"];
   if (state !== "all") parts.push(`state:${state}`);
   if (!queryHasRepoFilter) {
     for (const o of orgs) parts.push(`org:${o}`);
   }
+  if (!queryHasArchivedFilter) parts.push("archived:false");
   if (labels) for (const l of labels) parts.push(`label:"${l}"`);
   if (assignee) parts.push(`assignee:${assignee}`);
   if (query) parts.push(query);
