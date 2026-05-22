@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { computeReleaseAlert, recomputeAlert } from "../src/release-alert";
+import {
+  computeReleaseAlert,
+  recomputeAlert,
+  computeReleaseAlertForPr,
+} from "../src/release-alert";
 
 // `computeReleaseAlert` fans out to several GitHub endpoints; we stub
 // globalThis.fetch and route by URL. Each test sets up a fixture map so the
@@ -10,6 +14,8 @@ interface Fixture {
   tags?: Array<{ name: string }>;
   compare?: Record<string, { commits: Array<{ commit: { message: string } }> }>;
   pulls?: Record<number, { head: { ref: string }; body: string | null }>;
+  // For PR-merge alert tests: /pulls/<n>/commits returns this array.
+  prCommits?: Record<number, Array<{ commit: { message: string } }>>;
   issues?: Record<number, {
     number: number;
     title: string;
@@ -35,6 +41,11 @@ function stubGithub(fx: Fixture) {
     if (cmp) {
       const key = `${cmp[1]}...${cmp[2]}`;
       return Response.json(fx.compare?.[key] ?? { commits: [] });
+    }
+    const prCommitsMatch = path.match(/\/pulls\/(\d+)\/commits$/);
+    if (prCommitsMatch) {
+      const n = Number(prCommitsMatch[1]);
+      return Response.json(fx.prCommits?.[n] ?? []);
     }
     const prMatch = path.match(/\/pulls\/(\d+)$/);
     if (prMatch) {
@@ -226,5 +237,98 @@ describe("recomputeAlert", () => {
     });
     const fresh = await recomputeAlert("token", "ippoan/foo", "v1.1.0");
     expect(fresh).toBeNull();
+  });
+});
+
+describe("computeReleaseAlertForPr", () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it("collects Refs from PR body, branch name, and commits", async () => {
+    stubGithub({
+      pulls: {
+        42: {
+          head: { ref: "10-fix-thing" },
+          body: "Resolves the bug.\n\nRefs #20\nRefs #21",
+        },
+      },
+      prCommits: {
+        42: [
+          { commit: { message: "fix: x\nRefs #30" } },
+          { commit: { message: "test: y" } },
+        ],
+      },
+      issues: {
+        10: openIssue(10, "branch issue"),
+        20: openIssue(20, "body ref one"),
+        21: closedIssue(21, "already closed"),
+        30: openIssue(30, "commit ref"),
+      },
+    });
+    const result = await computeReleaseAlertForPr(
+      "token", "ippoan/secrets-inventory-gcp", 42, "deadbeef12345", "main",
+    );
+    expect(result).not.toBeNull();
+    expect(result!.repo).toBe("ippoan/secrets-inventory-gcp");
+    expect(result!.tag).toBe("main@deadbee");
+    expect(result!.prNumber).toBe(42);
+    expect(result!.prevTag).toBeNull();
+    // 10 (branch) + 20 (body) + 30 (commit). 21 closed → dropped.
+    expect(result!.openIssues.map((i) => i.number)).toEqual([10, 20, 30]);
+  });
+
+  it("returns null when the PR references no issues", async () => {
+    stubGithub({
+      pulls: { 1: { head: { ref: "feat-no-prefix" }, body: "no refs" } },
+      prCommits: { 1: [{ commit: { message: "feat: thing" } }] },
+    });
+    const result = await computeReleaseAlertForPr(
+      "token", "ippoan/foo", 1, "abc1234", "main",
+    );
+    expect(result).toBeNull();
+  });
+
+  it("returns null when every referenced issue is closed", async () => {
+    stubGithub({
+      pulls: { 2: { head: { ref: "5-fix-x" }, body: null } },
+      prCommits: { 2: [{ commit: { message: "fix: x" } }] },
+      issues: { 5: closedIssue(5) },
+    });
+    const result = await computeReleaseAlertForPr(
+      "token", "ippoan/foo", 2, "abc1234", "main",
+    );
+    expect(result).toBeNull();
+  });
+
+  it("falls back to pr-<n> label when mergeSha is null", async () => {
+    stubGithub({
+      pulls: { 3: { head: { ref: "8-fix" }, body: null } },
+      prCommits: { 3: [] },
+      issues: { 8: openIssue(8) },
+    });
+    const result = await computeReleaseAlertForPr(
+      "token", "ippoan/foo", 3, null, "main",
+    );
+    expect(result?.tag).toBe("main@pr-3");
+  });
+
+  it("rejects disallowed orgs", async () => {
+    await expect(
+      computeReleaseAlertForPr("token", "evil-org/foo", 1, "abc", "main"),
+    ).rejects.toThrow(/Org not allowed/);
+  });
+
+  it("drops PR records that share issue numbers", async () => {
+    stubGithub({
+      pulls: { 4: { head: { ref: "feat-thing" }, body: "Refs #50\nRefs #51" } },
+      prCommits: { 4: [] },
+      issues: {
+        50: openIssue(50, "real issue"),
+        51: { ...openIssue(51, "actually a pr"), pull_request: { url: "x" } },
+      },
+    });
+    const result = await computeReleaseAlertForPr(
+      "token", "ippoan/foo", 4, "abc1234", "main",
+    );
+    expect(result?.openIssues.map((i) => i.number)).toEqual([50]);
   });
 });

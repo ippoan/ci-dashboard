@@ -5,6 +5,7 @@ import {
   type ReleaseAlert,
   recomputeAlert,
   computeReleaseAlert,
+  computeReleaseAlertForPr,
 } from "./release-alert";
 
 // WebSocket message envelope. All broadcasts now share `{ type, data }` so
@@ -18,12 +19,25 @@ type WsEnvelope =
 const ALERT_KEY_PREFIX = "release-alert:";
 const ALERT_TTL_SECONDS = 7 * 86400;
 
+function tagAlertKey(repo: string): string {
+  return `${ALERT_KEY_PREFIX}${repo}`;
+}
+
+function prAlertKey(repo: string, prNumber: number): string {
+  return `${ALERT_KEY_PREFIX}${repo}:pr-${prNumber}`;
+}
+
 export class CIDashboardHub extends DurableObject<Env> {
   // In-memory cache: run_id → CIStatus
   private cache = new Map<number, CIStatus>();
   private cacheLoaded = false;
 
-  // In-memory cache: "owner/name" → ReleaseAlert
+  // In-memory cache: KV key → ReleaseAlert. Keys take one of two shapes:
+  //   release-alert:<owner>/<name>            — traditional tag-driven alert
+  //   release-alert:<owner>/<name>:pr-<n>     — PR-merge alert for tagless repos
+  // Keying the map by the full KV key (instead of "owner/name") lets us hold
+  // multiple PR-based alerts per repo concurrently while still overwriting
+  // the tag alert in place when a fresh tag release fires.
   private alerts = new Map<string, ReleaseAlert>();
   private alertsLoaded = false;
 
@@ -55,11 +69,14 @@ export class CIDashboardHub extends DurableObject<Env> {
     const values = await Promise.all(
       list.keys.map((key) => this.env.CI_STATUS.get(key.name))
     );
-    for (const v of values) {
+    for (let i = 0; i < list.keys.length; i++) {
+      const v = values[i];
       if (!v) continue;
       try {
         const a = JSON.parse(v) as ReleaseAlert;
-        this.alerts.set(a.repo, a);
+        // Use the KV key directly so tag and PR alerts co-exist in the map
+        // without colliding on `repo`.
+        this.alerts.set(list.keys[i]!.name, a);
       } catch { /* skip corrupt entry */ }
     }
     this.alertsLoaded = true;
@@ -146,7 +163,7 @@ export class CIDashboardHub extends DurableObject<Env> {
         const alert = await computeReleaseAlert(
           this.env.GITHUB_TOKEN, repo, tag, this.env.CI_STATUS,
         );
-        this.persistAlert(repo, alert);
+        this.persistAlertAtKey(tagAlertKey(repo), alert);
         this.broadcastAlerts();
       } catch {
         // Best-effort: a failed compute (e.g. token rate-limit) leaves any
@@ -155,28 +172,64 @@ export class CIDashboardHub extends DurableObject<Env> {
       return new Response("OK");
     }
 
-    // Recompute alert for a repo whose state changed elsewhere (e.g. an
-    // operator just closed issues via /api/release-close{,-batch}). Drops
-    // the alert when no open issues remain.
+    // Tagless-repo variant: a PR was just merged into the default branch on a
+    // repo that doesn't cut release tags. Treat the PR as a mini-release —
+    // walk it for Refs and persist a PR-scoped alert. Each PR gets its own KV
+    // entry so multiple in-flight close-required PRs co-exist.
+    if (url.pathname === "/release-alert-detect-pr") {
+      const { repo, prNumber, mergeSha, defaultBranch } = await request.json<{
+        repo: string;
+        prNumber: number;
+        mergeSha: string | null;
+        defaultBranch: string;
+      }>();
+      await this.ensureAlerts();
+      try {
+        const alert = await computeReleaseAlertForPr(
+          this.env.GITHUB_TOKEN, repo, prNumber, mergeSha, defaultBranch, this.env.CI_STATUS,
+        );
+        this.persistAlertAtKey(prAlertKey(repo, prNumber), alert);
+        this.broadcastAlerts();
+      } catch {
+        // Same best-effort pattern as the tag path — failed compute keeps any
+        // existing PR alert in place.
+      }
+      return new Response("OK");
+    }
+
+    // Recompute alert(s) for a repo whose state changed elsewhere (e.g. an
+    // operator just closed issues via /api/release-close{,-batch}). For repos
+    // with multiple PR-scoped alerts we recompute each one and drop those that
+    // have no open issues left.
     if (url.pathname === "/release-alert-recompute") {
       const { repo } = await request.json<{ repo: string }>();
       await this.ensureAlerts();
-      const existing = this.alerts.get(repo);
-      if (!existing) {
-        // Nothing to recompute — but still broadcast an empty alerts list
-        // is unnecessary because nothing changed for the client.
-        return new Response("OK");
+
+      // Collect every (key, alert) pair for this repo before mutating so we
+      // can iterate without disturbing the live Map.
+      const matching = [...this.alerts.entries()].filter(([_, a]) => a.repo === repo);
+      if (matching.length === 0) return new Response("OK");
+
+      let changed = false;
+      for (const [kvKey, existing] of matching) {
+        try {
+          const fresh = existing.prNumber !== undefined
+            ? await computeReleaseAlertForPr(
+                this.env.GITHUB_TOKEN, repo, existing.prNumber,
+                /* mergeSha */ null,
+                /* defaultBranch */ existing.tag.split("@")[0] ?? "main",
+                this.env.CI_STATUS,
+              )
+            : await recomputeAlert(
+                this.env.GITHUB_TOKEN, repo, existing.tag, this.env.CI_STATUS,
+              );
+          this.persistAlertAtKey(kvKey, fresh);
+          changed = true;
+        } catch {
+          // Leave this particular alert in place; siblings still get a try.
+        }
       }
-      try {
-        const fresh = await recomputeAlert(
-          this.env.GITHUB_TOKEN, repo, existing.tag, this.env.CI_STATUS,
-        );
-        this.persistAlert(repo, fresh);
-        this.broadcastAlerts();
-      } catch {
-        // Leave the existing alert in place; the periodic dashboard poll
-        // will eventually pick up the right state.
-      }
+      if (changed) this.broadcastAlerts();
       return new Response("OK");
     }
 
@@ -326,18 +379,18 @@ export class CIDashboardHub extends DurableObject<Env> {
     );
   }
 
-  // Persist (or delete, when fresh is null) the alert. Same KV-fire-and-forget
-  // pattern as the run cache. Caller is responsible for calling broadcast
-  // afterward.
-  private persistAlert(repo: string, fresh: ReleaseAlert | null): void {
-    const key = `${ALERT_KEY_PREFIX}${repo}`;
+  // Persist (or delete, when fresh is null) the alert at a specific KV key.
+  // Map + KV stay in lockstep — the in-memory `alerts` Map is keyed by the same
+  // KV key so a future `ensureAlerts()` read sees consistent state. Same KV-
+  // fire-and-forget pattern as the run cache. Caller broadcasts afterward.
+  private persistAlertAtKey(kvKey: string, fresh: ReleaseAlert | null): void {
     if (fresh === null) {
-      this.alerts.delete(repo);
-      this.ctx.waitUntil(this.env.CI_STATUS.delete(key));
+      this.alerts.delete(kvKey);
+      this.ctx.waitUntil(this.env.CI_STATUS.delete(kvKey));
     } else {
-      this.alerts.set(repo, fresh);
+      this.alerts.set(kvKey, fresh);
       this.ctx.waitUntil(
-        this.env.CI_STATUS.put(key, JSON.stringify(fresh), {
+        this.env.CI_STATUS.put(kvKey, JSON.stringify(fresh), {
           expirationTtl: ALERT_TTL_SECONDS,
         }),
       );

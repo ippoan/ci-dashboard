@@ -34,6 +34,7 @@ import {
   cachedCompare,
   cachedCommits,
   cachedPullRequest,
+  cachedPullRequestCommits,
   cachedIssue,
   type RawIssue,
 } from "./release-cache";
@@ -44,6 +45,10 @@ export interface ReleaseAlert {
   prevTag: string | null;
   openIssues: Array<{ number: number; title: string; url: string }>;
   detectedAt: string;    // ISO
+  // Set when this alert was created by a PR merge into the default branch
+  // (tagless repos). When absent the alert represents a traditional tag
+  // release. Banner UI keys off this to render "PR #N" vs "<tag>".
+  prNumber?: number;
 }
 
 export type { RawIssue };
@@ -170,4 +175,67 @@ export async function recomputeAlert(
   kv?: KVNamespace,
 ): Promise<ReleaseAlert | null> {
   return computeReleaseAlert(token, repo, tag, kv);
+}
+
+// PR-merge variant of computeReleaseAlert for tagless repos. A merged PR is
+// treated as a mini-release: walk the PR's commits + body + branch name for
+// `Refs #N`, hydrate the referenced issues, and return open ones.
+//
+// `mergeSha` is used only to produce a human-readable tag label
+// (`<defaultBranch>@<sha7>`). When absent the label falls back to
+// `<defaultBranch>@pr-<n>` — the alert is still functional; the only loss is a
+// less-clickable label.
+export async function computeReleaseAlertForPr(
+  token: string,
+  repo: string,
+  prNumber: number,
+  mergeSha: string | null,
+  defaultBranch: string,
+  kv?: KVNamespace,
+): Promise<ReleaseAlert | null> {
+  const { owner, repo: name } = parseRepo(repo);
+  validateOrg(owner);
+
+  const issueNumbers = new Set<number>();
+
+  // PR metadata: body has `Refs #N`, branch name has the issue prefix
+  // (CLAUDE.md convention <issue>-<type>-<desc>).
+  try {
+    const pr = await cachedPullRequest(token, kv, owner, name, prNumber);
+    const fromBranch = extractBranchIssue(pr.head.ref);
+    if (fromBranch !== null) issueNumbers.add(fromBranch);
+    if (pr.body) {
+      for (const ref of extractRefIssues(pr.body)) issueNumbers.add(ref);
+    }
+  } catch { /* PR fetch failure — still try commit walk */ }
+
+  // PR commits: each commit message can carry its own `Refs #N`. Squash merges
+  // collapse to one commit (often duplicating the PR body), but rebase / true-
+  // merge variants spread the refs across multiple commits.
+  try {
+    const commits = await cachedPullRequestCommits(token, kv, owner, name, prNumber);
+    for (const c of commits) {
+      for (const n of extractRefIssues(c.commit.message)) issueNumbers.add(n);
+    }
+  } catch { /* commits API failure — proceed with what we have */ }
+
+  if (issueNumbers.size === 0) return null;
+
+  const issues = await fetchIssuesByNumbers(token, owner, name, issueNumbers, kv);
+  const openIssues = issues
+    .filter((i) => !i.pull_request && i.state === "open")
+    .map((i) => ({ number: i.number, title: i.title, url: i.html_url }))
+    .sort((a, b) => a.number - b.number);
+
+  if (openIssues.length === 0) return null;
+
+  const sha7 = mergeSha?.slice(0, 7) ?? `pr-${prNumber}`;
+  return {
+    repo: `${owner}/${name}`,
+    tag: `${defaultBranch}@${sha7}`,
+    prevTag: null,
+    openIssues,
+    detectedAt: new Date().toISOString(),
+    prNumber,
+  };
 }

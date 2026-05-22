@@ -23,6 +23,10 @@ export interface Env {
   WEBHOOK_SECRET: string;
   GITHUB_TOKEN: string;
   CI_HUB: DurableObjectNamespace;
+  // Comma-separated `owner/name` list of repos that don't cut tags. PR merges
+  // into the default branch are treated as releases for these. See
+  // wrangler.jsonc and src/tagless-repos.ts.
+  TAGLESS_REPOS?: string;
 }
 
 const app = new Hono<{ Bindings: Env }>();

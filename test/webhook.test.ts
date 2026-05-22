@@ -492,6 +492,111 @@ describe("POST /webhook", () => {
     expect(hubCalls.filter((c) => c.path === "/release-alert-detect")).toHaveLength(0);
   });
 
+  // Tagless-repo PR-merge detection. When env.TAGLESS_REPOS includes the
+  // PR's repo and the PR was merged into the default branch, the webhook
+  // should fan out to /release-alert-detect-pr on the hub.
+  it("triggers release-alert-detect-pr when a tagless-repo PR merges into default branch", async () => {
+    const body = JSON.stringify({
+      action: "closed",
+      pull_request: {
+        number: 42,
+        merged: true,
+        merge_commit_sha: "abcdef1234567890",
+        base: { ref: "main" },
+      },
+      repository: { full_name: "ippoan/secrets-inventory-gcp", default_branch: "main" },
+    });
+    const sig = await sign(body, WEBHOOK_SECRET);
+    const ctx = createExecutionContext();
+    const taglessEnv: Env = {
+      ...testEnv(),
+      TAGLESS_REPOS: "ippoan/secrets-inventory-gcp,ippoan/ci-workflows",
+    };
+    await worker.fetch(
+      new Request("http://localhost/webhook", {
+        method: "POST",
+        body,
+        headers: { "X-Hub-Signature-256": sig, "X-GitHub-Event": "pull_request" },
+      }),
+      taglessEnv,
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+    const calls = hubCalls.filter((c) => c.path === "/release-alert-detect-pr");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.body).toEqual({
+      repo: "ippoan/secrets-inventory-gcp",
+      prNumber: 42,
+      mergeSha: "abcdef1234567890",
+      defaultBranch: "main",
+    });
+  });
+
+  it("does NOT trigger release-alert-detect-pr when repo is not in TAGLESS_REPOS", async () => {
+    const body = JSON.stringify({
+      action: "closed",
+      pull_request: {
+        number: 7, merged: true, merge_commit_sha: "deadbeef", base: { ref: "main" },
+      },
+      repository: { full_name: "ippoan/auth-worker", default_branch: "main" },
+    });
+    const sig = await sign(body, WEBHOOK_SECRET);
+    const ctx = createExecutionContext();
+    const taglessEnv: Env = {
+      ...testEnv(),
+      TAGLESS_REPOS: "ippoan/secrets-inventory-gcp",
+    };
+    await worker.fetch(
+      new Request("http://localhost/webhook", {
+        method: "POST", body,
+        headers: { "X-Hub-Signature-256": sig, "X-GitHub-Event": "pull_request" },
+      }),
+      taglessEnv, ctx,
+    );
+    await waitOnExecutionContext(ctx);
+    expect(hubCalls.filter((c) => c.path === "/release-alert-detect-pr")).toHaveLength(0);
+  });
+
+  it("does NOT trigger release-alert-detect-pr for closed-but-not-merged PRs", async () => {
+    const body = JSON.stringify({
+      action: "closed",
+      pull_request: { number: 8, merged: false, merge_commit_sha: null, base: { ref: "main" } },
+      repository: { full_name: "ippoan/secrets-inventory-gcp", default_branch: "main" },
+    });
+    const sig = await sign(body, WEBHOOK_SECRET);
+    const ctx = createExecutionContext();
+    const taglessEnv: Env = { ...testEnv(), TAGLESS_REPOS: "ippoan/secrets-inventory-gcp" };
+    await worker.fetch(
+      new Request("http://localhost/webhook", {
+        method: "POST", body,
+        headers: { "X-Hub-Signature-256": sig, "X-GitHub-Event": "pull_request" },
+      }),
+      taglessEnv, ctx,
+    );
+    await waitOnExecutionContext(ctx);
+    expect(hubCalls.filter((c) => c.path === "/release-alert-detect-pr")).toHaveLength(0);
+  });
+
+  it("does NOT trigger release-alert-detect-pr for PRs merged into non-default branches", async () => {
+    const body = JSON.stringify({
+      action: "closed",
+      pull_request: { number: 9, merged: true, merge_commit_sha: "abc", base: { ref: "develop" } },
+      repository: { full_name: "ippoan/secrets-inventory-gcp", default_branch: "main" },
+    });
+    const sig = await sign(body, WEBHOOK_SECRET);
+    const ctx = createExecutionContext();
+    const taglessEnv: Env = { ...testEnv(), TAGLESS_REPOS: "ippoan/secrets-inventory-gcp" };
+    await worker.fetch(
+      new Request("http://localhost/webhook", {
+        method: "POST", body,
+        headers: { "X-Hub-Signature-256": sig, "X-GitHub-Event": "pull_request" },
+      }),
+      taglessEnv, ctx,
+    );
+    await waitOnExecutionContext(ctx);
+    expect(hubCalls.filter((c) => c.path === "/release-alert-detect-pr")).toHaveLength(0);
+  });
+
   // Regression guard for issue #51: Tag Release directly must NOT fire — the
   // Hub it would reach is still on the previous version's deploy.
   it("does NOT trigger release-alert-detect on a Tag Release workflow completion", async () => {
