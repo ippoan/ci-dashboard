@@ -7,6 +7,8 @@ import {
   computeReleaseAlert,
   computeReleaseAlertForPr,
 } from "./release-alert";
+import { parseRepo } from "./github-api";
+import { cachedIssue } from "./release-cache";
 
 // WebSocket message envelope. All broadcasts now share `{ type, data }` so
 // the dashboard JS can dispatch by type. Two channels currently:
@@ -137,17 +139,27 @@ export class CIDashboardHub extends DurableObject<Env> {
     }
 
     // All release alerts from in-memory cache (for /release-alerts endpoint).
+    // Lazy-refresh path: drop openIssues that GitHub now reports as closed
+    // before returning. The KV alert entry has a 7d TTL and is only mutated
+    // on /release-alert-detect{,-pr} / /release-alert-recompute, so an issue
+    // closed outside the dashboard's UI (manually on GitHub, or via a `Closes
+    // #N` from another repo's PR) would otherwise haunt the banner for days.
+    // See #90 follow-up.
     if (url.pathname === "/release-alerts") {
       await this.ensureAlerts();
+      await this.refreshStaleAlerts();
       return Response.json([...this.alerts.values()]);
     }
 
     // Unified snapshot: { statuses, alerts } in one DO call. Dashboard UI
     // uses this on WS connect / reconnect instead of polling /status +
     // /release-alerts every 30s. Refs #64 (90% Worker request reduction).
+    // Same lazy-refresh as /release-alerts above — this is the actual read
+    // path the dashboard JS hits on every page load.
     if (url.pathname === "/snapshot") {
       await this.ensureCache();
       await this.ensureAlerts();
+      await this.refreshStaleAlerts();
       return Response.json({
         statuses: this.computeStatuses(),
         alerts: [...this.alerts.values()],
@@ -395,6 +407,54 @@ export class CIDashboardHub extends DurableObject<Env> {
         }),
       );
     }
+  }
+
+  // For each in-memory alert, re-verify its openIssues against current GitHub
+  // state (via `cachedIssue` 60 s KV TTL). Drop issues now reported closed; if
+  // the alert ends up with no openIssues, delete the alert entirely so the
+  // banner disappears.
+  //
+  // The KV cache layer keeps the cost bounded: the first /snapshot after an
+  // issue close pays N GitHub `/issues/N` fetches, subsequent /snapshot calls
+  // within 60 s hit KV. No GitHub fetches when alerts.size === 0.
+  //
+  // Best-effort: any per-issue fetch error leaves that issue in place (we'd
+  // rather show a banner stale by 60 s than fail the whole /snapshot path on
+  // a transient GitHub 5xx).
+  private async refreshStaleAlerts(): Promise<void> {
+    if (this.alerts.size === 0) return;
+    const entries = [...this.alerts.entries()];
+    let anyChanged = false;
+    await Promise.all(entries.map(async ([kvKey, alert]) => {
+      let owner: string;
+      let name: string;
+      try {
+        ({ owner, repo: name } = parseRepo(alert.repo));
+      } catch {
+        return;
+      }
+      const statuses = await Promise.all(alert.openIssues.map(async (i) => {
+        try {
+          const fresh = await cachedIssue(this.env.GITHUB_TOKEN, this.env.CI_STATUS, owner, name, i.number);
+          return { issue: i, state: fresh.state };
+        } catch {
+          // Keep the issue on transient failure (treat as "still open" so the
+          // banner doesn't quietly disappear because of GitHub rate limits).
+          return { issue: i, state: "open" };
+        }
+      }));
+      const stillOpen = statuses
+        .filter((s) => s.state !== "closed")
+        .map((s) => s.issue);
+      if (stillOpen.length === alert.openIssues.length) return;
+      anyChanged = true;
+      if (stillOpen.length === 0) {
+        this.persistAlertAtKey(kvKey, null);
+      } else {
+        this.persistAlertAtKey(kvKey, { ...alert, openIssues: stillOpen });
+      }
+    }));
+    if (anyChanged) this.broadcastAlerts();
   }
 
   private broadcastFromCache(): void {
