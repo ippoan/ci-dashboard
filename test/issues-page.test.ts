@@ -1,5 +1,5 @@
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import worker from "../src/index";
 import type { Env } from "../src/index";
 import { escapeHtml } from "../src/issues-page";
@@ -147,6 +147,12 @@ function stubSearchIssues() {
 }
 
 describe("GET /issues", () => {
+  // The project map is KV-cached for 5 min. Without per-test cache eviction
+  // the second test in a file reuses the first test's response (and an empty
+  // map from a no-project fixture happily masks any subsequent fetch).
+  beforeEach(async () => {
+    await env.CI_STATUS.delete("issues-page:project-map");
+  });
   afterEach(() => { vi.restoreAllMocks(); });
 
   it("renders an HTML page with repo-grouped tables", async () => {
@@ -288,6 +294,9 @@ describe("GET /issues", () => {
 });
 
 describe("GET /issues — Project section", () => {
+  beforeEach(async () => {
+    await env.CI_STATUS.delete("issues-page:project-map");
+  });
   afterEach(() => { vi.restoreAllMocks(); });
 
   it("renders a 'Project 付き' section with project chips and excludes those issues from their repo section", async () => {
