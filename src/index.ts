@@ -3,6 +3,7 @@ import { cors } from "hono/cors";
 import { handleWebhook } from "./webhook";
 import { handleDashboard } from "./dashboard";
 import { handleIssuesPage } from "./issues-page";
+import { handleProjectsPage } from "./projects-page";
 import { handleReleasesPage } from "./releases-page";
 import { handleReleaseClose } from "./release-close";
 import { handleReleaseCloseBatch } from "./release-close-batch";
@@ -43,6 +44,9 @@ app.get("/", () => handleDashboard());
 
 // Open issues (SSR, cross-org)
 app.get("/issues", (c) => handleIssuesPage(c.env));
+
+// Projects v2 read-only listing (SSR, cross-org). Refs #72.
+app.get("/projects", (c) => handleProjectsPage(c.env));
 
 // Cryptographically-strong random value generator (client-side, no server-side
 // state). Operators paste the output into Cloudflare Secrets Store / wrangler

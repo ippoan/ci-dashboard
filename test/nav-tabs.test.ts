@@ -18,6 +18,19 @@ describe("renderTabs — internal tabs", () => {
     expect(html).toContain('href="/secret-gen"');
     expect(html).toContain("🔐 Secret Generator");
   });
+
+  it("renders the Projects tab pointing at /projects", () => {
+    const html = renderTabs("dashboard");
+    expect(html).toContain('href="/projects"');
+    expect(html).toContain("🗂️ Projects");
+  });
+
+  it("marks the Projects tab active when key='projects'", () => {
+    const html = renderTabs("projects");
+    expect(html).toMatch(/tab tab-active[^>]*>\s*🗂️ Projects/);
+    // sibling tabs stay plain
+    expect(html).toMatch(/class="tab"[^>]*>\s*📋 Open Issues/);
+  });
 });
 
 describe("renderTabs — external tabs", () => {
