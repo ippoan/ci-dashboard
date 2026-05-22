@@ -139,9 +139,9 @@ describe("GET /", () => {
     // Banner mount point + supporting JS must be present.
     expect(html).toContain('id="release-banner-list"');
     expect(html).toContain("renderBanners");
-    // Polling fallback wiring.
-    expect(html).toContain("refreshAll");
-    expect(html).toContain("visibilitychange");
+    // Snapshot-based loading (WS-driven, no polling). Refs #64.
+    expect(html).toContain("loadSnapshot");
+    expect(html).toContain("reconnect-btn");
   });
 });
 

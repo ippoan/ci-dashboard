@@ -125,6 +125,18 @@ export class CIDashboardHub extends DurableObject<Env> {
       return Response.json([...this.alerts.values()]);
     }
 
+    // Unified snapshot: { statuses, alerts } in one DO call. Dashboard UI
+    // uses this on WS connect / reconnect instead of polling /status +
+    // /release-alerts every 30s. Refs #64 (90% Worker request reduction).
+    if (url.pathname === "/snapshot") {
+      await this.ensureCache();
+      await this.ensureAlerts();
+      return Response.json({
+        statuses: this.computeStatuses(),
+        alerts: [...this.alerts.values()],
+      });
+    }
+
     // Compute alert for a tag release that just shipped, store + broadcast.
     // Called from webhook.ts after a `Tag Release` workflow_run completes.
     if (url.pathname === "/release-alert-detect") {
