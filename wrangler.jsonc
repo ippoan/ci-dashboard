@@ -13,7 +13,7 @@
     // mini-release: it scans the merged PR for `Refs #N` and surfaces any still-
     // open issues on the dashboard banner + /releases synthetic blocks. Repos
     // not listed here keep the original tag-driven flow.
-    "TAGLESS_REPOS": ""
+    "TAGLESS_REPOS": "ippoan/secrets-inventory,ippoan/secrets-inventory-gcp"
   },
   "kv_namespaces": [
     {
