@@ -483,18 +483,25 @@ export class CIDashboardHub extends DurableObject<Env> {
 
   // Direct GitHub fetch that bypasses every cache layer:
   //   - KV `cachedIssue` (60 s TTL): we don't call it
-  //   - Cloudflare Worker outbound fetch cache: `cache: "no-store"` is the
-  //     officially-supported escape hatch
-  //     (https://developers.cloudflare.com/workers/runtime-apis/fetch/).
-  //     The Worker types lib doesn't expose `cache` on RequestInit, so we
-  //     widen via a cast — the runtime does honor it.
+  //   - Cloudflare Worker outbound fetch cache, defense in depth:
+  //       1. `cache: "no-store"` (officially-supported escape hatch —
+  //          https://developers.cloudflare.com/workers/runtime-apis/fetch/).
+  //          The Worker types lib doesn't expose `cache` on RequestInit, so we
+  //          widen via a cast — the runtime does honor it.
+  //       2. Per-call cache-buster query (`?_=${Date.now()}`) so the cache
+  //          key (full URL) misses on every request even if (1) is ignored.
+  //          GitHub ignores unknown query params on /issues/N.
+  //       3. `Cache-Control: no-cache, no-store, must-revalidate` + `Pragma:
+  //          no-cache` request headers to ask the intermediate layer not to
+  //          serve a cached response.
   //
   // Only used by refreshStaleAlerts; for any page-render path stick with
   // `cachedIssue` which is fine.
   //
-  // Refs #94: without `cache: "no-store"`, the Worker's implicit fetch
-  // cache held a stale `state: "open"` response for #64 across hours of
-  // /snapshot calls — refreshStaleAlerts never saw the close.
+  // Refs #94: without (1), the Worker's implicit fetch cache held a stale
+  // `state: "open"` response for #64 across hours of /snapshot calls. After
+  // shipping (1) alone the bug recurred — the cache only cleared when an
+  // operator manually purged it. (2)+(3) defend against that recurrence.
   private async fetchLiveIssueState(owner: string, name: string, n: number): Promise<string> {
     const init: RequestInit & { cache?: string } = {
       method: "GET",
@@ -504,9 +511,12 @@ export class CIDashboardHub extends DurableObject<Env> {
         Accept: "application/vnd.github+json",
         "User-Agent": "ci-dashboard-mcp",
         "X-GitHub-Api-Version": "2022-11-28",
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+        Pragma: "no-cache",
       },
     };
-    const res = await fetch(`https://api.github.com/repos/${owner}/${name}/issues/${n}`, init as RequestInit);
+    const url = `https://api.github.com/repos/${owner}/${name}/issues/${n}?_=${Date.now()}`;
+    const res = await fetch(url, init as RequestInit);
     if (!res.ok) {
       throw new Error(`GitHub /issues/${n} returned ${res.status}`);
     }

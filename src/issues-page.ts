@@ -17,15 +17,62 @@ const YHONDA_REPOS = ["yhonda-ohishi/claude-skills", "yhonda-ohishi/claude-hooks
 // board, even though only a subset of their repos surface as issues here.
 const PROJECT_ORGS = ["ippoan", "ohishi-exp", "yhonda-ohishi"];
 
-export async function handleIssuesPage(env: { GITHUB_TOKEN: string }): Promise<Response> {
-  let merged;
-  let projectMap: Map<string, ProjectRef[]>;
+// KV cache for the cross-org Project v2 → issue map. GraphQL fan-out is
+// expensive (one call per open project × per org) and its 5000 points/h budget
+// is easy to exhaust when the dashboard's MCP tools share the same token. A
+// short fresh window (5 min) is plenty for the issues page — Project boards
+// don't churn second-by-second — and a long store window (24 h) keeps a stale
+// copy around so a temporary rate-limit hit doesn't blank the page.
+const PROJECT_MAP_CACHE_KEY = "issues-page:project-map";
+const PROJECT_MAP_FRESH_SECONDS = 300;
+const PROJECT_MAP_STORE_SECONDS = 86400;
+
+interface ProjectMapCacheEntry {
+  storedAt: number;
+  data: Record<string, ProjectRef[]>;
+}
+
+interface ProjectMapResult {
+  map: Map<string, ProjectRef[]>;
+  stale: boolean;
+  error: string | null;
+}
+
+async function loadProjectMap(
+  kv: KVNamespace,
+  token: string,
+  orgs: string[],
+): Promise<ProjectMapResult> {
+  const cached = await kv.get(PROJECT_MAP_CACHE_KEY, "json") as ProjectMapCacheEntry | null;
+  const now = Date.now();
+  if (cached && now - cached.storedAt < PROJECT_MAP_FRESH_SECONDS * 1000) {
+    return { map: new Map(Object.entries(cached.data)), stale: false, error: null };
+  }
   try {
-    // Three parallel fetches: main-org search, yhonda repo-pinned search, and
-    // the cross-org project→issue map. Errors from any one of them are
-    // surfaced via the friendly error page — partial results aren't worth
-    // the extra ambiguity in the UI.
-    const [main, yhonda, pm] = await Promise.all([
+    const fresh = await fetchProjectIssueMap(token, { orgs });
+    const entry: ProjectMapCacheEntry = { storedAt: now, data: Object.fromEntries(fresh) };
+    await kv.put(PROJECT_MAP_CACHE_KEY, JSON.stringify(entry), {
+      expirationTtl: PROJECT_MAP_STORE_SECONDS,
+    });
+    return { map: fresh, stale: false, error: null };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (cached) {
+      return { map: new Map(Object.entries(cached.data)), stale: true, error: message };
+    }
+    return { map: new Map(), stale: false, error: message };
+  }
+}
+
+export async function handleIssuesPage(
+  env: { GITHUB_TOKEN: string; CI_STATUS: KVNamespace },
+): Promise<Response> {
+  // Search REST gives us the issues themselves; this is the only fetch that
+  // can fail the page outright. Project map is loaded separately below so a
+  // GraphQL rate-limit doesn't blank the page (Refs #94 follow-up).
+  let merged;
+  try {
+    const [main, yhonda] = await Promise.all([
       fetchOrgIssues(env.GITHUB_TOKEN, {
         orgs: ORGS,
         state: "open",
@@ -37,14 +84,12 @@ export async function handleIssuesPage(env: { GITHUB_TOKEN: string }): Promise<R
         per_page: 100,
         query: YHONDA_REPOS.map((r) => `repo:${r}`).join(" "),
       }),
-      fetchProjectIssueMap(env.GITHUB_TOKEN, { orgs: PROJECT_ORGS }),
     ]);
     merged = {
       total_count: main.total_count + yhonda.total_count,
       incomplete: main.incomplete || yhonda.incomplete,
       items: [...main.items, ...yhonda.items],
     };
-    projectMap = pm;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return new Response(renderError(msg), {
@@ -52,6 +97,9 @@ export async function handleIssuesPage(env: { GITHUB_TOKEN: string }): Promise<R
       headers: { "Content-Type": "text/html; charset=utf-8" },
     });
   }
+
+  const project = await loadProjectMap(env.CI_STATUS, env.GITHUB_TOKEN, PROJECT_ORGS);
+  const projectMap = project.map;
 
   // Split issues into "Project-tagged" (top aggregate section) and
   // "ungrouped per-repo" (bottom sections). An issue belongs to the project
@@ -81,7 +129,7 @@ export async function handleIssuesPage(env: { GITHUB_TOKEN: string }): Promise<R
     ] as const);
 
   return new Response(
-    renderHtml(merged.total_count, merged.incomplete, projectTagged, repos),
+    renderHtml(merged.total_count, merged.incomplete, projectTagged, repos, project),
     { headers: { "Content-Type": "text/html; charset=utf-8" } },
   );
 }
@@ -91,6 +139,7 @@ function renderHtml(
   incomplete: boolean,
   projectTagged: ReadonlyArray<{ issue: OrgIssue; projects: ProjectRef[] }>,
   repos: ReadonlyArray<readonly [string, OrgIssue[]]>,
+  project: ProjectMapResult,
 ): string {
   const repoSections = repos
     .map(([repo, items]) => renderRepoSection(repo, items))
@@ -102,6 +151,11 @@ function renderHtml(
 
   const incompleteBanner = incomplete
     ? `<div class="banner">⚠️ Result was truncated by GitHub search. Showing ${total} issues but more may exist.</div>`
+    : "";
+  const projectBanner = project.stale
+    ? `<div class="banner banner-info">📋 Project tags shown are from the last successful sync — fresh fetch failed (${escapeHtml(project.error ?? "")})</div>`
+    : project.error
+    ? `<div class="banner">⚠️ Project tags unavailable: ${escapeHtml(project.error)}</div>`
     : "";
 
   return `<!DOCTYPE html>
@@ -132,6 +186,11 @@ function renderHtml(
       padding: 10px 14px;
       font-size: 13px;
       margin-bottom: 16px;
+    }
+    .banner-info {
+      background: #1c2433;
+      border-color: #1f6feb88;
+      color: #a5d6ff;
     }
     section.repo, section.projects {
       background: #161b22;
@@ -245,6 +304,7 @@ function renderHtml(
     </div>
   </header>
   ${incompleteBanner}
+  ${projectBanner}
   ${projectSection}
   ${repos.length === 0 && projectTagged.length === 0
     ? `<div class="empty">🎉 No open issues. Nice work.</div>`
