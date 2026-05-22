@@ -143,6 +143,26 @@ export async function cachedPullRequest(
   );
 }
 
+// Tagless-repo PR-merge detection walks every commit in a merged PR to harvest
+// `Refs #N` from squash / rebase / merge variants. Same TTL as cachedPullRequest
+// — once the PR is merged the commit list is frozen.
+export async function cachedPullRequestCommits(
+  token: string,
+  kv: KVNamespace | undefined,
+  owner: string,
+  name: string,
+  n: number,
+): Promise<RawCommit[]> {
+  const key = `${PREFIX}prcommits:${owner}/${name}:${n}`;
+  return kvCached(kv, key, TTL_PR, () =>
+    githubApi<RawCommit[]>(
+      token, "GET", `/repos/${owner}/${name}/pulls/${n}/commits`,
+      undefined,
+      { per_page: "100" },
+    ),
+  );
+}
+
 export async function cachedIssue(
   token: string,
   kv: KVNamespace | undefined,

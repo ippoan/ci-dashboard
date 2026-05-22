@@ -1,4 +1,5 @@
 import type { Env } from "./index";
+import { parseTaglessRepos } from "./tagless-repos";
 
 interface WorkflowRunPayload {
   action: string;
@@ -32,6 +33,20 @@ interface WorkflowJobPayload {
   };
   repository: {
     full_name: string;
+  };
+}
+
+interface PullRequestPayload {
+  action: string;
+  pull_request: {
+    number: number;
+    merged: boolean;
+    merge_commit_sha: string | null;
+    base: { ref: string };
+  };
+  repository: {
+    full_name: string;
+    default_branch: string;
   };
 }
 
@@ -140,6 +155,33 @@ export async function handleWebhook(
       method: "POST",
       body: JSON.stringify({ job: payload.workflow_job }),
     }));
+    return new Response("OK", { status: 200 });
+  }
+
+  // Tagless-repo close-detection trigger. For repos that never cut a release
+  // tag (listed in env.TAGLESS_REPOS), a PR merge into the default branch is
+  // the closest analog to a release. We fire a `/release-alert-detect-pr` so
+  // the Hub can compute open-Refs and surface them on the dashboard banner.
+  // Skip silently for repos not on the list — the existing tag flow handles
+  // those.
+  if (event === "pull_request") {
+    const payload: PullRequestPayload = JSON.parse(body);
+    const repo = payload.repository.full_name;
+    const isMergeToDefault =
+      payload.action === "closed" &&
+      payload.pull_request.merged === true &&
+      payload.pull_request.base.ref === payload.repository.default_branch;
+    if (isMergeToDefault && parseTaglessRepos(env.TAGLESS_REPOS).has(repo)) {
+      await hub.fetch(new Request("http://hub/release-alert-detect-pr", {
+        method: "POST",
+        body: JSON.stringify({
+          repo,
+          prNumber: payload.pull_request.number,
+          mergeSha: payload.pull_request.merge_commit_sha,
+          defaultBranch: payload.repository.default_branch,
+        }),
+      }));
+    }
     return new Response("OK", { status: 200 });
   }
 
