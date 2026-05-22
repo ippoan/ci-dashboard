@@ -8,7 +8,7 @@ import {
   computeReleaseAlertForPr,
 } from "./release-alert";
 import { parseRepo } from "./github-api";
-import { cachedIssue } from "./release-cache";
+import { invalidateIssue } from "./release-cache";
 
 // WebSocket message envelope. All broadcasts now share `{ type, data }` so
 // the dashboard JS can dispatch by type. Two channels currently:
@@ -410,21 +410,36 @@ export class CIDashboardHub extends DurableObject<Env> {
   }
 
   // For each in-memory alert, re-verify its openIssues against current GitHub
-  // state (via `cachedIssue` 60 s KV TTL). Drop issues now reported closed; if
-  // the alert ends up with no openIssues, delete the alert entirely so the
-  // banner disappears.
+  // state. Drop issues now reported closed; if the alert ends up with no
+  // openIssues, delete the alert entirely so the banner disappears.
   //
-  // The KV cache layer keeps the cost bounded: the first /snapshot after an
-  // issue close pays N GitHub `/issues/N` fetches, subsequent /snapshot calls
-  // within 60 s hit KV. No GitHub fetches when alerts.size === 0.
+  // We deliberately bypass `cachedIssue` (60 s KV TTL) AND Cloudflare's
+  // outbound fetch cache (`cache: "no-store"`). The reason: an issue
+  // referenced by an alert is, by definition, one we already think is open.
+  // The whole point of refreshing here is to detect the open→closed flip.
+  // Reading any cached state runs the risk of returning the stale "open"
+  // value that originally triggered the alert — defeating the refresh.
   //
-  // Best-effort: any per-issue fetch error leaves that issue in place (we'd
-  // rather show a banner stale by 60 s than fail the whole /snapshot path on
-  // a transient GitHub 5xx).
+  // Side effect: invalidate the cachedIssue KV entry after a state change so
+  // /releases (which uses cachedIssue) reflects the fresh state on its next
+  // load instead of waiting out the 60 s TTL.
+  //
+  // Cost: N raw GitHub `/issues/N` fetches per /snapshot call where N is the
+  // total openIssues count across all alerts. Typical N is 1-5. /snapshot is
+  // called on dashboard load + visibilitychange (Refs #92) — no periodic
+  // polling. No GitHub fetches when `alerts.size === 0`.
+  //
+  // Best-effort: any per-issue fetch error keeps that issue in place
+  // (transient GitHub 5xx shouldn't silently hide an alert that may still be
+  // legitimate).
+  //
+  // Refs #94 (the previous cachedIssue-based version saw stale "open" data
+  // and never dropped a known-closed issue).
   private async refreshStaleAlerts(): Promise<void> {
     if (this.alerts.size === 0) return;
     const entries = [...this.alerts.entries()];
     let anyChanged = false;
+    const invalidations: Array<Promise<void>> = [];
     await Promise.all(entries.map(async ([kvKey, alert]) => {
       let owner: string;
       let name: string;
@@ -435,8 +450,8 @@ export class CIDashboardHub extends DurableObject<Env> {
       }
       const statuses = await Promise.all(alert.openIssues.map(async (i) => {
         try {
-          const fresh = await cachedIssue(this.env.GITHUB_TOKEN, this.env.CI_STATUS, owner, name, i.number);
-          return { issue: i, state: fresh.state };
+          const state = await this.fetchLiveIssueState(owner, name, i.number);
+          return { issue: i, state };
         } catch {
           // Keep the issue on transient failure (treat as "still open" so the
           // banner doesn't quietly disappear because of GitHub rate limits).
@@ -448,13 +463,55 @@ export class CIDashboardHub extends DurableObject<Env> {
         .map((s) => s.issue);
       if (stillOpen.length === alert.openIssues.length) return;
       anyChanged = true;
+      // Wipe the cachedIssue entry for each now-closed issue so /releases
+      // also picks up the fresh "closed" on its next render rather than
+      // serving the same stale "open" we just routed around.
+      for (const s of statuses) {
+        if (s.state === "closed") {
+          invalidations.push(invalidateIssue(this.env.CI_STATUS, owner, name, s.issue.number));
+        }
+      }
       if (stillOpen.length === 0) {
         this.persistAlertAtKey(kvKey, null);
       } else {
         this.persistAlertAtKey(kvKey, { ...alert, openIssues: stillOpen });
       }
     }));
+    if (invalidations.length > 0) this.ctx.waitUntil(Promise.all(invalidations).then(() => undefined));
     if (anyChanged) this.broadcastAlerts();
+  }
+
+  // Direct GitHub fetch that bypasses every cache layer:
+  //   - KV `cachedIssue` (60 s TTL): we don't call it
+  //   - Cloudflare Worker outbound fetch cache: `cache: "no-store"` is the
+  //     officially-supported escape hatch
+  //     (https://developers.cloudflare.com/workers/runtime-apis/fetch/).
+  //     The Worker types lib doesn't expose `cache` on RequestInit, so we
+  //     widen via a cast — the runtime does honor it.
+  //
+  // Only used by refreshStaleAlerts; for any page-render path stick with
+  // `cachedIssue` which is fine.
+  //
+  // Refs #94: without `cache: "no-store"`, the Worker's implicit fetch
+  // cache held a stale `state: "open"` response for #64 across hours of
+  // /snapshot calls — refreshStaleAlerts never saw the close.
+  private async fetchLiveIssueState(owner: string, name: string, n: number): Promise<string> {
+    const init: RequestInit & { cache?: string } = {
+      method: "GET",
+      cache: "no-store",
+      headers: {
+        Authorization: `Bearer ${this.env.GITHUB_TOKEN}`,
+        Accept: "application/vnd.github+json",
+        "User-Agent": "ci-dashboard-mcp",
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+    };
+    const res = await fetch(`https://api.github.com/repos/${owner}/${name}/issues/${n}`, init as RequestInit);
+    if (!res.ok) {
+      throw new Error(`GitHub /issues/${n} returned ${res.status}`);
+    }
+    const body = await res.json() as { state?: string };
+    return body.state ?? "open";
   }
 
   private broadcastFromCache(): void {
