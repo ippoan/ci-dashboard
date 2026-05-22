@@ -493,9 +493,10 @@ export function handleDashboard(): Response {
       }).join("");
     }
 
-    // Pull the unified snapshot once. Used on initial WS connect and on
-    // explicit Reconnect button. WS broadcasts then keep the page in sync
-    // (= no periodic polling, no visibilitychange refresh). Refs #64.
+    // Pull the unified snapshot. Used on initial WS connect, on explicit
+    // Reconnect button, and on tab visibility return (Refs #92). NOT used as
+    // periodic polling — between snapshots we rely entirely on WS broadcasts
+    // (= Refs #64's worker-request reduction is preserved).
     async function loadSnapshot() {
       if (document.hidden) return;
       try {
@@ -568,6 +569,21 @@ export function handleDashboard(): Response {
     // schedules an auto-reconnect after 3s, which then calls loadSnapshot().
     document.getElementById("reconnect-btn").addEventListener("click", () => {
       if (ws) ws.close();
+    });
+
+    // Tab-return path (#92): WS stays connected while the user is on a
+    // different tab / different page in the same tab (e.g. /releases). With
+    // no server-side push for "an issue you referenced is now closed", the
+    // banner DOM stays frozen on whatever the last WS broadcast was. When
+    // the user returns, re-fetch the snapshot once — /snapshot triggers the
+    // Hub's refreshStaleAlerts (#91) which drops now-closed issues, so the
+    // banner converges within a single round-trip.
+    //
+    // NOT a setInterval — there is no polling here. The cost per
+    // tab-return is exactly one /snapshot, far cheaper than the 30 s polling
+    // removed in #64.
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) loadSnapshot();
     });
 
     async function deployTag(btn) {

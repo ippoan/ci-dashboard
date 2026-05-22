@@ -142,6 +142,11 @@ describe("GET /", () => {
     // Snapshot-based loading (WS-driven, no polling). Refs #64.
     expect(html).toContain("loadSnapshot");
     expect(html).toContain("reconnect-btn");
+    // Tab-return refetch hook (Refs #92): visibilitychange listener that
+    // calls loadSnapshot when the tab becomes visible. Not a setInterval —
+    // just a one-shot per tab return.
+    expect(html).toContain("visibilitychange");
+    expect(html).not.toContain("setInterval(loadSnapshot");
   });
 });
 
