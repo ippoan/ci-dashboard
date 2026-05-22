@@ -294,6 +294,7 @@ export function handleDashboard(): Response {
   <div class="status-bar">
     WS: <span id="sse-status" class="disconnected">connecting...</span>
     &middot; Last update: <span id="last-update">-</span>
+    &middot; <button id="reconnect-btn" type="button" style="background:transparent;color:#8b949e;border:1px solid #30363d;border-radius:6px;padding:2px 8px;font-size:11px;cursor:pointer">&#x21bb; Reconnect</button>
   </div>
   <div class="layout">
     <aside id="sidebar" class="sidebar">
@@ -482,56 +483,42 @@ export function handleDashboard(): Response {
       }).join("");
     }
 
-    // Pull both endpoints in parallel. Used on initial connect, periodic
-    // poll (safety net for missed broadcasts), visibilitychange, and WS
-    // reconnect. Skipped while the tab is hidden to avoid wasted requests.
-    async function refreshAll() {
+    // Pull the unified snapshot once. Used on initial WS connect and on
+    // explicit Reconnect button. WS broadcasts then keep the page in sync
+    // (= no periodic polling, no visibilitychange refresh). Refs #64.
+    async function loadSnapshot() {
       if (document.hidden) return;
       try {
-        const [statuses, alerts] = await Promise.all([
-          fetch("/status").then(r => r.json()),
-          fetch("/release-alerts").then(r => r.json()).catch(() => []),
-        ]);
+        const res = await fetch("/snapshot");
+        const { statuses, alerts } = await res.json();
         render(statuses);
         renderBanners(alerts);
         lastUpdate.textContent = new Date().toLocaleTimeString();
       } catch {
-        // Ignore — next poll / event will retry
+        // Ignore — next WS event / manual reconnect will refresh
       }
     }
 
-    // Periodic safety-net poll. WS broadcasts can be missed during a network
-    // blip / CF Worker WebSocket idle timeout, so we re-fetch every 30s
-    // unconditionally while the tab is visible. Cost: 2 req/30s × visible tab.
-    let pollHandle = null;
-    function startPoll() {
-      if (pollHandle) return;
-      pollHandle = setInterval(refreshAll, 30000);
-    }
-    function stopPoll() {
-      if (pollHandle) { clearInterval(pollHandle); pollHandle = null; }
-    }
-
-    // Tab returned to foreground → catch up immediately. Covers the
-    // "PC slept overnight, dashboard is stale" case.
-    document.addEventListener("visibilitychange", () => {
-      if (!document.hidden) refreshAll();
-    });
+    // Module-scope ws so the Reconnect button can close it from outside
+    // connect(). connect() reassigns this on each (re)connection attempt.
+    let ws = null;
 
     function connect() {
       const proto = location.protocol === "https:" ? "wss:" : "ws:";
-      const ws = new WebSocket(proto + "//" + location.host + "/ws");
+      ws = new WebSocket(proto + "//" + location.host + "/ws");
       let pingInterval = null;
       ws.onopen = () => {
         sseStatus.textContent = "connected";
         sseStatus.className = "connected";
-        // Keep alive: send ping every 30s to prevent idle timeout
+        // Keep alive: send ping every 30s to prevent idle timeout.
+        // The Worker side uses setWebSocketAutoResponse("ping", "pong")
+        // so these pings do NOT count as Worker requests.
         pingInterval = setInterval(() => {
-          if (ws.readyState === WebSocket.OPEN) ws.send("ping");
+          if (ws && ws.readyState === WebSocket.OPEN) ws.send("ping");
         }, 30000);
-        // Catch up + start safety-net polling
-        refreshAll();
-        startPoll();
+        // Catch up via 1-shot snapshot. WS broadcasts handle subsequent
+        // updates — no setInterval polling.
+        loadSnapshot();
       };
       ws.onmessage = (e) => {
         if (e.data === "pong") return;
@@ -557,15 +544,21 @@ export function handleDashboard(): Response {
       };
       ws.onclose = () => {
         if (pingInterval) clearInterval(pingInterval);
-        stopPoll();
         sseStatus.textContent = "reconnecting...";
         sseStatus.className = "disconnected";
         setTimeout(connect, 3000);
       };
       ws.onerror = () => {
-        ws.close();
+        if (ws) ws.close();
       };
     }
+
+    // Manual escape hatch: if the WS got into a weird half-dead state and
+    // the user notices stale data, this drops the connection. ws.onclose
+    // schedules an auto-reconnect after 3s, which then calls loadSnapshot().
+    document.getElementById("reconnect-btn").addEventListener("click", () => {
+      if (ws) ws.close();
+    });
 
     async function deployTag(btn) {
       const repo = btn.dataset.repo;

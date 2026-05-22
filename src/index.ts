@@ -86,6 +86,21 @@ app.get("/release-alerts", async (c) => {
   });
 });
 
+// Unified snapshot: { statuses, alerts } in a single Worker request.
+// Dashboard UI fetches this on WS connect / reconnect (1 Worker request
+// per page load + reconnect), eliminating the previous 30s polling of
+// /status + /release-alerts (2 req/30s × visible tab). Refs #64.
+app.get("/snapshot", async (c) => {
+  const res = await getHub(c.env).fetch(new Request("http://hub/snapshot"));
+  const body = await res.text();
+  return new Response(body, {
+    headers: {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*",
+    },
+  });
+});
+
 // Tag release
 app.post("/api/tag-release", (c) => handleTagRelease(c.req.raw, c.env));
 
