@@ -17,6 +17,7 @@ import {
   cachedIssue,
 } from "./release-cache";
 import { loadDirectPushAllowlist } from "./direct-push-allowlist";
+import { parseTaglessRepos } from "./tagless-repos";
 import { renderTabs, TAB_STYLES } from "./nav-tabs";
 import { PWA_HEAD_TAGS, PWA_REGISTER_SCRIPT } from "./pwa";
 
@@ -40,6 +41,7 @@ export async function handleReleasesPage(
     GITHUB_TOKEN: string;
     CI_HUB: DurableObjectNamespace;
     CI_STATUS?: KVNamespace;
+    TAGLESS_REPOS?: string;
   },
 ): Promise<Response> {
   const url = new URL(req.url);
@@ -125,18 +127,23 @@ async function handleIndexPage(
     GITHUB_TOKEN: string;
     CI_HUB: DurableObjectNamespace;
     CI_STATUS?: KVNamespace;
+    TAGLESS_REPOS?: string;
   },
   closedFlash: number[],
   failedFlash: number[],
   flashRepo: string | null,
   hasFlash: boolean,
 ): Promise<Response> {
-  // 1. Watched repos come from two sources:
+  // 1. Watched repos come from three sources:
   //   (a) Hub status cache — every repo that has ever fired a CI run.
   //   (b) Direct-push-OK allowlist — repos that never auto-merge a PR and
   //       therefore won't show up in (a) until they happen to push a tag.
   //       Fetched from `yhonda-ohishi/claude-skills` (same SoT as
   //       `/wt-direct-push`); see direct-push-allowlist.ts.
+  //   (c) `TAGLESS_REPOS` wrangler var — opt-in list for repos that PR-merge
+  //       through CI but don't cut release tags. These get the same synthetic-
+  //       block treatment as (b), built from default-branch commits, so the
+  //       operator can see open Refs without ever tagging.
   const watched = new Set<string>();
   try {
     const hubId = env.CI_HUB.idFromName("singleton");
@@ -154,14 +161,19 @@ async function handleIndexPage(
     for (const r of allowlist) watched.add(r);
   } catch { /* graceful: allowlist stays empty, existing tag-flow unaffected */ }
 
+  const tagless = parseTaglessRepos(env.TAGLESS_REPOS);
+  for (const r of tagless) watched.add(r);
+
   const repos = [...watched].sort();
 
   // 2. Per-repo data load in parallel; whole-repo failures get a null view
-  //    we drop in the renderer. Allowlisted repos take the synthetic path
-  //    inside loadRepoView when they have no semver tags.
+  //    we drop in the renderer. Allowlisted or TAGLESS_REPOS-listed repos
+  //    take the synthetic path inside loadRepoView when they have no semver
+  //    tags.
   const views = await Promise.all(repos.map(async (repo) => {
     try {
-      return await loadRepoView(env.GITHUB_TOKEN, repo, allowlist.has(repo), env.CI_STATUS);
+      const useSynthetic = allowlist.has(repo) || tagless.has(repo);
+      return await loadRepoView(env.GITHUB_TOKEN, repo, useSynthetic, env.CI_STATUS);
     } catch {
       return null;
     }
@@ -182,7 +194,7 @@ async function handleIndexPage(
 async function loadRepoView(
   token: string,
   repo: string,
-  isDirectPush: boolean,
+  useSynthetic: boolean,
   kv?: KVNamespace,
 ): Promise<RepoView | null> {
   const { owner, repo: name } = parseRepo(repo);
@@ -194,12 +206,13 @@ async function loadRepoView(
   const sorted = sortSemverDesc(allTags.map((t) => t.name));
   const topTags = sorted.slice(0, TOP_TAGS_INLINE);
   if (topTags.length === 0) {
-    // Direct-push-OK repos that never tag still need a way to surface their
-    // open Refs. Fall back to a synthetic block built from the default
-    // branch's recent commits (#57). Non-allowlisted tag-less repos return
-    // empty as before so we don't accidentally treat an auto-merge repo as a
-    // direct-push one mid-release.
-    if (isDirectPush) {
+    // Tag-less repos opted into synthetic-block rendering (either via the
+    // direct-push allowlist or the TAGLESS_REPOS wrangler var) still need a
+    // way to surface their open Refs. Fall back to a synthetic block built
+    // from the default branch's recent commits (#57). Other tag-less repos
+    // return empty as before so we don't accidentally promote a regular
+    // auto-merge repo into the synthetic path mid-release.
+    if (useSynthetic) {
       const block = await loadSyntheticBlock(token, owner, name, kv);
       return {
         repo: `${owner}/${name}`,
