@@ -332,8 +332,18 @@ export function handleDashboard(): Response {
         (b.detectedAt || "").localeCompare(a.detectedAt || "")
       );
       bannerList.innerHTML = sorted.map(a => {
-        const reviewUrl = "/releases?repo=" + encodeURIComponent(a.repo)
-          + "&tag=" + encodeURIComponent(a.tag);
+        // Tag alerts deep-link to /releases?repo=X&tag=Y which renders the
+        // per-tag confirmation table. PR alerts have no tag pair, so the deep-
+        // link would 404 (tag-not-found); fall back to the index page scoped
+        // to this repo so the synthetic block surfaces instead.
+        const reviewUrl = a.prNumber
+          ? "/releases?repo=" + encodeURIComponent(a.repo)
+          : "/releases?repo=" + encodeURIComponent(a.repo)
+              + "&tag=" + encodeURIComponent(a.tag);
+        const eventLabel = a.prNumber ? "merged" : "released";
+        const eventTag = a.prNumber
+          ? "PR #" + a.prNumber
+          : a.tag;
         const chips = (a.openIssues || []).slice(0, 8).map(i =>
           '<a class="issue-chip" href="' + escapeHtml(i.url)
             + '" target="_blank" rel="noopener" title="' + escapeHtml(i.title) + '">'
@@ -345,7 +355,7 @@ export function handleDashboard(): Response {
         const n = (a.openIssues || []).length;
         return '<div class="release-banner">'
           + '<span class="repo-tag">\\uD83C\\uDFF7\\uFE0F '
-          + escapeHtml(a.repo) + ' <code>' + escapeHtml(a.tag) + '</code> released</span>'
+          + escapeHtml(a.repo) + ' <code>' + escapeHtml(eventTag) + '</code> ' + eventLabel + '</span>'
           + chips + more
           + '<a class="review-link" href="' + reviewUrl + '">'
           + n + ' open related issue' + (n === 1 ? '' : 's') + ' \\u2192 review</a>'
