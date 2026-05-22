@@ -472,13 +472,43 @@ function renderHtml(
   closedFlash: number[],
   failedFlash: number[],
 ): string {
-  // The flash filter strips just-closed rows from the candidate set so a
-  // close-then-redirect lands on a page that no longer offers them. We then
-  // gate the form by the *remaining* candidates rather than the unfiltered
-  // payload — otherwise the operator sees a header-only table with a button
-  // that round-trips empty (#61, sibling of the index-side fix in #59).
-  const candidates = data.rows.filter((r) => !closedFlash.includes(r.number));
+  // Two filters drop rows from the form's candidate set:
+  //   1. flash: just-closed rows from a close-then-redirect must not be offered
+  //      again on the landing page (#61).
+  //   2. state === "closed": issues that GitHub already reports as closed have
+  //      nothing left to act on — the operator (or auto-close from `Closes #N`
+  //      in some other PR) already handled them. Mirrors the index page's
+  //      visible/hidden split in `renderTagBlock` so the detail and index views
+  //      behave consistently. Pre-fix the row stayed in the form with the ⚠
+  //      "already closed" warning and an un-ticked checkbox, which read as
+  //      "still pending" to the operator (#90).
+  const candidates = data.rows.filter(
+    (r) => !closedFlash.includes(r.number) && r.state !== "closed",
+  );
   const candidateRows = candidates.map((r) => renderRow(r)).join("\n");
+
+  // Already-closed rows still live in the page as audit context (collapsed
+  // <details>) so the operator can confirm which referenced issues this tag
+  // actually resolved. flash-closed go in here too — the form has already
+  // dropped them and the celebratory `empty` banner above shows the success;
+  // the details strip just lists what got closed for reference.
+  const closedRows = data.rows.filter(
+    (r) => r.state === "closed" || closedFlash.includes(r.number),
+  );
+  const closedDetails = closedRows.length === 0 ? "" : `
+    <details class="closed-details">
+      <summary>${closedRows.length} closed issue${closedRows.length === 1 ? "" : "s"} (already resolved)</summary>
+      <table>
+        <thead><tr>
+          <th>#</th>
+          <th>Title</th>
+          <th>State</th>
+          <th>Labels</th>
+          <th>Assignees</th>
+        </tr></thead>
+        <tbody>${closedRows.map((r) => renderClosedRow(r)).join("\n")}</tbody>
+      </table>
+    </details>`;
 
   const flash = renderFlash(closedFlash, failedFlash, data.repo);
 
@@ -490,8 +520,9 @@ function renderHtml(
 
   // Two distinct "nothing to do" states share the same hint slot:
   //   - data.rows.length === 0 → tag had no Refs at all
-  //   - data.rows.length > 0 but candidates.length === 0 → everything just got
-  //     closed in this round-trip; show the celebratory variant instead.
+  //   - data.rows.length > 0 but candidates.length === 0 → everything is
+  //     already closed (either before this page load, or just-closed via the
+  //     redirect); show the celebratory variant.
   const empty = data.rows.length === 0
     ? `<div class="empty">🎉 No referenced issues for this release.</div>`
     : candidates.length === 0
@@ -536,9 +567,32 @@ function renderHtml(
   ${flash}
   ${empty}
   ${formInner}
+  ${closedDetails}
   ${PWA_REGISTER_SCRIPT}
 </body>
 </html>`;
+}
+
+// Render an already-closed row for the audit <details> strip. No checkbox
+// (nothing to act on), no warning icon (the "already closed" warn is implied
+// by the section header). Same column layout as renderRow minus col-check.
+function renderClosedRow(r: IssueRow): string {
+  const labelChips = r.labels.length > 0
+    ? `<div class="labels">${r.labels
+        .map((l) => `<span class="label">${escapeHtml(l)}</span>`).join("")}</div>`
+    : "";
+  const assignees = r.assignees.length > 0
+    ? r.assignees.map((a) => `@${escapeHtml(a)}`).join(", ")
+    : "—";
+  const stateChip =
+    `<span class="state state-${escapeHtml(r.state)}">${escapeHtml(r.state)}</span>`;
+  return `<tr>
+    <td class="num"><a href="${escapeHtml(r.url)}" target="_blank" rel="noopener">#${r.number}</a></td>
+    <td class="title"><a href="${escapeHtml(r.url)}" target="_blank" rel="noopener">${escapeHtml(r.title)}</a></td>
+    <td>${stateChip}</td>
+    <td>${labelChips || "—"}</td>
+    <td class="assignees">${assignees}</td>
+  </tr>`;
 }
 
 function renderRow(r: IssueRow): string {

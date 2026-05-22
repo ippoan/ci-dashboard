@@ -365,7 +365,7 @@ describe("GET /releases", () => {
     expect(html).toContain('action="/api/release-close"');
   });
 
-  it("closed rows are NOT checked by default; open rows (including bug-labeled) ARE", async () => {
+  it("already-closed rows move to the audit <details>; open rows stay in the form and are checked by default", async () => {
     stubGithubApi();
     const req = new Request("http://localhost/releases?repo=ippoan/ci-dashboard&tag=v1.2.0");
     const ctx = createExecutionContext();
@@ -373,18 +373,20 @@ describe("GET /releases", () => {
     await waitOnExecutionContext(ctx);
     const html = await res.text();
 
-    // #42 has no warnings → checkbox starts checked.
+    // #42 (open, no warnings) → in form, checked.
     expect(html).toMatch(/name="issue" value="42" checked/);
-    // #50 is closed → still unchecked.
-    expect(html).toMatch(/name="issue" value="50"(?! checked)/);
-    // #99 has the `bug` label but is open. Per #77 the label no longer
-    // triggers a warning, so the checkbox starts checked.
+    // #99 (open, "bug" label — no longer warned per #77) → in form, checked.
     expect(html).toMatch(/name="issue" value="99" checked/);
+    // #50 is closed → NOT in the form at all (no checkbox / no `name="issue"`
+    // value="50") so the operator can't accidentally re-close it.
+    expect(html).not.toMatch(/name="issue" value="50"/);
 
-    // Warning icon + tooltip remain for the closed row only.
-    expect(html).toContain("⚠️");
-    expect(html).toContain("already closed");
-    expect(html).not.toContain("bug label");
+    // #50 still appears in the audit strip so the operator can confirm what
+    // got resolved by this tag.
+    expect(html).toContain("closed-details");
+    expect(html).toMatch(/1 closed issue \(already resolved\)/);
+    expect(html).toContain("#50");
+    expect(html).toContain("already done");
   });
 
   it("returns 404 when the tag is not in the recent list", async () => {
