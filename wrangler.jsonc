@@ -7,6 +7,14 @@
   "observability": {
     "enabled": true
   },
+  "vars": {
+    // Comma-separated `owner/name` repos that do NOT cut release tags. For these
+    // repos the dashboard treats each PR merge into the default branch as a
+    // mini-release: it scans the merged PR for `Refs #N` and surfaces any still-
+    // open issues on the dashboard banner + /releases synthetic blocks. Repos
+    // not listed here keep the original tag-driven flow.
+    "TAGLESS_REPOS": ""
+  },
   "kv_namespaces": [
     {
       "binding": "CI_STATUS",
