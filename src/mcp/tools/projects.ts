@@ -266,6 +266,85 @@ export async function fetchProjectIssueMap(
   return map;
 }
 
+export interface ProjectItemSummary {
+  item_id: string;
+  item_type: string;
+  content:
+    | { type: "issue" | "pull_request"; repo: string; number: number; title: string; state: string; url: string }
+    | { type: "draft_issue"; title: string }
+    | { type: "unknown" };
+  fields: Record<string, unknown>;
+}
+
+/**
+ * Fetch the cards on a single Projects v2 board, with each item's field values
+ * flattened (Status / Priority / Iteration title / etc.) into a `fields` map
+ * keyed by field name. Shared by the `list_project_items` MCP tool and the
+ * SSR `/projects` page in `src/projects-page.ts`.
+ *
+ * `repositoryOwner(login:$login)` is used (rather than `node(id:$id)` like
+ * `fetchProjectIssueMap`) so callers can pass `org` + `number` directly — the
+ * same surface as the MCP tool.
+ */
+export async function fetchProjectItems(
+  token: string,
+  org: string,
+  number: number,
+  first = 50,
+): Promise<ProjectItemSummary[]> {
+  validateOrg(org);
+  const data = await githubGraphQL<{
+    repositoryOwner: { projectV2?: { items: { nodes: ProjectItemNode[] } } | null } | null;
+  }>(
+    token,
+    `query($login:String!,$number:Int!,$first:Int!){
+      repositoryOwner(login:$login){
+        ... ProjectItems
+      }
+    }
+    fragment ProjectItems on ProjectV2Owner {
+      projectV2(number:$number){
+        items(first:$first){
+          nodes{
+            id
+            type
+            content{
+              __typename
+              ... on Issue { number title url state repository{ nameWithOwner } }
+              ... on PullRequest { number title url state repository{ nameWithOwner } }
+              ... on DraftIssue { title }
+            }
+            fieldValues(first:30){
+              nodes{
+                __typename
+                ... on ProjectV2ItemFieldTextValue {
+                  text field{ ... on ProjectV2FieldCommon { name } }
+                }
+                ... on ProjectV2ItemFieldNumberValue {
+                  number field{ ... on ProjectV2FieldCommon { name } }
+                }
+                ... on ProjectV2ItemFieldDateValue {
+                  date field{ ... on ProjectV2FieldCommon { name } }
+                }
+                ... on ProjectV2ItemFieldSingleSelectValue {
+                  name optionId field{ ... on ProjectV2FieldCommon { name } }
+                }
+                ... on ProjectV2ItemFieldIterationValue {
+                  title iterationId
+                  field{ ... on ProjectV2FieldCommon { name } }
+                }
+              }
+            }
+          }
+        }
+      }
+    }`,
+    { login: org, number, first },
+  );
+  const nodes = data.repositoryOwner?.projectV2?.items.nodes ?? [];
+  return nodes.map(formatItem);
+}
+
 export function registerProjectsTools(server: McpServer, token: string): void {
   // --------------------------------------------------------------------
   // Read tools
@@ -394,57 +473,7 @@ export function registerProjectsTools(server: McpServer, token: string): void {
       annotations: { readOnlyHint: true },
     },
     async ({ org, number, first }) => {
-      validateOrg(org);
-      const data = await githubGraphQL<{
-        repositoryOwner: { projectV2?: { items: { nodes: ProjectItemNode[] } } | null } | null;
-      }>(
-        token,
-        `query($login:String!,$number:Int!,$first:Int!){
-          repositoryOwner(login:$login){
-            ... ProjectItems
-          }
-        }
-        fragment ProjectItems on ProjectV2Owner {
-          projectV2(number:$number){
-            items(first:$first){
-              nodes{
-                id
-                type
-                content{
-                  __typename
-                  ... on Issue { number title url state repository{ nameWithOwner } }
-                  ... on PullRequest { number title url state repository{ nameWithOwner } }
-                  ... on DraftIssue { title }
-                }
-                fieldValues(first:30){
-                  nodes{
-                    __typename
-                    ... on ProjectV2ItemFieldTextValue {
-                      text field{ ... on ProjectV2FieldCommon { name } }
-                    }
-                    ... on ProjectV2ItemFieldNumberValue {
-                      number field{ ... on ProjectV2FieldCommon { name } }
-                    }
-                    ... on ProjectV2ItemFieldDateValue {
-                      date field{ ... on ProjectV2FieldCommon { name } }
-                    }
-                    ... on ProjectV2ItemFieldSingleSelectValue {
-                      name optionId field{ ... on ProjectV2FieldCommon { name } }
-                    }
-                    ... on ProjectV2ItemFieldIterationValue {
-                      title iterationId
-                      field{ ... on ProjectV2FieldCommon { name } }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }`,
-        { login: org, number, first },
-      );
-      const nodes = data.repositoryOwner?.projectV2?.items.nodes ?? [];
-      const result = nodes.map(formatItem);
+      const result = await fetchProjectItems(token, org, number, first);
       return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
     },
   );
@@ -848,9 +877,9 @@ type ProjectFieldValueNode =
   | { __typename: "ProjectV2ItemFieldIterationValue"; title: string; iterationId: string; field: { name?: string } }
   | { __typename: string };
 
-function formatItem(node: ProjectItemNode) {
+function formatItem(node: ProjectItemNode): ProjectItemSummary {
   const content = node.content;
-  let contentSummary: Record<string, unknown> = { type: "unknown" };
+  let contentSummary: ProjectItemSummary["content"] = { type: "unknown" };
   if (content) {
     if (content.__typename === "Issue" || content.__typename === "PullRequest") {
       contentSummary = {

@@ -6,7 +6,7 @@
 // pages self-contained (no external stylesheet to fetch) and avoid the
 // CSS-classname coupling problem if pages grow apart later.
 
-export type TabKey = "dashboard" | "issues" | "releases" | "secret-gen";
+export type TabKey = "dashboard" | "issues" | "projects" | "releases" | "secret-gen";
 
 interface TabDef {
   key: TabKey | "branch-protection" | "gcp-secrets";
@@ -28,6 +28,7 @@ const SECRETS_GCP_PROJECT = "cloudsql-sv";
 const TABS: ReadonlyArray<TabDef> = [
   { key: "dashboard",  href: "/",           label: "📊 Dashboard" },
   { key: "issues",     href: "/issues",     label: "📋 Open Issues" },
+  { key: "projects",   href: "/projects",   label: "🗂️ Projects" },
   { key: "releases",   href: "/releases",   label: "🏷️ Releases" },
   { key: "secret-gen", href: "/secret-gen", label: "🔐 Secret Generator" },
   {
