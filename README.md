@@ -103,16 +103,50 @@ npm run deploy                       # production (top-level, 予約) に手動 
 npx wrangler deploy --env staging    # staging に手動 deploy
 ```
 
-GitHub PAT は wrangler secret に登録 (staging / production それぞれ):
+### GitHub 認証 (PAT → GitHub App 移行中: #112)
+
+`refactor(auth): replace PAT with GitHub App installation token (3-org)` の
+移行作業中。新規セットアップは GitHub App、既存の PAT 設定は段階的に廃止する。
+
+#### GitHub App セットアップ (推奨、最終形)
+
+1. **App 作成** (Settings → Developer settings → GitHub Apps → New GitHub App)
+   - Homepage URL: `https://ci-dashboard.ippoan.org`
+   - Webhook: off (本 App は API client 用、event は github-webhook-worker で受ける)
+   - **Permissions** (Repository + Organization):
+     - Repository: Contents R / Issues R-W / Pull requests R-W / Metadata R / Actions R / Checks R
+     - Organization: Projects R-W (Projects v2 の read + write)
+   - Where can this GitHub App be installed?: Any account
+2. **Private key を発行** (App 設定ページ下部 → Generate a private key → `.pem` を download)
+3. **App を install** (各 org の Settings → GitHub Apps → Install):
+   - `ippoan`, `ohishi-exp`, `yhonda-ohishi` の 3 org
+   - Repository access: All repositories (or対象を絞る場合は明示)
+   - install 後の URL `https://github.com/organizations/<org>/settings/installations/<id>` の `<id>` が installation ID
+4. **wrangler secret を登録** (staging / production それぞれ):
+   ```bash
+   # App ID は App 設定ページ最上部に表示
+   echo -n "123456" | npx wrangler secret put GITHUB_APP_ID --env staging
+
+   # Private key (multiline PEM をそのまま貼る)
+   npx wrangler secret put GITHUB_APP_PRIVATE_KEY --env staging
+   # プロンプトで .pem の中身全体 (BEGIN/END 行含む) を貼って Ctrl+D
+
+   # 3 org の installation ID を JSON で 1 secret に
+   echo -n '{"ippoan": 11111111, "ohishi-exp": 22222222, "yhonda-ohishi": 33333333}' \
+     | npx wrangler secret put GITHUB_APP_INSTALLATIONS --env staging
+   ```
+5. installation token は worker 内で JWT 経由で交換し、KV (`gh-app:token:<installation_id>`) に
+   ~55 min キャッシュされる。手動 rotation 不要。
+
+#### PAT (旧、廃止予定)
 
 ```bash
 wrangler secret put GITHUB_TOKEN --env staging
 wrangler secret put GITHUB_TOKEN
 ```
 
-`repo` / `workflow` スコープが必要 (issue 書込・PR マージ・workflow dispatch のため)。
-Projects v2 ツールを使う場合は **`project`** (write) または `read:project` (read のみ) スコープも追加。
-GitHub App で運用する場合は **Organization → Projects: Read & Write** 権限が必要 (App 再インストール / 権限受諾)。
+`repo` / `workflow` スコープ + Projects v2 用に `project` (write) または `read:project` を追加。
+**#112 完了後にこの secret は不要になるので削除すること。**
 
 ## 開発ルール
 
