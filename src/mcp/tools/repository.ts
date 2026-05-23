@@ -1,9 +1,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { githubApi, parseRepo, tokenForOrg } from "../../github-api";
-import type { GitHubAppEnv } from "../../github-app-auth";
+import type { AuthWorkerEnv } from "../../auth-worker-client";
 
-export function registerRepositoryTools(server: McpServer, env: GitHubAppEnv): void {
+export function registerRepositoryTools(server: McpServer, env: AuthWorkerEnv): void {
   server.registerTool(
     "get_file_tree",
     {

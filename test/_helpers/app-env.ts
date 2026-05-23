@@ -1,53 +1,57 @@
-// Shared test helper for the GitHub App auth migration (#112).
+// Shared test helper for the auth-worker delegation auth migration (#116).
 //
-// Pre-seeds cached installation tokens into KV so production code can call
-// `getInstallationToken(env, org)` without firing the JWT-exchange path.
-// Replaces the old "give the test a `GITHUB_TOKEN` secret" pattern; every test
-// that touches a real githubApi() call now seeds 3 tokens and uses
-// `appTestEnv()` to supply the App secrets.
+// Production code resolves `github_token` via:
+//   1. `getGitHubToken(env)` → KV cache check (`auth-worker:gh-token`)
+//   2. On miss: `POST https://auth.ippoan.org/mcp/introspect` with the JWT
+//      from `env.JWT_FOR_CI_DASHBOARD.get()` + shared-secret auth from
+//      `env.INTERNAL_SHARED_SECRET.get()`.
+//
+// To keep tests offline-friendly, we **pre-seed the KV cache** with a
+// long-lived fake token in `beforeEach`. Production code reads the cache
+// first, so the introspect endpoint is never hit. Tests that explicitly
+// exercise the introspect path (test/auth-worker-client.test.ts) clear the
+// cache and stub fetch.
 
 import { env } from "cloudflare:test";
 
-// Same dummy installation IDs across all tests. The actual integer doesn't
-// matter — Worker code only ever uses it as a KV key suffix.
-export const TEST_INSTALLATIONS = {
-  "ippoan": 111,
-  "ohishi-exp": 222,
-  "yhonda-ohishi": 333,
-} as const;
+export const TEST_GITHUB_TOKEN = "ghs_test_token_via_auth_worker";
+export const TEST_JWT = "eyJ.test.jwt";
+export const TEST_INTERNAL_SECRET = "test-internal-shared-secret";
 
-export const TEST_INSTALLATION_TOKEN = "test-token";
+const TOKEN_CACHE_KEY = "auth-worker:gh-token";
 
-/** Env object suitable for handlers that take GitHubAppEnv (or its supersets
- *  like the full Worker Env in src/index.ts). The values are syntactically
- *  valid but never actually drive a JWT exchange because `seedTestTokens()`
- *  pre-populates the per-installation KV cache. */
+/** Returns a `SecretsStoreSecret`-shaped fake whose `.get()` resolves to
+ *  `value`. Mirrors the binding surface that `wrangler.jsonc`
+ *  `secrets_store_secrets` exposes at runtime. */
+function fakeStoreSecret(value: string): SecretsStoreSecret {
+  return { get: async () => value } as unknown as SecretsStoreSecret;
+}
+
+/** Env object suitable for handlers that take `AuthWorkerEnv` (or its
+ *  supersets like the full Worker Env in src/index.ts). Pre-seed the KV with
+ *  `seedTestTokens()` before each test so the production code path never
+ *  hits `/mcp/introspect`. */
 export function appTestEnv() {
   return {
-    GITHUB_APP_ID: "1",
-    GITHUB_APP_PRIVATE_KEY: "-----BEGIN PRIVATE KEY-----\nTEST\n-----END PRIVATE KEY-----",
-    GITHUB_APP_INSTALLATIONS: JSON.stringify(TEST_INSTALLATIONS),
+    JWT_FOR_CI_DASHBOARD: fakeStoreSecret(TEST_JWT),
+    INTERNAL_SHARED_SECRET: fakeStoreSecret(TEST_INTERNAL_SECRET),
     CI_STATUS: env.CI_STATUS,
   };
 }
 
-/** Pre-populate the KV cache so `getInstallationToken(env, org)` returns
- *  `TEST_INSTALLATION_TOKEN` synchronously without minting a JWT. Call this
- *  in `beforeEach` for any test whose stubbed fetch expects the
- *  Authorization header but doesn't want to stub the App-token endpoint. */
+/** Pre-populate the KV cache so `getGitHubToken(env)` returns
+ *  `TEST_GITHUB_TOKEN` synchronously without an HTTP call. */
 export async function seedTestTokens(): Promise<void> {
-  const expires_at_ms = Date.now() + 3600 * 1000;
-  for (const id of Object.values(TEST_INSTALLATIONS)) {
-    await env.CI_STATUS.put(
-      `gh-app:token:${id}`,
-      JSON.stringify({ token: TEST_INSTALLATION_TOKEN, expires_at_ms }),
-    );
-  }
+  await env.CI_STATUS.put(
+    TOKEN_CACHE_KEY,
+    JSON.stringify({
+      token: TEST_GITHUB_TOKEN,
+      expires_at_ms: Date.now() + 3600 * 1000,
+    }),
+  );
 }
 
-/** Clear seeded tokens between tests so a fresh seed always wins. */
+/** Clear the seeded token between tests so a fresh seed always wins. */
 export async function clearTestTokens(): Promise<void> {
-  for (const id of Object.values(TEST_INSTALLATIONS)) {
-    await env.CI_STATUS.delete(`gh-app:token:${id}`);
-  }
+  await env.CI_STATUS.delete(TOKEN_CACHE_KEY);
 }

@@ -1,7 +1,7 @@
 import { fetchOrgIssues, type OrgIssue } from "./mcp/tools/issues";
 import { fetchProjectIssueMap, type ProjectRef } from "./mcp/tools/projects";
 import { fetchAllOpenPrsByIssue, type IssuePrRef } from "./issue-prs";
-import type { GitHubAppEnv } from "./github-app-auth";
+import type { AuthWorkerEnv } from "./auth-worker-client";
 import { renderTabs, TAB_STYLES } from "./nav-tabs";
 import { PWA_HEAD_TAGS, PWA_REGISTER_SCRIPT } from "./pwa";
 
@@ -79,7 +79,7 @@ interface ProjectMapResult {
 }
 
 async function loadProjectMap(
-  env: GitHubAppEnv,
+  env: AuthWorkerEnv,
   orgs: string[],
 ): Promise<ProjectMapResult> {
   const kv = env.CI_STATUS;
@@ -125,7 +125,7 @@ interface PrMapResult {
 }
 
 async function loadPrMap(
-  env: GitHubAppEnv,
+  env: AuthWorkerEnv,
   mainOrgs: string[],
   yhondaRepos: string[],
 ): Promise<PrMapResult> {
@@ -151,7 +151,7 @@ async function loadPrMap(
   }
 }
 
-export async function handleIssuesPage(env: GitHubAppEnv): Promise<Response> {
+export async function handleIssuesPage(env: AuthWorkerEnv): Promise<Response> {
   // Search REST gives us the issues themselves; this is the only fetch that
   // can fail the page outright. Project map is loaded separately below so a
   // GraphQL rate-limit doesn't blank the page (Refs #94 follow-up).

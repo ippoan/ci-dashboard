@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { githubApi, parseRepo, tokenForOrg, validateOrg } from "../../github-api";
-import { getInstallationToken, type GitHubAppEnv } from "../../github-app-auth";
+import { getGitHubToken, type AuthWorkerEnv } from "../../auth-worker-client";
 
 /** Build the PATCH body for `update_issue` from optional fields. Strips
  *  fields the caller did not provide (= `undefined`); preserves empty
@@ -29,7 +29,7 @@ export function buildUpdateIssuePayload(input: {
   return payload;
 }
 
-export function registerIssuesTools(server: McpServer, env: GitHubAppEnv): void {
+export function registerIssuesTools(server: McpServer, env: AuthWorkerEnv): void {
   server.registerTool(
     "list_issues",
     {
@@ -403,57 +403,23 @@ export interface FetchOrgIssuesResult {
 
 /** Cross-org issue search.
  *
- * GitHub App installation tokens are scoped per-org, so we cannot run
- * `org:ippoan org:ohishi-exp` in a single search call: that token would
- * only return results from its own installation. We fan out: one search
- * per org with that org's installation token, then merge the rows.
+ * auth-worker delegation (#116) issues a single user-scope token that spans
+ * every org the operator is a member of. So we hit `/search/issues` once
+ * with `org:ippoan org:ohishi-exp ...` and get all rows back in one call —
+ * no per-org fan-out (which the GitHub App installation-token era required).
  *
- * The special case is when `params.query` pins a specific `repo:owner/...`.
- * In that case all repos belong to a single owner, so a single search call
- * with that owner's token is correct (and required, because GitHub silently
- * drops `repo:` when combined with `org:`, so we never want to add `org:`
- * in that branch). */
+ * GitHub Search silently drops `repo:` when combined with `org:`. When the
+ * caller-supplied `query` pins specific repos via `repo:`, we omit the
+ * `org:` qualifier (the `repo:` already implies the owner). `validateOrg`
+ * runs above regardless, so the allowlist check is preserved. */
 export async function fetchOrgIssues(
-  env: GitHubAppEnv,
+  env: AuthWorkerEnv,
   params: FetchOrgIssuesParams,
 ): Promise<FetchOrgIssuesResult> {
-  const { orgs, query } = params;
+  const { orgs, state = "open", labels, assignee, query, per_page = 30 } = params;
   for (const o of orgs) validateOrg(o);
 
   const queryHasRepoFilter = !!query && /\brepo:/.test(query);
-
-  if (queryHasRepoFilter) {
-    // All repos in the query must share an owner (else we couldn't pick one
-    // installation token). Extract the first owner and use that.
-    const m = query!.match(/\brepo:([\w.-]+)\//);
-    if (!m) throw new Error("fetchOrgIssues: query has repo: qualifier but owner could not be parsed");
-    const owner = m[1]!;
-    const token = await tokenForOrg(env, owner);
-    return runIssueSearch(token, params, /*omitOrgQualifier*/ true);
-  }
-
-  // Per-org fan-out.
-  const results = await Promise.all(
-    orgs.map(async (org) => {
-      const token = await getInstallationToken(env, org);
-      return runIssueSearch(token, { ...params, orgs: [org] }, /*omitOrgQualifier*/ false);
-    }),
-  );
-
-  return {
-    total_count: results.reduce((s, r) => s + r.total_count, 0),
-    incomplete: results.some((r) => r.incomplete),
-    items: results.flatMap((r) => r.items),
-  };
-}
-
-async function runIssueSearch(
-  token: string,
-  params: FetchOrgIssuesParams,
-  omitOrgQualifier: boolean,
-): Promise<FetchOrgIssuesResult> {
-  const { orgs, state = "open", labels, assignee, query, per_page = 30 } = params;
-
   // Default-exclude archived repos so old projects like cf-secrets-mcp don't
   // leak open issues into the dashboard. Caller can still opt back in (or
   // request archived-only) by passing `archived:true` / `archived:false` in
@@ -462,7 +428,7 @@ async function runIssueSearch(
 
   const parts: string[] = ["is:issue"];
   if (state !== "all") parts.push(`state:${state}`);
-  if (!omitOrgQualifier) {
+  if (!queryHasRepoFilter) {
     for (const o of orgs) parts.push(`org:${o}`);
   }
   if (!queryHasArchivedFilter) parts.push("archived:false");
@@ -471,6 +437,7 @@ async function runIssueSearch(
   if (query) parts.push(query);
   const q = parts.join(" ");
 
+  const token = await getGitHubToken(env);
   const data = await githubApi<SearchIssuesResponse>(
     token, "GET", "/search/issues", undefined,
     { q, per_page: String(per_page) },

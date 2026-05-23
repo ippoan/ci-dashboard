@@ -103,13 +103,67 @@ npm run deploy                       # production (top-level, 予約) に手動 
 npx wrangler deploy --env staging    # staging に手動 deploy
 ```
 
-### GitHub 認証 (GitHub App — #112 で PAT 廃止済み)
+### GitHub 認証 (auth-worker delegation — #116)
 
-PAT (`GITHUB_TOKEN`) は完全廃止。Worker は GitHub App installation token
-(per-org、1 h TTL、KV cache ~55 min) を `src/github-app-auth.ts` 経由で
-発行・更新する。手動 rotation は不要。
+PAT / GitHub App PEM は廃止。本 Worker は `auth.ippoan.org` (`ippoan/auth-worker`)
+MCP OAuth Provider に delegate し、`POST /mcp/introspect` で `github_token` を
+取り出して使う。OAuth Client Secret も PEM も本 Worker 上に一切存在しない。
 
-#### GitHub App セットアップ
+#### 認証フロー
+
+```
+[ci-dashboard worker]
+      │ POST https://auth.ippoan.org/mcp/introspect
+      │   Authorization: <INTERNAL_SHARED_SECRET>
+      │   body: { token: <JWT_FOR_CI_DASHBOARD> }
+      ↓
+[auth-worker (GitHub OAuth App を保有)]
+      │ JWT → github_token を返す
+      ↓
+[ci-dashboard で KV cache (~55 min) → api.github.com に直叩き]
+```
+
+#### 必要な secret (Cloudflare Secrets Store)
+
+| binding | 値 |
+|---|---|
+| `JWT_FOR_CI_DASHBOARD` | auth-worker `/mcp/device_authorization` 経由で取得した access JWT |
+| `INTERNAL_SHARED_SECRET` | auth-worker と共有する固定 secret (cc-relay broker と同じ値) |
+
+どちらも < 1 KB で Secrets Store の上限内。
+
+#### 初回セットアップ
+
+1. **auth-worker 側**: yhonda-ohishi を `GITHUB_MCP_USER_ALLOWLIST` に含めることを確認
+2. **device flow で JWT 取得** (operator のローカルで 1 回):
+   ```bash
+   # 認可開始
+   curl -s https://auth.ippoan.org/mcp/device_authorization \
+     -d "client_id=ci-dashboard&scope=mcp.write mcp.workflow mcp.project" | jq
+   # → verification_uri_complete をブラウザで開いて approve
+   # poll
+   curl -s https://auth.ippoan.org/mcp/token \
+     -d "grant_type=urn:ietf:params:oauth:grant-type:device_code" \
+     -d "device_code=<DEVICE_CODE>" -d "client_id=ci-dashboard" \
+     | jq -r .access_token
+   ```
+3. **Secrets Store に登録** (account-level、複数 worker 共有可):
+   ```bash
+   STORE_ID="<your-secrets-store-id>"
+   echo -n "<JWT>" | npx wrangler secrets-store secret create "$STORE_ID" \
+     --name JWT_FOR_CI_DASHBOARD --scopes workers
+   echo -n "<INTERNAL_SHARED_SECRET>" | npx wrangler secrets-store secret create "$STORE_ID" \
+     --name INTERNAL_SHARED_SECRET --scopes workers
+   ```
+4. `wrangler.jsonc` の `store_id` 2 箇所を実 ID に差し替えて deploy
+5. 旧 secret 削除 (`GITHUB_APP_*` / `GITHUB_TOKEN` が残っていれば):
+   ```bash
+   npx wrangler secret delete GITHUB_APP_ID --env staging
+   npx wrangler secret delete GITHUB_APP_PRIVATE_KEY --env staging
+   npx wrangler secret delete GITHUB_APP_INSTALLATIONS --env staging
+   ```
+
+#### GitHub App セットアップ (旧、廃止済み)
 
 1. **App 作成** (Settings → Developer settings → GitHub Apps → New GitHub App)
    - Homepage URL: `https://ci-dashboard.ippoan.org`

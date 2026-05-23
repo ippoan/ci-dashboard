@@ -22,7 +22,7 @@ import {
   tokenForOrg,
   GitHubApiError,
 } from "./github-api";
-import type { GitHubAppEnv } from "./github-app-auth";
+import type { AuthWorkerEnv } from "./auth-worker-client";
 import {
   extractRefIssues,
   extractPrNumber,
@@ -118,7 +118,7 @@ export async function fetchIssuesByNumbers(
 // compute the alert payload, return null when no open issues are referenced
 // (banner suppressed).
 export async function computeReleaseAlert(
-  env: GitHubAppEnv,
+  env: AuthWorkerEnv,
   repo: string,
   tagOverride?: string,
   kv?: KVNamespace,
@@ -170,7 +170,7 @@ export async function computeReleaseAlert(
 // are no open referenced issues left (banner should clear). Used by the
 // release-close path so a successful close immediately drops the banner.
 export async function recomputeAlert(
-  env: GitHubAppEnv,
+  env: AuthWorkerEnv,
   repo: string,
   tag: string,
   kv?: KVNamespace,
@@ -187,7 +187,7 @@ export async function recomputeAlert(
 // `<defaultBranch>@pr-<n>` — the alert is still functional; the only loss is a
 // less-clickable label.
 export async function computeReleaseAlertForPr(
-  env: GitHubAppEnv,
+  env: AuthWorkerEnv,
   repo: string,
   prNumber: number,
   mergeSha: string | null,

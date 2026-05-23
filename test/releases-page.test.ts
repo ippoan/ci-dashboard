@@ -12,9 +12,8 @@ function testEnv(opts: { watched?: string[] } = {}): Env {
   return {
     CI_STATUS: env.CI_STATUS,
     WEBHOOK_SECRET: "test-secret",
-    GITHUB_APP_ID: "1",
-    GITHUB_APP_PRIVATE_KEY: "-----BEGIN PRIVATE KEY-----\nTEST\n-----END PRIVATE KEY-----",
-    GITHUB_APP_INSTALLATIONS: JSON.stringify({"ippoan":111,"ohishi-exp":222,"yhonda-ohishi":333}),
+    JWT_FOR_CI_DASHBOARD: { get: async () => "test-jwt" } as unknown as SecretsStoreSecret,
+    INTERNAL_SHARED_SECRET: { get: async () => "test-internal" } as unknown as SecretsStoreSecret,
     CI_HUB: {
       idFromName: () => ({}),
       get: () => ({

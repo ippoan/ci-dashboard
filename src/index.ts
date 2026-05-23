@@ -23,12 +23,13 @@ export interface Env {
   CI_STATUS: KVNamespace;
   WEBHOOK_SECRET: string;
   CI_HUB: DurableObjectNamespace;
-  // GitHub App credentials. Replaces the classic-PAT `GITHUB_TOKEN` secret;
-  // each Worker request mints (or reads from KV cache) per-org installation
-  // tokens via src/github-app-auth.ts. Refs #112.
-  GITHUB_APP_ID: string;
-  GITHUB_APP_PRIVATE_KEY: string;
-  GITHUB_APP_INSTALLATIONS: string;
+  // auth-worker MCP OAuth Provider delegation. `JWT_FOR_CI_DASHBOARD` is the
+  // long-lived access JWT obtained via device flow against auth.ippoan.org;
+  // `INTERNAL_SHARED_SECRET` is the shared key for `/mcp/introspect`. Both
+  // are Secrets Store bindings (small enough to fit the 1 KB limit, unlike
+  // the GitHub App PEM that motivated #116). See src/auth-worker-client.ts.
+  JWT_FOR_CI_DASHBOARD: SecretsStoreSecret;
+  INTERNAL_SHARED_SECRET: SecretsStoreSecret;
   // Comma-separated `owner/name` list of repos that don't cut tags. PR merges
   // into the default branch are treated as releases for these. See
   // wrangler.jsonc and src/tagless-repos.ts.
