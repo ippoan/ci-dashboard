@@ -9,7 +9,7 @@
 export type TabKey = "dashboard" | "issues" | "projects" | "releases" | "secret-gen";
 
 interface TabDef {
-  key: TabKey | "branch-protection" | "gcp-secrets";
+  key: TabKey | "branch-protection" | "gcp-secrets" | "security-inventory";
   href: string;
   label: string;
   // External tabs live on a different origin, so they open in a new tab and
@@ -41,6 +41,12 @@ const TABS: ReadonlyArray<TabDef> = [
     key: "gcp-secrets",
     href: `https://console.cloud.google.com/security/secret-manager?project=${encodeURIComponent(SECRETS_GCP_PROJECT)}`,
     label: "🗝️ GCP Secrets",
+    external: true,
+  },
+  {
+    key: "security-inventory",
+    href: "https://security-inventory.ippoan.org/",
+    label: "🔍 Security Inventory",
     external: true,
   },
 ];

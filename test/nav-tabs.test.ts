@@ -59,11 +59,21 @@ describe("renderTabs — external tabs", () => {
     );
   });
 
+  it("renders Security Inventory tab pointing at the secrets-inventory worker, opens in new tab", () => {
+    const html = renderTabs("dashboard");
+    expect(html).toContain('href="https://security-inventory.ippoan.org/"');
+    expect(html).toContain("🔍 Security Inventory");
+    expect(html).toMatch(
+      /href="https:\/\/security-inventory\.ippoan\.org\/"[^>]*target="_blank"[^>]*rel="noopener"/,
+    );
+  });
+
   it("never marks an external tab as active even if its key string is passed in (defensive)", () => {
     // Internal tabs are typed via TabKey, but a future contributor could
     // widen the type by mistake — make sure external tabs stay plain.
     const html = renderTabs("dashboard");
     expect(html).not.toMatch(/tab tab-active[^>]*>\s*🛡️ Branch Protection/);
     expect(html).not.toMatch(/tab tab-active[^>]*>\s*🗝️ GCP Secrets/);
+    expect(html).not.toMatch(/tab tab-active[^>]*>\s*🔍 Security Inventory/);
   });
 });
