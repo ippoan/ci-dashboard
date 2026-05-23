@@ -45,6 +45,17 @@
       "account_id": "24b45709d060d957340180e995f0d373",
       "workers_dev": true,
       "observability": { "enabled": true },
+      // `ci-dashboard.ippoan.org` を staging 側に向ける。元々 production
+      // Worker (`ci-dashboard`) に Custom Domain として付いていたが、本 repo
+      // は staging-only 運用に切替えたため staging 側にバインドする。初回
+      // deploy 時は既存 production binding と衝突するので、事前に Cloudflare
+      // dashboard で production 側から hostname を外しておくこと。
+      "routes": [
+        {
+          "pattern": "ci-dashboard.ippoan.org",
+          "custom_domain": true
+        }
+      ],
       "vars": {
         "TAGLESS_REPOS": "ippoan/secrets-inventory,ippoan/secrets-inventory-gcp"
       },
