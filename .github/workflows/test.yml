@@ -17,8 +17,9 @@ jobs:
   ci:
     uses: ippoan/ci-workflows/.github/workflows/frontend-ci.yml@main
     with:
+      project_type: 'worker'
       install_command: 'npm install'
       typecheck_command: 'npx tsc --noEmit'
-      has_staging_deploy: false
+      deploy_staging_script: 'npx wrangler deploy --env staging'
       deploy_release_script: 'npx wrangler deploy'
     secrets: inherit

@@ -34,5 +34,40 @@
       "tag": "v1",
       "new_sqlite_classes": ["CIDashboardHub"]
     }
-  ]
+  ],
+  // staging を実運用 env として扱う (secrets-inventory と同じパターン)。
+  // PR push 毎に `ci-dashboard-staging` Worker に auto-deploy され、`v*` tag の
+  // production (top-level `ci-dashboard`) は将来用に予約。top-level 設定は
+  // `wrangler dev` 用に残してある。
+  "env": {
+    "staging": {
+      "name": "ci-dashboard-staging",
+      "account_id": "24b45709d060d957340180e995f0d373",
+      "workers_dev": true,
+      "observability": { "enabled": true },
+      "vars": {
+        "TAGLESS_REPOS": "ippoan/secrets-inventory,ippoan/secrets-inventory-gcp"
+      },
+      "kv_namespaces": [
+        {
+          "binding": "CI_STATUS",
+          "id": "ffb983ee8324499f915b11a0b8cf787b"
+        }
+      ],
+      "durable_objects": {
+        "bindings": [
+          {
+            "name": "CI_HUB",
+            "class_name": "CIDashboardHub"
+          }
+        ]
+      },
+      "migrations": [
+        {
+          "tag": "v1",
+          "new_sqlite_classes": ["CIDashboardHub"]
+        }
+      ]
+    }
+  }
 }

@@ -84,15 +84,29 @@ npm run test:coverage
 npm run typecheck    # tsc --noEmit
 ```
 
+## 環境構成
+
+**staging が実運用環境**。本番リリースタグ (`v*`) は将来用に予約してあるが、
+当面は staging deploy だけを使う (secrets-inventory と同じ運用)。
+
+| env | name | trigger | route |
+|---|---|---|---|
+| staging (live) | `ci-dashboard-staging` | PR (non-draft) / main push | `workers.dev` |
+| production | `ci-dashboard` | `v*` tag push | (未割当) |
+
+PR を上げると `frontend-ci.yml` 経由で staging に auto-deploy される。
+
 ## デプロイ
 
 ```bash
-npm run deploy       # wrangler deploy
+npm run deploy                       # production (top-level, 予約) に手動 deploy
+npx wrangler deploy --env staging    # staging に手動 deploy
 ```
 
-GitHub PAT は wrangler secret に登録:
+GitHub PAT は wrangler secret に登録 (staging / production それぞれ):
 
 ```bash
+wrangler secret put GITHUB_TOKEN --env staging
 wrangler secret put GITHUB_TOKEN
 ```
 
