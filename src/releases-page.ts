@@ -39,7 +39,6 @@ import { PWA_HEAD_TAGS, PWA_REGISTER_SCRIPT } from "./pwa";
 export async function handleReleasesPage(
   req: Request,
   env: {
-    JWT_FOR_CI_DASHBOARD: SecretsStoreSecret;
     INTERNAL_SHARED_SECRET: SecretsStoreSecret;
     CI_HUB: DurableObjectNamespace;
     CI_STATUS: KVNamespace;
@@ -126,7 +125,6 @@ const TOP_TAGS_INLINE = 5;
 
 async function handleIndexPage(
   env: {
-    JWT_FOR_CI_DASHBOARD: SecretsStoreSecret;
     INTERNAL_SHARED_SECRET: SecretsStoreSecret;
     CI_HUB: DurableObjectNamespace;
     CI_STATUS: KVNamespace;
