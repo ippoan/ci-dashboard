@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import type { AuthWorkerEnv } from "../auth-worker-client";
+import type { AuthClientWorkerEnv } from "@ippoan/auth-client-worker";
 import { registerActionsTools } from "./tools/actions";
 import { registerPullsTools } from "./tools/pulls";
 import { registerReleasesTools } from "./tools/releases";
@@ -10,7 +10,7 @@ import { registerCommitsTools } from "./tools/commits";
 import { registerIssuesTools } from "./tools/issues";
 import { registerProjectsTools } from "./tools/projects";
 
-function createMcpServer(env: AuthWorkerEnv): McpServer {
+function createMcpServer(env: AuthClientWorkerEnv): McpServer {
   const server = new McpServer({
     name: "ci-dashboard",
     version: "1.0.0",
@@ -28,7 +28,7 @@ function createMcpServer(env: AuthWorkerEnv): McpServer {
   return server;
 }
 
-export async function handleMcpRequest(request: Request, env: AuthWorkerEnv): Promise<Response> {
+export async function handleMcpRequest(request: Request, env: AuthClientWorkerEnv): Promise<Response> {
   const server = createMcpServer(env);
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: undefined, // stateless

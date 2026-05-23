@@ -11,7 +11,7 @@
 // won't appear until the fetch recovers.
 
 import { githubApi, GitHubApiError, tokenForOrg } from "./github-api";
-import type { AuthWorkerEnv } from "./auth-worker-client";
+import type { AuthClientWorkerEnv } from "@ippoan/auth-client-worker";
 
 export const ALLOWLIST_REPO = "yhonda-ohishi/claude-skills";
 export const ALLOWLIST_PATH = "wt-direct-push/config/direct-push-ok.txt";
@@ -33,7 +33,7 @@ interface CachedAllowlist {
 // stubbing a KV namespace; production passes `env.CI_STATUS`. The token is
 // resolved against `yhonda-ohishi` (owner of ALLOWLIST_REPO).
 export async function loadDirectPushAllowlist(
-  env: AuthWorkerEnv,
+  env: AuthClientWorkerEnv,
   kv?: KVNamespace,
 ): Promise<Set<string>> {
   if (kv) {

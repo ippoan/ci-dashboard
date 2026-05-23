@@ -148,7 +148,6 @@ function testEnv(): Env {
   return {
     CI_STATUS: env.CI_STATUS,
     WEBHOOK_SECRET,
-    JWT_FOR_CI_DASHBOARD: { get: async () => "test-jwt" } as unknown as SecretsStoreSecret,
     INTERNAL_SHARED_SECRET: { get: async () => "test-internal" } as unknown as SecretsStoreSecret,
     CI_HUB: { idFromName: () => ({}), get: () => hub } as unknown as DurableObjectNamespace,
   };

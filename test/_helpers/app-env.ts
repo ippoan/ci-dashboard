@@ -1,24 +1,24 @@
-// Shared test helper for the auth-worker delegation auth migration (#116).
+// Shared test helper for the auth-client-worker integration (#118).
 //
-// Production code resolves `github_token` via:
-//   1. `getGitHubToken(env)` → KV cache check (`auth-worker:gh-token`)
-//   2. On miss: `POST https://auth.ippoan.org/mcp/introspect` with the JWT
-//      from `env.JWT_FOR_CI_DASHBOARD.get()` + shared-secret auth from
-//      `env.INTERNAL_SHARED_SECRET.get()`.
+// Production code resolves `github_token` via `getGitHubToken(env)` from the
+// `@ippoan/auth-client-worker` package, which reads from KV cache key
+// `auth-client-worker:gh-token` (the package-managed key, not the legacy
+// `auth-worker:gh-token` from the inline pre-#118 implementation).
 //
-// To keep tests offline-friendly, we **pre-seed the KV cache** with a
-// long-lived fake token in `beforeEach`. Production code reads the cache
-// first, so the introspect endpoint is never hit. Tests that explicitly
-// exercise the introspect path (test/auth-worker-client.test.ts) clear the
-// cache and stub fetch.
+// To keep tests offline-friendly, `seedTestTokens()` pre-populates the KV
+// cache with a long-lived fake token before each test. Production code reads
+// the cache first, so the introspect endpoint is never hit during normal
+// tests. Tests that explicitly exercise the introspect path stub fetch
+// themselves and call `clearTestTokens()` first.
 
 import { env } from "cloudflare:test";
 
 export const TEST_GITHUB_TOKEN = "ghs_test_token_via_auth_worker";
-export const TEST_JWT = "eyJ.test.jwt";
 export const TEST_INTERNAL_SECRET = "test-internal-shared-secret";
 
-const TOKEN_CACHE_KEY = "auth-worker:gh-token";
+// Matches the cache key used by `@ippoan/auth-client-worker`'s introspect
+// helper (see packages/auth-client-worker/src/introspect.ts).
+const TOKEN_CACHE_KEY = "auth-client-worker:gh-token";
 
 /** Returns a `SecretsStoreSecret`-shaped fake whose `.get()` resolves to
  *  `value`. Mirrors the binding surface that `wrangler.jsonc`
@@ -27,13 +27,11 @@ function fakeStoreSecret(value: string): SecretsStoreSecret {
   return { get: async () => value } as unknown as SecretsStoreSecret;
 }
 
-/** Env object suitable for handlers that take `AuthWorkerEnv` (or its
- *  supersets like the full Worker Env in src/index.ts). Pre-seed the KV with
- *  `seedTestTokens()` before each test so the production code path never
- *  hits `/mcp/introspect`. */
+/** Env object satisfying `AuthClientWorkerEnv` from `@ippoan/auth-client-worker`.
+ *  Pre-seed the KV with `seedTestTokens()` before each test so the production
+ *  code path never hits `/mcp/introspect`. */
 export function appTestEnv() {
   return {
-    JWT_FOR_CI_DASHBOARD: fakeStoreSecret(TEST_JWT),
     INTERNAL_SHARED_SECRET: fakeStoreSecret(TEST_INTERNAL_SECRET),
     CI_STATUS: env.CI_STATUS,
   };

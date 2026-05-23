@@ -1,5 +1,5 @@
 import { githubApi, validateOrg } from "./github-api";
-import { getGitHubToken, type AuthWorkerEnv } from "./auth-worker-client";
+import { getGitHubToken, type AuthClientWorkerEnv } from "@ippoan/auth-client-worker";
 
 /** Lightweight PR descriptor used by the issues page to render "related PR"
  *  chips. Body is intentionally not retained — it's only used to extract
@@ -65,7 +65,7 @@ interface SearchPrsResponse {
  *  so cross-org `org:ippoan org:ohishi-exp` fits in one call (no fan-out
  *  needed, unlike the App-installation era). */
 export async function fetchOpenPrsByIssue(
-  env: AuthWorkerEnv,
+  env: AuthClientWorkerEnv,
   params: { orgs?: string[]; repos?: string[]; per_page?: number },
 ): Promise<Map<string, IssuePrRef[]>> {
   const { orgs = [], repos = [], per_page = 100 } = params;
@@ -115,7 +115,7 @@ export async function fetchOpenPrsByIssue(
  *  two shapes can't be combined in one GitHub search (`repo:` is dropped when
  *  `org:` is also present). */
 export async function fetchAllOpenPrsByIssue(
-  env: AuthWorkerEnv,
+  env: AuthClientWorkerEnv,
   mainOrgs: string[],
   yhondaRepos: string[],
 ): Promise<Map<string, IssuePrRef[]>> {

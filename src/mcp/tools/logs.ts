@@ -1,9 +1,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { githubApiRaw, parseRepo, tokenForOrg } from "../../github-api";
-import type { AuthWorkerEnv } from "../../auth-worker-client";
+import type { AuthClientWorkerEnv } from "@ippoan/auth-client-worker";
 
-export function registerLogsTools(server: McpServer, env: AuthWorkerEnv): void {
+export function registerLogsTools(server: McpServer, env: AuthClientWorkerEnv): void {
   server.registerTool(
     "get_job_logs",
     {

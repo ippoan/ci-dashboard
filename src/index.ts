@@ -1,5 +1,10 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import {
+  handleOAuthLogin,
+  handleOAuthCallback,
+  type AuthClientWorkerEnv,
+} from "@ippoan/auth-client-worker";
 import { handleWebhook } from "./webhook";
 import { handleDashboard } from "./dashboard";
 import { handleIssuesPage } from "./issues-page";
@@ -19,22 +24,27 @@ import {
 
 export { CIDashboardHub } from "./hub";
 
-export interface Env {
-  CI_STATUS: KVNamespace;
+// auth-worker MCP OAuth Provider delegation via `@ippoan/auth-client-worker`.
+// `INTERNAL_SHARED_SECRET` (Secrets Store) is shared with auth-worker for
+// `/mcp/introspect`. Long-lived JWT + refresh_token are stored in KV
+// (`auth-client-worker:oauth-tokens`) by the SDK after `/oauth/login`
+// browser flow — there is no operator-facing secret to rotate. Refs #118.
+export interface Env extends AuthClientWorkerEnv {
   WEBHOOK_SECRET: string;
   CI_HUB: DurableObjectNamespace;
-  // auth-worker MCP OAuth Provider delegation. `JWT_FOR_CI_DASHBOARD` is the
-  // long-lived access JWT obtained via device flow against auth.ippoan.org;
-  // `INTERNAL_SHARED_SECRET` is the shared key for `/mcp/introspect`. Both
-  // are Secrets Store bindings (small enough to fit the 1 KB limit, unlike
-  // the GitHub App PEM that motivated #116). See src/auth-worker-client.ts.
-  JWT_FOR_CI_DASHBOARD: SecretsStoreSecret;
-  INTERNAL_SHARED_SECRET: SecretsStoreSecret;
   // Comma-separated `owner/name` list of repos that don't cut tags. PR merges
   // into the default branch are treated as releases for these. See
   // wrangler.jsonc and src/tagless-repos.ts.
   TAGLESS_REPOS?: string;
 }
+
+// OAuth flow config — shared between /oauth/login and /oauth/callback.
+const OAUTH_OPTS = {
+  authWorkerOrigin: "https://auth.ippoan.org",
+  redirectUri: "https://ci-dashboard.ippoan.org/oauth/callback",
+  scope: "mcp.write mcp.workflow mcp.project",
+  clientName: "ci-dashboard",
+};
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -138,6 +148,14 @@ app.post("/api/dismiss", async (c) => {
 app.get("/manifest.webmanifest", () => handlePwaManifest());
 app.get("/sw.js", () => handlePwaServiceWorker());
 app.get("/icons/:file", (c) => handlePwaIcon("/icons/" + c.req.param("file")));
+
+// OAuth — auth-worker MCP OAuth Provider delegation (Refs #118).
+// `/oauth/login` triggers Auth Code + PKCE redirect to auth.ippoan.org/mcp/authorize.
+// `/oauth/callback` exchanges the auth code for tokens and stores them in
+// CI_STATUS KV. After first run, `getGitHubToken(env)` resolves automatically;
+// re-auth is needed only when the refresh_token (30 d TTL) expires.
+app.get("/oauth/login", (c) => handleOAuthLogin(c.req.raw, c.env, OAUTH_OPTS));
+app.get("/oauth/callback", (c) => handleOAuthCallback(c.req.raw, c.env, OAUTH_OPTS));
 
 // MCP endpoint (Streamable HTTP)
 app.all("/mcp", (c) => handleMcpRequest(c.req.raw, c.env));
