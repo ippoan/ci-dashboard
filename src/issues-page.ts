@@ -151,6 +151,21 @@ async function loadPrMap(
   }
 }
 
+// `@ippoan/auth-client-worker` SDK が auth-worker delegation 中に投げる error
+// は `Error.message` に常に診断文字列を入れる (introspect.ts / tokens.ts /
+// dcr.ts 参照)。message に以下のどれかが含まれたら「再ログインで解決可能」と
+// 判定して `/oauth/login` にリダイレクトする (= ユーザーは 502 ページではなく
+// GitHub 同意画面に飛ぶ)。それ以外 (GitHub rate limit など) は従来通り 502 を
+// 表示する。
+function isAuthError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return (
+    /No (DCR client registered|OAuth tokens stored)/.test(msg) ||
+    /auth-worker \/mcp\/(introspect|token).*failed \((401|403)/.test(msg) ||
+    /JWT inactive/.test(msg)
+  );
+}
+
 export async function handleIssuesPage(env: AuthClientWorkerEnv): Promise<Response> {
   // Search REST gives us the issues themselves; this is the only fetch that
   // can fail the page outright. Project map is loaded separately below so a
@@ -176,6 +191,13 @@ export async function handleIssuesPage(env: AuthClientWorkerEnv): Promise<Respon
       items: [...main.items, ...yhonda.items],
     };
   } catch (err) {
+    if (isAuthError(err)) {
+      // 認証失効: GitHub 同意画面 → /oauth/callback → return_to で /issues に戻る
+      return new Response(null, {
+        status: 302,
+        headers: { Location: "/oauth/login?return_to=/issues" },
+      });
+    }
     const msg = err instanceof Error ? err.message : String(err);
     return new Response(renderError(msg), {
       status: 502,

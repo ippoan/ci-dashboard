@@ -313,6 +313,24 @@ describe("GET /issues", () => {
     expect(html).toContain("← CI Dashboard");
   });
 
+  // When the SDK can't auth against auth-worker (no DCR / no stored tokens /
+  // introspect 401 / refresh 401), don't show a 502 dead-end — bounce the
+  // user to `/oauth/login` so they can log in and come back to `/issues`.
+  it("redirects to /oauth/login when getGitHubToken hits an auth error", async () => {
+    // Drop the seeded gh-token cache so `getGitHubToken` falls through to
+    // `readDcrFromKv`. KV has no DCR record either, so the SDK throws
+    // `"No DCR client registered. Visit /oauth/login first..."` — the
+    // canonical auth-failure shape.
+    await env.CI_STATUS.delete("auth-client-worker:gh-token");
+    const req = new Request("http://localhost/issues");
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(req, testEnv(), ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/oauth/login?return_to=/issues");
+  });
+
   it("renders an empty-state message when no issues match", async () => {
     // Use mockImplementation, not mockResolvedValue: the page fires three
     // fetches in parallel (2× /search/issues, 1+ /graphql) and a single
