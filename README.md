@@ -1,7 +1,7 @@
 # ci-dashboard
 
-GitHub CI 監視 + リポジトリ操作のための MCP (Model Context Protocol) サーバー。
-Cloudflare Workers にデプロイされ、Claude などの MCP クライアントから GitHub Actions ワークフローや issue / PR を操作できる。
+GitHub CI 監視 + リポジトリ操作のための MCP (Model Context Protocol) サーバー + SSR ダッシュボード。
+Cloudflare Workers にデプロイされ、Claude などの MCP クライアントから GitHub Actions ワークフローや issue / PR / release を操作できる。
 
 ## アーキテクチャ
 
