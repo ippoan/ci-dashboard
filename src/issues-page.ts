@@ -1,5 +1,6 @@
 import { fetchOrgIssues, type OrgIssue } from "./mcp/tools/issues";
 import { fetchProjectIssueMap, type ProjectRef } from "./mcp/tools/projects";
+import { fetchAllOpenPrsByIssue, type IssuePrRef } from "./issue-prs";
 import { renderTabs, TAB_STYLES } from "./nav-tabs";
 import { PWA_HEAD_TAGS, PWA_REGISTER_SCRIPT } from "./pwa";
 
@@ -102,6 +103,53 @@ async function loadProjectMap(
   }
 }
 
+// PR map cache mirrors the project-map cache pattern. The freshness window is
+// shorter (2 min) because PR state churns faster than Project board edits — a
+// new PR opened minutes ago should appear without forcing a manual reload —
+// but the 24 h store window keeps a stale copy as fallback when GitHub search
+// rate-limits the worker.
+const PR_MAP_CACHE_KEY = "issues-page:pr-map";
+const PR_MAP_FRESH_SECONDS = 120;
+const PR_MAP_STORE_SECONDS = 86400;
+
+interface PrMapCacheEntry {
+  storedAt: number;
+  data: Record<string, IssuePrRef[]>;
+}
+
+interface PrMapResult {
+  map: Map<string, IssuePrRef[]>;
+  stale: boolean;
+  error: string | null;
+}
+
+async function loadPrMap(
+  kv: KVNamespace,
+  token: string,
+  mainOrgs: string[],
+  yhondaRepos: string[],
+): Promise<PrMapResult> {
+  const cached = await kv.get(PR_MAP_CACHE_KEY, "json") as PrMapCacheEntry | null;
+  const now = Date.now();
+  if (cached && now - cached.storedAt < PR_MAP_FRESH_SECONDS * 1000) {
+    return { map: new Map(Object.entries(cached.data)), stale: false, error: null };
+  }
+  try {
+    const fresh = await fetchAllOpenPrsByIssue(token, mainOrgs, yhondaRepos);
+    const entry: PrMapCacheEntry = { storedAt: now, data: Object.fromEntries(fresh) };
+    await kv.put(PR_MAP_CACHE_KEY, JSON.stringify(entry), {
+      expirationTtl: PR_MAP_STORE_SECONDS,
+    });
+    return { map: fresh, stale: false, error: null };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (cached) {
+      return { map: new Map(Object.entries(cached.data)), stale: true, error: message };
+    }
+    return { map: new Map(), stale: false, error: message };
+  }
+}
+
 export async function handleIssuesPage(
   env: { GITHUB_TOKEN: string; CI_STATUS: KVNamespace },
 ): Promise<Response> {
@@ -136,8 +184,12 @@ export async function handleIssuesPage(
     });
   }
 
-  const project = await loadProjectMap(env.CI_STATUS, env.GITHUB_TOKEN, PROJECT_ORGS);
+  const [project, prs] = await Promise.all([
+    loadProjectMap(env.CI_STATUS, env.GITHUB_TOKEN, PROJECT_ORGS),
+    loadPrMap(env.CI_STATUS, env.GITHUB_TOKEN, ORGS, YHONDA_REPOS),
+  ]);
   const projectMap = project.map;
+  const prMap = prs.map;
 
   // Split issues into "Project-tagged" (top aggregate section) and
   // "ungrouped per-repo" (bottom sections). An issue belongs to the project
@@ -167,7 +219,7 @@ export async function handleIssuesPage(
     ] as const);
 
   return new Response(
-    renderHtml(merged.total_count, merged.incomplete, projectTagged, repos, project),
+    renderHtml(merged.total_count, merged.incomplete, projectTagged, repos, project, prs),
     { headers: { "Content-Type": "text/html; charset=utf-8" } },
   );
 }
@@ -178,13 +230,14 @@ function renderHtml(
   projectTagged: ReadonlyArray<{ issue: OrgIssue; projects: ProjectRef[] }>,
   repos: ReadonlyArray<readonly [string, OrgIssue[]]>,
   project: ProjectMapResult,
+  prs: PrMapResult,
 ): string {
   const repoSections = repos
-    .map(([repo, items]) => renderRepoSection(repo, items))
+    .map(([repo, items]) => renderRepoSection(repo, items, prs.map))
     .join("\n");
 
   const projectSection = projectTagged.length > 0
-    ? renderProjectSection(projectTagged)
+    ? renderProjectSection(projectTagged, prs.map)
     : "";
 
   const incompleteBanner = incomplete
@@ -194,6 +247,11 @@ function renderHtml(
     ? `<div class="banner banner-info">📋 Project tags shown are from the last successful sync — fresh fetch failed (${escapeHtml(project.error ?? "")})</div>`
     : project.error
     ? `<div class="banner">⚠️ Project tags unavailable: ${escapeHtml(project.error)}</div>`
+    : "";
+  const prBanner = prs.stale
+    ? `<div class="banner banner-info">🔗 Related-PR links shown are from the last successful sync — fresh fetch failed (${escapeHtml(prs.error ?? "")})</div>`
+    : prs.error
+    ? `<div class="banner">⚠️ Related-PR links unavailable: ${escapeHtml(prs.error)}</div>`
     : "";
 
   return `<!DOCTYPE html>
@@ -334,6 +392,31 @@ function renderHtml(
       text-decoration: none;
     }
     .project-chip:hover { background: #1f6feb66; }
+    /* Related-PR chips: green palette so they read as "in-flight work" vs.
+       the blue project-chip's "belongs to a board" affordance. Draft PRs
+       desaturate to gray so the reader can tell at a glance whether the PR
+       is review-ready. */
+    .pr-chips { margin-top: 4px; }
+    .pr-chip {
+      display: inline-block;
+      font-size: 11px;
+      padding: 1px 8px;
+      border-radius: 10px;
+      background: #2ea04322;
+      color: #7ee787;
+      border: 1px solid #2ea04388;
+      margin-right: 4px;
+      margin-bottom: 2px;
+      text-decoration: none;
+      font-variant-numeric: tabular-nums;
+    }
+    .pr-chip:hover { background: #2ea04344; }
+    .pr-chip.draft {
+      background: #6e768122;
+      color: #8b949e;
+      border-color: #6e768188;
+    }
+    .pr-chip.draft:hover { background: #6e768144; }
     .empty {
       padding: 32px;
       text-align: center;
@@ -355,6 +438,7 @@ function renderHtml(
   </header>
   ${incompleteBanner}
   ${projectBanner}
+  ${prBanner}
   ${projectSection}
   ${repos.length === 0 && projectTagged.length === 0
     ? `<div class="empty">🎉 No open issues. Nice work.</div>`
@@ -366,8 +450,10 @@ function renderHtml(
 
 function renderProjectSection(
   items: ReadonlyArray<{ issue: OrgIssue; projects: ProjectRef[] }>,
+  prMap: ReadonlyMap<string, IssuePrRef[]>,
 ): string {
-  const rows = items.map(({ issue, projects }) => renderProjectRow(issue, projects)).join("\n");
+  const rows = items.map(({ issue, projects }) =>
+    renderProjectRow(issue, projects, prMap)).join("\n");
   return `<section class="projects">
   <h2>📋 Project 付き<span class="count">(${items.length})</span></h2>
   <table>
@@ -377,7 +463,11 @@ function renderProjectSection(
 </section>`;
 }
 
-function renderProjectRow(i: OrgIssue, projects: ReadonlyArray<ProjectRef>): string {
+function renderProjectRow(
+  i: OrgIssue,
+  projects: ReadonlyArray<ProjectRef>,
+  prMap: ReadonlyMap<string, IssuePrRef[]>,
+): string {
   const chips = projects.map((p) =>
     `<a class="project-chip" href="${escapeHtml(p.url)}" target="_blank" rel="noopener">${escapeHtml(p.title)}</a>`,
   ).join("");
@@ -388,15 +478,19 @@ function renderProjectRow(i: OrgIssue, projects: ReadonlyArray<ProjectRef>): str
   return `<tr>
     <td class="num"><a href="${escapeHtml(i.url)}" target="_blank" rel="noopener">#${i.number}</a></td>
     <td class="repo"><a href="https://github.com/${escapeHtml(i.repo)}/issues" target="_blank" rel="noopener">${escapeHtml(i.repo)}</a></td>
-    <td class="title"><a href="${escapeHtml(i.url)}" target="_blank" rel="noopener">${escapeHtml(i.title)}</a><div class="labels">${chips}</div>${labelChips}</td>
+    <td class="title"><a href="${escapeHtml(i.url)}" target="_blank" rel="noopener">${escapeHtml(i.title)}</a><div class="labels">${chips}</div>${labelChips}${renderPrChips(i, prMap)}</td>
     <td class="author">@${escapeHtml(i.author)}</td>
     <td class="updated">${escapeHtml(i.updated_at.slice(0, 10))}</td>
     ${renderLaunchCell(i)}
   </tr>`;
 }
 
-function renderRepoSection(repo: string, items: OrgIssue[]): string {
-  const rows = items.map((i) => renderRow(i)).join("\n");
+function renderRepoSection(
+  repo: string,
+  items: OrgIssue[],
+  prMap: ReadonlyMap<string, IssuePrRef[]>,
+): string {
+  const rows = items.map((i) => renderRow(i, prMap)).join("\n");
   const repoUrl = `https://github.com/${repo}/issues`;
   return `<section class="repo">
   <h2><a href="${escapeHtml(repoUrl)}" target="_blank" rel="noopener">${escapeHtml(repo)}</a><span class="count">(${items.length})</span></h2>
@@ -407,18 +501,36 @@ function renderRepoSection(repo: string, items: OrgIssue[]): string {
 </section>`;
 }
 
-function renderRow(i: OrgIssue): string {
+function renderRow(
+  i: OrgIssue,
+  prMap: ReadonlyMap<string, IssuePrRef[]>,
+): string {
   const labelChips = i.labels.length > 0
     ? `<div class="labels">${i.labels.map((l) =>
         `<span class="label">${escapeHtml(l)}</span>`).join("")}</div>`
     : "";
   return `<tr>
     <td class="num"><a href="${escapeHtml(i.url)}" target="_blank" rel="noopener">#${i.number}</a></td>
-    <td class="title"><a href="${escapeHtml(i.url)}" target="_blank" rel="noopener">${escapeHtml(i.title)}</a>${labelChips}</td>
+    <td class="title"><a href="${escapeHtml(i.url)}" target="_blank" rel="noopener">${escapeHtml(i.title)}</a>${labelChips}${renderPrChips(i, prMap)}</td>
     <td class="author">@${escapeHtml(i.author)}</td>
     <td class="updated">${escapeHtml(i.updated_at.slice(0, 10))}</td>
     ${renderLaunchCell(i)}
   </tr>`;
+}
+
+function renderPrChips(
+  i: OrgIssue,
+  prMap: ReadonlyMap<string, IssuePrRef[]>,
+): string {
+  const refs = prMap.get(`${i.repo}#${i.number}`);
+  if (!refs || refs.length === 0) return "";
+  const chips = refs.map((p) => {
+    const draft = p.draft ? " draft" : "";
+    const label = p.draft ? "Draft PR" : "PR";
+    const title = `${label} #${p.number}: ${p.title}${p.repo === i.repo ? "" : ` (${p.repo})`}`;
+    return `<a class="pr-chip${draft}" href="${escapeHtml(p.url)}" target="_blank" rel="noopener" title="${escapeHtml(title)}">🔗 #${p.number}${p.draft ? " (draft)" : ""}</a>`;
+  }).join("");
+  return `<div class="pr-chips">${chips}</div>`;
 }
 
 function renderLaunchCell(i: OrgIssue): string {
