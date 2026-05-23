@@ -44,12 +44,12 @@
   "secrets_store_secrets": [
     {
       "binding": "JWT_FOR_CI_DASHBOARD",
-      "store_id": "REPLACE_WITH_SECRETS_STORE_ID",
+      "store_id": "bd7bc91a3e5f4111add4acf6cb4b8733",
       "secret_name": "JWT_FOR_CI_DASHBOARD"
     },
     {
       "binding": "INTERNAL_SHARED_SECRET",
-      "store_id": "REPLACE_WITH_SECRETS_STORE_ID",
+      "store_id": "bd7bc91a3e5f4111add4acf6cb4b8733",
       "secret_name": "INTERNAL_SHARED_SECRET"
     }
   ],
@@ -100,12 +100,12 @@
       "secrets_store_secrets": [
         {
           "binding": "JWT_FOR_CI_DASHBOARD",
-          "store_id": "REPLACE_WITH_SECRETS_STORE_ID",
+          "store_id": "bd7bc91a3e5f4111add4acf6cb4b8733",
           "secret_name": "JWT_FOR_CI_DASHBOARD"
         },
         {
           "binding": "INTERNAL_SHARED_SECRET",
-          "store_id": "REPLACE_WITH_SECRETS_STORE_ID",
+          "store_id": "bd7bc91a3e5f4111add4acf6cb4b8733",
           "secret_name": "INTERNAL_SHARED_SECRET"
         }
       ]
