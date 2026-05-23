@@ -50,7 +50,7 @@
     {
       "binding": "INTERNAL_SHARED_SECRET",
       "store_id": "bd7bc91a3e5f4111add4acf6cb4b8733",
-      "secret_name": "mcp-internal-shared-secret-staging"
+      "secret_name": "INTERNAL_SHARED_SECRET"
     }
   ],
   // staging を実運用 env として扱う (secrets-inventory と同じパターン)。
@@ -106,7 +106,7 @@
         {
           "binding": "INTERNAL_SHARED_SECRET",
           "store_id": "bd7bc91a3e5f4111add4acf6cb4b8733",
-          "secret_name": "mcp-internal-shared-secret-staging"
+          "secret_name": "INTERNAL_SHARED_SECRET"
         }
       ]
     }
