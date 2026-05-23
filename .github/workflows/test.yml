@@ -22,4 +22,9 @@ jobs:
       typecheck_command: 'npx tsc --noEmit'
       deploy_staging_script: 'npx wrangler deploy --env staging'
       deploy_release_script: 'npx wrangler deploy'
+      # @ippoan/auth-client-worker を GitHub Packages から install するための
+      # registry + NODE_AUTH_TOKEN セットアップを actions/setup-node に
+      # 依頼する。`npm_scope` 未指定だと .npmrc に _authToken が書かれず
+      # `npm install` が 401 で落ちる (Refs #118)。
+      npm_scope: '@ippoan'
     secrets: inherit
