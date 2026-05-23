@@ -1,5 +1,5 @@
 import { parseRepo, tokenForOrg, GitHubApiError } from "./github-api";
-import type { AuthWorkerEnv } from "./auth-worker-client";
+import type { AuthClientWorkerEnv } from "@ippoan/auth-client-worker";
 import {
   extractRefIssues,
   sortSemverDesc,
@@ -39,7 +39,6 @@ import { PWA_HEAD_TAGS, PWA_REGISTER_SCRIPT } from "./pwa";
 export async function handleReleasesPage(
   req: Request,
   env: {
-    JWT_FOR_CI_DASHBOARD: SecretsStoreSecret;
     INTERNAL_SHARED_SECRET: SecretsStoreSecret;
     CI_HUB: DurableObjectNamespace;
     CI_STATUS: KVNamespace;
@@ -126,7 +125,6 @@ const TOP_TAGS_INLINE = 5;
 
 async function handleIndexPage(
   env: {
-    JWT_FOR_CI_DASHBOARD: SecretsStoreSecret;
     INTERNAL_SHARED_SECRET: SecretsStoreSecret;
     CI_HUB: DurableObjectNamespace;
     CI_STATUS: KVNamespace;
@@ -195,7 +193,7 @@ async function handleIndexPage(
 }
 
 async function loadRepoView(
-  env: AuthWorkerEnv,
+  env: AuthClientWorkerEnv,
   repo: string,
   useSynthetic: boolean,
   kv?: KVNamespace,
@@ -392,7 +390,7 @@ interface IssueRow {
 }
 
 async function loadRelease(
-  env: AuthWorkerEnv,
+  env: AuthClientWorkerEnv,
   repoParam: string,
   tag: string,
   kv?: KVNamespace,

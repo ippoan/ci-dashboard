@@ -35,18 +35,13 @@
       "new_sqlite_classes": ["CIDashboardHub"]
     }
   ],
-  // GitHub auth は auth-worker MCP OAuth Provider に delegate (issue #116)。
-  // JWT_FOR_CI_DASHBOARD は device flow で取得した access JWT、
-  // INTERNAL_SHARED_SECRET は auth-worker `/mcp/introspect` の認証用 shared
-  // secret (cc-relay broker と同じ値)。どちらも 1 KB 未満で Cloudflare
-  // Secrets Store の上限内。`store_id` は Cloudflare dashboard で作成した
-  // Secrets Store の ID に差し替える (placeholder)。
+  // GitHub auth は @ippoan/auth-client-worker 経由で auth-worker に delegate
+  // (issue #118)。`/oauth/login` ブラウザフロー (Auth Code + PKCE) でログイン後、
+  // access_token + refresh_token は CI_STATUS KV に SDK が保存する。
+  // Cloudflare 側に必要な long-lived secret は INTERNAL_SHARED_SECRET だけ
+  // (auth-worker `/mcp/introspect` の認証用、auth-worker と同値、cc-relay
+  // broker / github-mcp-server-rs と共有)。
   "secrets_store_secrets": [
-    {
-      "binding": "JWT_FOR_CI_DASHBOARD",
-      "store_id": "bd7bc91a3e5f4111add4acf6cb4b8733",
-      "secret_name": "JWT_FOR_CI_DASHBOARD"
-    },
     {
       "binding": "INTERNAL_SHARED_SECRET",
       "store_id": "bd7bc91a3e5f4111add4acf6cb4b8733",
@@ -98,11 +93,6 @@
         }
       ],
       "secrets_store_secrets": [
-        {
-          "binding": "JWT_FOR_CI_DASHBOARD",
-          "store_id": "bd7bc91a3e5f4111add4acf6cb4b8733",
-          "secret_name": "JWT_FOR_CI_DASHBOARD"
-        },
         {
           "binding": "INTERNAL_SHARED_SECRET",
           "store_id": "bd7bc91a3e5f4111add4acf6cb4b8733",

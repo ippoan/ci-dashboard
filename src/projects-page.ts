@@ -4,7 +4,7 @@ import {
   type OrgProject,
   type ProjectItemSummary,
 } from "./mcp/tools/projects";
-import type { AuthWorkerEnv } from "./auth-worker-client";
+import type { AuthClientWorkerEnv } from "@ippoan/auth-client-worker";
 import { renderTabs, TAB_STYLES } from "./nav-tabs";
 import { PWA_HEAD_TAGS, PWA_REGISTER_SCRIPT } from "./pwa";
 import { escapeHtml } from "./issues-page";
@@ -25,7 +25,7 @@ interface OrgSection {
   projects: ProjectWithItems[];
 }
 
-export async function handleProjectsPage(env: AuthWorkerEnv): Promise<Response> {
+export async function handleProjectsPage(env: AuthClientWorkerEnv): Promise<Response> {
   let perOrg;
   try {
     perOrg = await fetchOrgProjects(env, { orgs: PROJECT_ORGS });

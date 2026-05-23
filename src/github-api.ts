@@ -1,4 +1,4 @@
-import { getGitHubToken, type AuthWorkerEnv } from "./auth-worker-client";
+import { getGitHubToken, type AuthClientWorkerEnv } from "@ippoan/auth-client-worker";
 
 const GITHUB_API = "https://api.github.com";
 const ALLOWED_ORGS = ["ippoan", "ohishi-exp", "yhonda-ohishi"];
@@ -23,7 +23,7 @@ export function validateOrg(owner: string): void {
  *  only used to enforce the allowlist (defense-in-depth) — the resolved token
  *  is org-agnostic. Kept for source-compat with the previous App-installation
  *  code path. */
-export async function tokenForOrg(env: AuthWorkerEnv, owner: string): Promise<string> {
+export async function tokenForOrg(env: AuthClientWorkerEnv, owner: string): Promise<string> {
   validateOrg(owner);
   return getGitHubToken(env);
 }

@@ -1,5 +1,5 @@
 import { githubApi, parseRepo, tokenForOrg } from "./github-api";
-import type { AuthWorkerEnv } from "./auth-worker-client";
+import type { AuthClientWorkerEnv } from "@ippoan/auth-client-worker";
 import { invalidateIssue } from "./release-cache";
 
 // POST /api/release-close
@@ -15,7 +15,7 @@ import { invalidateIssue } from "./release-cache";
 
 export async function handleReleaseClose(
   req: Request,
-  env: AuthWorkerEnv,
+  env: AuthClientWorkerEnv,
   hub?: DurableObjectStub,
   ctx?: ExecutionContext,
 ): Promise<Response> {

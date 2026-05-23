@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { githubApi, parseRepo, tokenForOrg, validateOrg } from "../../github-api";
-import { getGitHubToken, type AuthWorkerEnv } from "../../auth-worker-client";
+import { getGitHubToken, type AuthClientWorkerEnv } from "@ippoan/auth-client-worker";
 
 /** Build the PATCH body for `update_issue` from optional fields. Strips
  *  fields the caller did not provide (= `undefined`); preserves empty
@@ -29,7 +29,7 @@ export function buildUpdateIssuePayload(input: {
   return payload;
 }
 
-export function registerIssuesTools(server: McpServer, env: AuthWorkerEnv): void {
+export function registerIssuesTools(server: McpServer, env: AuthClientWorkerEnv): void {
   server.registerTool(
     "list_issues",
     {
@@ -413,7 +413,7 @@ export interface FetchOrgIssuesResult {
  * `org:` qualifier (the `repo:` already implies the owner). `validateOrg`
  * runs above regardless, so the allowlist check is preserved. */
 export async function fetchOrgIssues(
-  env: AuthWorkerEnv,
+  env: AuthClientWorkerEnv,
   params: FetchOrgIssuesParams,
 ): Promise<FetchOrgIssuesResult> {
   const { orgs, state = "open", labels, assignee, query, per_page = 30 } = params;

@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { githubGraphQL, parseRepo, tokenForOrg, validateOrg, GitHubApiError } from "../../github-api";
-import { getGitHubToken, type AuthWorkerEnv } from "../../auth-worker-client";
+import { getGitHubToken, type AuthClientWorkerEnv } from "@ippoan/auth-client-worker";
 
 // --------------------------------------------------------------------------
 // GitHub Projects v2 tooling.
@@ -158,7 +158,7 @@ export interface OrgProjectsResult {
  * `validateOrg` is enforced for every org before any network call.
  */
 export async function fetchOrgProjects(
-  env: AuthWorkerEnv,
+  env: AuthClientWorkerEnv,
   params: { orgs: string[]; first?: number; include_closed?: boolean },
 ): Promise<OrgProjectsResult[]> {
   const { orgs, first = 50, include_closed = false } = params;
@@ -211,7 +211,7 @@ export interface ProjectRef {
  * each well under 1 point of the 5000/h rate-limit budget.
  */
 export async function fetchProjectIssueMap(
-  env: AuthWorkerEnv,
+  env: AuthClientWorkerEnv,
   params: { orgs: string[]; first?: number },
 ): Promise<Map<string, ProjectRef[]>> {
   const { orgs, first = 100 } = params;
@@ -290,7 +290,7 @@ export interface ProjectItemSummary {
  * same surface as the MCP tool.
  */
 export async function fetchProjectItems(
-  env: AuthWorkerEnv,
+  env: AuthClientWorkerEnv,
   org: string,
   number: number,
   first = 50,
@@ -348,7 +348,7 @@ export async function fetchProjectItems(
   return nodes.map(formatItem);
 }
 
-export function registerProjectsTools(server: McpServer, env: AuthWorkerEnv): void {
+export function registerProjectsTools(server: McpServer, env: AuthClientWorkerEnv): void {
   // --------------------------------------------------------------------
   // Read tools
   // --------------------------------------------------------------------

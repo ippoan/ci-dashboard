@@ -103,65 +103,72 @@ npm run deploy                       # production (top-level, 予約) に手動 
 npx wrangler deploy --env staging    # staging に手動 deploy
 ```
 
-### GitHub 認証 (auth-worker delegation — #116)
+### GitHub 認証 (auth-worker delegation via `@ippoan/auth-client-worker` — #118)
 
-PAT / GitHub App PEM は廃止。本 Worker は `auth.ippoan.org` (`ippoan/auth-worker`)
-MCP OAuth Provider に delegate し、`POST /mcp/introspect` で `github_token` を
-取り出して使う。OAuth Client Secret も PEM も本 Worker 上に一切存在しない。
+PAT / GitHub App PEM / device-flow による手動 JWT セットアップは全廃止。
+本 Worker は [`@ippoan/auth-client-worker`](https://github.com/ippoan/auth-worker/tree/main/packages/auth-client-worker) パッケージ経由で
+`auth.ippoan.org` (`ippoan/auth-worker`) MCP OAuth Provider に delegate し、
+**ブラウザの `/oauth/login` ボタン 1 つで完結**する。OAuth Client Secret も PEM も
+本 Worker 上に一切存在しない。
 
-#### 認証フロー
+#### 認証フロー (Auth Code + PKCE、ブラウザ完結)
 
 ```
-[ci-dashboard worker]
-      │ POST https://auth.ippoan.org/mcp/introspect
-      │   Authorization: <INTERNAL_SHARED_SECRET>
-      │   body: { token: <JWT_FOR_CI_DASHBOARD> }
-      ↓
-[auth-worker (GitHub OAuth App を保有)]
-      │ JWT → github_token を返す
-      ↓
-[ci-dashboard で KV cache (~55 min) → api.github.com に直叩き]
+[ブラウザ] → ci-dashboard.ippoan.org/oauth/login
+       SDK が PKCE 生成 + 必要なら /mcp/register で DCR client 登録
+       ↓ 302 redirect
+[auth.ippoan.org/mcp/authorize]
+       GitHub OAuth 同意画面 → approve
+       ↓ 302 redirect with ?code=
+[ci-dashboard.ippoan.org/oauth/callback]
+       SDK が /mcp/token で code 交換 → access_token + refresh_token
+       CI_STATUS KV に保存 (ci-dashboard:oauth-tokens)
+       ↓ 303 redirect
+[/issues]
+       SDK が getGitHubToken(env) → /mcp/introspect → github_token (55min KV cache)
+       → api.github.com を Bearer で直叩き
 ```
 
-#### 必要な secret (Cloudflare Secrets Store)
+#### Cloudflare に保管される long-lived secret
 
-| binding | 値 |
-|---|---|
-| `JWT_FOR_CI_DASHBOARD` | auth-worker `/mcp/device_authorization` 経由で取得した access JWT |
-| `INTERNAL_SHARED_SECRET` | auth-worker と共有する固定 secret (cc-relay broker と同じ値) |
+| binding | 値 | 配置 |
+|---|---|---|
+| `INTERNAL_SHARED_SECRET` | auth-worker と共有する固定 secret (cc-relay broker と同じ値) | Cloudflare Secrets Store |
 
-どちらも < 1 KB で Secrets Store の上限内。
+これだけ。`JWT_FOR_CI_DASHBOARD` は廃止 (Auth Code + PKCE フローで動的に取得 →
+KV に保存)。
 
 #### 初回セットアップ
 
-1. **auth-worker 側**: yhonda-ohishi を `GITHUB_MCP_USER_ALLOWLIST` に含めることを確認
-2. **device flow で JWT 取得** (operator のローカルで 1 回):
-   ```bash
-   # 認可開始
-   curl -s https://auth.ippoan.org/mcp/device_authorization \
-     -d "client_id=ci-dashboard&scope=mcp.write mcp.workflow mcp.project" | jq
-   # → verification_uri_complete をブラウザで開いて approve
-   # poll
-   curl -s https://auth.ippoan.org/mcp/token \
-     -d "grant_type=urn:ietf:params:oauth:grant-type:device_code" \
-     -d "device_code=<DEVICE_CODE>" -d "client_id=ci-dashboard" \
-     | jq -r .access_token
-   ```
-3. **Secrets Store に登録** (account-level、複数 worker 共有可):
+1. **auth-worker 側**: operator (yhonda-ohishi) が `GITHUB_MCP_USER_ALLOWLIST` に
+   含まれていることを確認 (cc-relay broker と同じ allowlist)
+2. **`INTERNAL_SHARED_SECRET` を Secrets Store に登録** (まだ無ければ):
    ```bash
    STORE_ID="<your-secrets-store-id>"
-   echo -n "<JWT>" | npx wrangler secrets-store secret create "$STORE_ID" \
-     --name JWT_FOR_CI_DASHBOARD --scopes workers
-   echo -n "<INTERNAL_SHARED_SECRET>" | npx wrangler secrets-store secret create "$STORE_ID" \
-     --name INTERNAL_SHARED_SECRET --scopes workers
+   echo -n "<auth-worker と同じ値>" | npx wrangler secrets-store secret create "$STORE_ID" \
+     --name INTERNAL_SHARED_SECRET --scopes workers --remote
    ```
-4. `wrangler.jsonc` の `store_id` 2 箇所を実 ID に差し替えて deploy
-5. 旧 secret 削除 (`GITHUB_APP_*` / `GITHUB_TOKEN` が残っていれば):
+3. `wrangler.jsonc` の `store_id` を実 ID に差し替えて deploy
+4. **ブラウザで `https://ci-dashboard.ippoan.org/oauth/login` にアクセス** → GitHub
+   approve → 自動 redirect で `/issues` に着地、API が動く状態に
+5. 旧 secret 削除 (残っていれば):
    ```bash
+   # Secrets Store の JWT_FOR_CI_DASHBOARD (もし作成していれば)
+   npx wrangler secrets-store secret delete "$STORE_ID" --name JWT_FOR_CI_DASHBOARD --remote
+   # per-worker secret の旧 PAT / App credential
    npx wrangler secret delete GITHUB_APP_ID --env staging
    npx wrangler secret delete GITHUB_APP_PRIVATE_KEY --env staging
    npx wrangler secret delete GITHUB_APP_INSTALLATIONS --env staging
+   npx wrangler secret delete GITHUB_TOKEN --env staging
    ```
+
+#### Token 更新 (operator 操作不要)
+
+- access_token (1h) は SDK が refresh_token で自動 rotate
+- refresh_token (30d) 失効時は `/oauth/login` を再度叩くだけ (ブラウザ 1 click)
+- DCR client_id (90d) も SDK が auto-register
+
+device flow / curl / Secrets Store の手動更新は不要。
 
 #### GitHub App セットアップ (旧、廃止済み)
 
