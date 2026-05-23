@@ -109,7 +109,9 @@ async function loadProjectMap(
 // new PR opened minutes ago should appear without forcing a manual reload —
 // but the 24 h store window keeps a stale copy as fallback when GitHub search
 // rate-limits the worker.
-const PR_MAP_CACHE_KEY = "issues-page:pr-map";
+// v2 suffix invalidates the open-only payload from before merged PRs were
+// included (the shape changed — `IssuePrRef.state` is now required).
+const PR_MAP_CACHE_KEY = "issues-page:pr-map:v2";
 const PR_MAP_FRESH_SECONDS = 120;
 const PR_MAP_STORE_SECONDS = 86400;
 
@@ -438,6 +440,14 @@ function renderHtml(
       border-color: #6e768188;
     }
     .pr-chip.draft:hover { background: #6e768144; }
+    /* Merged PRs: purple — "work done, release-close pending". Distinguishes
+       from green open PRs (in-flight) at a glance. */
+    .pr-chip.merged {
+      background: #8957e522;
+      color: #d2a8ff;
+      border-color: #8957e588;
+    }
+    .pr-chip.merged:hover { background: #8957e544; }
     .empty {
       padding: 32px;
       text-align: center;
@@ -546,10 +556,19 @@ function renderPrChips(
   const refs = prMap.get(`${i.repo}#${i.number}`);
   if (!refs || refs.length === 0) return "";
   const chips = refs.map((p) => {
-    const draft = p.draft ? " draft" : "";
-    const label = p.draft ? "Draft PR" : "PR";
+    // Merged PRs take precedence over draft styling — a merged PR can't
+    // be draft anymore, but if GitHub ever flipped them simultaneously the
+    // purple "done" signal is more useful than the gray "draft" one.
+    const cls = p.state === "merged" ? " merged" : p.draft ? " draft" : "";
+    const icon = p.state === "merged" ? "✅" : "🔗";
+    const label = p.state === "merged"
+      ? "Merged PR"
+      : p.draft ? "Draft PR" : "PR";
     const title = `${label} #${p.number}: ${p.title}${p.repo === i.repo ? "" : ` (${p.repo})`}`;
-    return `<a class="pr-chip${draft}" href="${escapeHtml(p.url)}" target="_blank" rel="noopener" title="${escapeHtml(title)}">🔗 #${p.number}${p.draft ? " (draft)" : ""}</a>`;
+    const suffix = p.state === "merged"
+      ? " (merged)"
+      : p.draft ? " (draft)" : "";
+    return `<a class="pr-chip${cls}" href="${escapeHtml(p.url)}" target="_blank" rel="noopener" title="${escapeHtml(title)}">${icon} #${p.number}${suffix}</a>`;
   }).join("");
   return `<div class="pr-chips">${chips}</div>`;
 }
