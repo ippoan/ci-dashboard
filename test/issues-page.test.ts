@@ -15,18 +15,22 @@ function testEnv(): Env {
 
 // Stub /search/issues + /graphql. The page fires parallel calls:
 //   - /search/issues `is:issue` × 2 (main orgs + yhonda repo: filter)
-//   - /search/issues `is:pr`    × 2 (main orgs + yhonda repo: filter,
-//     for the related-PR lookup)
+//   - /search/issues `is:pr`    × 4 (main orgs × {open, merged}
+//                                    + yhonda repo: filter × {open, merged})
 //   - /graphql for the per-org Projects v2 listing + per-project items
 // We branch on URL + (for GraphQL) on the request body so each call gets the
 // data its handler expects. By default the project map is empty so existing
 // assertions still see the per-repo grouping. Pass `withProjects` to seed a
 // project that maps to `ippoan/rust-alc-api#7` (i.e. the hostile-title issue),
 // which is what the project-section tests below rely on. Pass `withPrs` to
-// seed a PR that references `ippoan/rust-alc-api#7` for the PR-chip tests.
-function stubFetch(opts: { withProjects?: boolean; withPrs?: boolean } = {}) {
+// seed an open PR that references `ippoan/rust-alc-api#7` for the PR-chip
+// tests; pass `withMergedPrs` to seed a merged PR for the same issue.
+function stubFetch(
+  opts: { withProjects?: boolean; withPrs?: boolean; withMergedPrs?: boolean } = {},
+) {
   const withProjects = !!opts.withProjects;
   const withPrs = !!opts.withPrs;
+  const withMergedPrs = !!opts.withMergedPrs;
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (req, init) => {
     const url = typeof req === "string" ? req : (req as Request).url;
     // `init.body` is set by `githubGraphQL`; a bare Request also exposes it.
@@ -76,10 +80,33 @@ function stubFetch(opts: { withProjects?: boolean; withPrs?: boolean } = {}) {
 
     // ---- PR search branch (is:pr) ----
     if (decoded.includes("is:pr")) {
-      if (!withPrs) {
+      const isMerged = decoded.includes("is:merged");
+      if (decoded.includes("repo:yhonda-ohishi/claude-skills")) {
         return Response.json({ total_count: 0, incomplete_results: false, items: [] });
       }
-      if (decoded.includes("repo:yhonda-ohishi/claude-skills")) {
+      if (isMerged) {
+        if (!withMergedPrs) {
+          return Response.json({ total_count: 0, incomplete_results: false, items: [] });
+        }
+        return Response.json({
+          total_count: 1, incomplete_results: false,
+          items: [{
+            number: 50,
+            title: "feat: previously merged work",
+            state: "closed",
+            body: "Refs #7",
+            user: { login: "yhonda-ohishi" },
+            labels: [], assignees: [], comments: 0,
+            created_at: "2026-04-20T00:00:00Z",
+            updated_at: "2026-04-22T00:00:00Z",
+            html_url: "https://github.com/ippoan/rust-alc-api/pull/50",
+            repository_url: "https://api.github.com/repos/ippoan/rust-alc-api",
+            draft: false,
+            pull_request: { url: "https://api.github.com/...", merged_at: "2026-04-22T00:00:00Z" },
+          }],
+        });
+      }
+      if (!withPrs) {
         return Response.json({ total_count: 0, incomplete_results: false, items: [] });
       }
       return Response.json({
@@ -191,7 +218,7 @@ describe("GET /issues", () => {
   // map from a no-project fixture happily masks any subsequent fetch).
   beforeEach(async () => {
     await env.CI_STATUS.delete("issues-page:project-map");
-    await env.CI_STATUS.delete("issues-page:pr-map");
+    await env.CI_STATUS.delete("issues-page:pr-map:v2");
   });
   afterEach(() => { vi.restoreAllMocks(); });
 
@@ -244,7 +271,7 @@ describe("GET /issues", () => {
     expect(html).toContain("&amp;");
   });
 
-  it("queries GitHub Search twice for issues + twice for PRs (main orgs + yhonda repo: filter)", async () => {
+  it("queries GitHub Search twice for issues + four times for PRs (main + yhonda × open + merged)", async () => {
     const spy = stubSearchIssues();
     const req = new Request("http://localhost/issues");
     const ctx = createExecutionContext();
@@ -255,15 +282,19 @@ describe("GET /issues", () => {
     // so cross-org `org:ippoan org:ohishi-exp` fits in one search call.
     // /search/issues is hit:
     //   is:issue × 2 (main orgs combined + yhonda repo: filter)
-    //   is:pr    × 2 (same shape)
-    // = 4 total. /graphql calls for the Projects v2 map are ignored here.
+    //   is:pr    × 4 (each repo shape × {open, merged} so CLAUDE.md's
+    //                 "merged but release-close pending" issues get chips)
+    // = 6 total. /graphql calls for the Projects v2 map are ignored here.
     const searchCalls = spy.mock.calls.filter((c) =>
       String(c[0]).includes("/search/issues"));
-    expect(searchCalls).toHaveLength(4);
+    expect(searchCalls).toHaveLength(6);
     const urls = searchCalls.map((c) => c[0] as string);
     const decoded = urls.map((u) => decodeURIComponent(u));
     const issueDecoded = decoded.filter((d) => d.includes("is:issue") && !d.includes("is:pr"));
     expect(issueDecoded).toHaveLength(2);
+    const prDecoded = decoded.filter((d) => d.includes("is:pr"));
+    expect(prDecoded.filter((d) => d.includes("is:merged"))).toHaveLength(2);
+    expect(prDecoded.filter((d) => d.includes("state:open"))).toHaveLength(2);
 
     // Main call: ippoan + ohishi-exp orgs without a repo: qualifier.
     const main = issueDecoded.find((d) => d.includes("org:ippoan"));
@@ -368,7 +399,7 @@ describe("GET /issues", () => {
 describe("GET /issues — Project section", () => {
   beforeEach(async () => {
     await env.CI_STATUS.delete("issues-page:project-map");
-    await env.CI_STATUS.delete("issues-page:pr-map");
+    await env.CI_STATUS.delete("issues-page:pr-map:v2");
   });
   afterEach(() => { vi.restoreAllMocks(); });
 
@@ -516,7 +547,7 @@ describe("buildClaudeCodeLaunchUrl()", () => {
 describe("GET /issues — Claude Code launch button", () => {
   beforeEach(async () => {
     await env.CI_STATUS.delete("issues-page:project-map");
-    await env.CI_STATUS.delete("issues-page:pr-map");
+    await env.CI_STATUS.delete("issues-page:pr-map:v2");
   });
   afterEach(() => { vi.restoreAllMocks(); });
 
@@ -563,7 +594,7 @@ describe("GET /issues — Claude Code launch button", () => {
 describe("GET /issues — Related-PR chips", () => {
   beforeEach(async () => {
     await env.CI_STATUS.delete("issues-page:project-map");
-    await env.CI_STATUS.delete("issues-page:pr-map");
+    await env.CI_STATUS.delete("issues-page:pr-map:v2");
   });
   afterEach(() => { vi.restoreAllMocks(); });
 
@@ -585,6 +616,36 @@ describe("GET /issues — Related-PR chips", () => {
     expect(chipCount).toBe(1);
   });
 
+  it("renders a purple .merged pr-chip when only a merged PR references the issue", async () => {
+    stubFetch({ withMergedPrs: true });
+    const req = new Request("http://localhost/issues");
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(req, testEnv(), ctx);
+    await waitOnExecutionContext(ctx);
+
+    const html = await res.text();
+    // Seeded merged PR is rust-alc-api#50 referencing #7.
+    expect(html).toContain('class="pr-chip merged"');
+    expect(html).toContain("https://github.com/ippoan/rust-alc-api/pull/50");
+    expect(html).toContain(">✅ #50 (merged)<");
+  });
+
+  it("renders both open and merged chips when both exist for the same issue", async () => {
+    stubFetch({ withPrs: true, withMergedPrs: true });
+    const req = new Request("http://localhost/issues");
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(req, testEnv(), ctx);
+    await waitOnExecutionContext(ctx);
+
+    const html = await res.text();
+    // Open chip ordered before merged chip in the rendered HTML.
+    const openIdx = html.indexOf(">🔗 #42<");
+    const mergedIdx = html.indexOf(">✅ #50 (merged)<");
+    expect(openIdx).toBeGreaterThan(-1);
+    expect(mergedIdx).toBeGreaterThan(-1);
+    expect(openIdx).toBeLessThan(mergedIdx);
+  });
+
   it("marks draft PRs with the .draft class", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (req, init) => {
       const url = typeof req === "string" ? req : (req as Request).url;
@@ -599,7 +660,10 @@ describe("GET /issues — Related-PR chips", () => {
       }
       const decoded = decodeURIComponent(url);
       if (decoded.includes("is:pr")) {
-        if (decoded.includes("repo:yhonda-ohishi/claude-skills")) {
+        // Only return the draft PR for the open-state search — merged search
+        // gets an empty result so the assertions below only see the draft chip.
+        if (decoded.includes("is:merged")
+          || decoded.includes("repo:yhonda-ohishi/claude-skills")) {
           return Response.json({ total_count: 0, incomplete_results: false, items: [] });
         }
         return Response.json({

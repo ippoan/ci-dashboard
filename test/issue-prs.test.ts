@@ -97,6 +97,31 @@ describe("fetchOpenPrsByIssue()", () => {
     expect(refs!).toHaveLength(1);
     expect(refs![0]!.number).toBe(10);
     expect(refs![0]!.draft).toBe(false);
+    expect(refs![0]!.state).toBe("open");
+  });
+
+  it("queries with `is:merged` and a recent updated:>= window when state='merged'", async () => {
+    const spy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({
+        total_count: 1, incomplete_results: false,
+        items: [{
+          number: 20, title: "feat: done", state: "closed",
+          body: "Refs #5",
+          html_url: "https://github.com/ippoan/foo/pull/20",
+          repository_url: "https://api.github.com/repos/ippoan/foo",
+          draft: false, updated_at: "2026-05-10T00:00:00Z", pull_request: {},
+        }],
+      }),
+    );
+    const map = await fetchOpenPrsByIssue(appTestEnv(), {
+      orgs: ["ippoan"], state: "merged",
+    });
+    const decoded = decodeURIComponent(String(spy.mock.calls[0]![0]));
+    expect(decoded).toContain("is:pr");
+    expect(decoded).toContain("is:merged");
+    expect(decoded).not.toContain("state:open");
+    expect(decoded).toMatch(/updated:>=\d{4}-\d{2}-\d{2}/);
+    expect(map.get("ippoan/foo#5")![0]!.state).toBe("merged");
   });
 
   it("uses repo: qualifiers (and omits org:) when `repos` is set", async () => {
@@ -122,11 +147,15 @@ describe("fetchOpenPrsByIssue()", () => {
 describe("fetchAllOpenPrsByIssue()", () => {
   afterEach(() => { vi.restoreAllMocks(); });
 
-  it("merges main-org and yhonda-repos PR maps, appending refs that share a key", async () => {
+  it("merges main-org and yhonda-repos PR maps (both open and merged), appending refs that share a key", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (req) => {
       const url = typeof req === "string" ? req : (req as Request).url;
       const decoded = decodeURIComponent(url);
+      const merged = decoded.includes("is:merged");
       if (decoded.includes("repo:yhonda-ohishi/claude-skills")) {
+        if (merged) {
+          return Response.json({ total_count: 0, incomplete_results: false, items: [] });
+        }
         return Response.json({
           total_count: 1, incomplete_results: false,
           items: [{
@@ -136,6 +165,20 @@ describe("fetchAllOpenPrsByIssue()", () => {
             repository_url: "https://api.github.com/repos/yhonda-ohishi/claude-skills",
             draft: true,
             updated_at: "2026-05-12T00:00:00Z",
+            pull_request: {},
+          }],
+        });
+      }
+      if (merged) {
+        return Response.json({
+          total_count: 1, incomplete_results: false,
+          items: [{
+            number: 7, title: "old done work", state: "closed",
+            body: "Refs #5",
+            html_url: "https://github.com/ippoan/foo/pull/7",
+            repository_url: "https://api.github.com/repos/ippoan/foo",
+            draft: false,
+            updated_at: "2026-05-09T00:00:00Z",
             pull_request: {},
           }],
         });
@@ -159,10 +202,13 @@ describe("fetchAllOpenPrsByIssue()", () => {
     );
     const refs = map.get("ippoan/foo#5");
     expect(refs).toBeDefined();
-    expect(refs!).toHaveLength(2);
-    // Sorted by updated_at desc, so the yhonda PR (later) comes first.
+    expect(refs!).toHaveLength(3);
+    // Open PRs come first (sorted by updated_at desc), then merged PRs.
+    expect(refs![0]!.state).toBe("open");
     expect(refs![0]!.number).toBe(99);
-    expect(refs![0]!.draft).toBe(true);
+    expect(refs![1]!.state).toBe("open");
     expect(refs![1]!.number).toBe(10);
+    expect(refs![2]!.state).toBe("merged");
+    expect(refs![2]!.number).toBe(7);
   });
 });
