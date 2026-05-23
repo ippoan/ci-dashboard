@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { githubGraphQL, parseRepo, tokenForOrg, validateOrg, GitHubApiError } from "../../github-api";
+import { githubGraphQL, parseRepo, tokenForOrg, validateOrg, GitHubApiError, AUTH_WORKER_ORIGIN } from "../../github-api";
 import { getGitHubToken, type AuthClientWorkerEnv } from "@ippoan/auth-client-worker";
 
 // --------------------------------------------------------------------------
@@ -164,7 +164,7 @@ export async function fetchOrgProjects(
   const { orgs, first = 50, include_closed = false } = params;
   for (const o of orgs) validateOrg(o);
   return Promise.all(orgs.map(async (org) => {
-    const token = await getGitHubToken(env);
+    const token = await getGitHubToken(env, { authWorkerOrigin: AUTH_WORKER_ORIGIN });
     const data = await githubGraphQL<{
       repositoryOwner: {
         projectsV2?: { nodes: OrgProject[] };
@@ -221,7 +221,7 @@ export async function fetchProjectIssueMap(
   await Promise.all(
     orgsProjects.flatMap(({ org, projects }) =>
       projects.map(async (p) => {
-        const token = await getGitHubToken(env);
+        const token = await getGitHubToken(env, { authWorkerOrigin: AUTH_WORKER_ORIGIN });
         const data = await githubGraphQL<{
           node: {
             items: { nodes: Array<{

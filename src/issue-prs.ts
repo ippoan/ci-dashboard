@@ -1,4 +1,4 @@
-import { githubApi, validateOrg } from "./github-api";
+import { githubApi, validateOrg, AUTH_WORKER_ORIGIN } from "./github-api";
 import { getGitHubToken, type AuthClientWorkerEnv } from "@ippoan/auth-client-worker";
 
 /** Lightweight PR descriptor used by the issues page to render "related PR"
@@ -72,7 +72,7 @@ export async function fetchOpenPrsByIssue(
   for (const o of orgs) validateOrg(o);
   for (const r of repos) validateOrg(r.split("/")[0]!);
 
-  const token = await getGitHubToken(env);
+  const token = await getGitHubToken(env, { authWorkerOrigin: AUTH_WORKER_ORIGIN });
 
   const parts: string[] = ["is:pr", "state:open", "archived:false"];
   if (repos.length > 0) {
