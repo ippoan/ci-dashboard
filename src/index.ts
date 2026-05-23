@@ -39,8 +39,12 @@ export interface Env extends AuthClientWorkerEnv {
 }
 
 // OAuth flow config — shared between /oauth/login and /oauth/callback.
+// `authWorkerOrigin` は staging worker を指す。`auth.ippoan.org` (top-level prod)
+// は `MCP_OAUTH_KV` バインドを持たず `/mcp/register` が 503 になる仕様
+// (ippoan/auth-worker の wrangler.toml top-level vs `[env.staging]` 参照)。
+// ci-dashboard 自身も staging-as-prod 運用なので staging 側に揃える。
 const OAUTH_OPTS = {
-  authWorkerOrigin: "https://auth.ippoan.org",
+  authWorkerOrigin: "https://auth-staging.ippoan.org",
   redirectUri: "https://ci-dashboard.ippoan.org/oauth/callback",
   scope: "mcp.write mcp.workflow mcp.project",
   clientName: "ci-dashboard",
