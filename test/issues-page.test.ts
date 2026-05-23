@@ -13,17 +13,20 @@ function testEnv(): Env {
   };
 }
 
-// Stub /search/issues + /graphql. The page fires three parallel calls:
-//   - /search/issues with main-org `q` (ippoan + ohishi-exp)
-//   - /search/issues with yhonda-ohishi `repo:` filter
+// Stub /search/issues + /graphql. The page fires parallel calls:
+//   - /search/issues `is:issue` × 2 (main orgs + yhonda repo: filter)
+//   - /search/issues `is:pr`    × 2 (main orgs + yhonda repo: filter,
+//     for the related-PR lookup)
 //   - /graphql for the per-org Projects v2 listing + per-project items
 // We branch on URL + (for GraphQL) on the request body so each call gets the
 // data its handler expects. By default the project map is empty so existing
 // assertions still see the per-repo grouping. Pass `withProjects` to seed a
 // project that maps to `ippoan/rust-alc-api#7` (i.e. the hostile-title issue),
-// which is what the project-section tests below rely on.
-function stubFetch(opts: { withProjects?: boolean } = {}) {
+// which is what the project-section tests below rely on. Pass `withPrs` to
+// seed a PR that references `ippoan/rust-alc-api#7` for the PR-chip tests.
+function stubFetch(opts: { withProjects?: boolean; withPrs?: boolean } = {}) {
   const withProjects = !!opts.withProjects;
+  const withPrs = !!opts.withPrs;
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (req, init) => {
     const url = typeof req === "string" ? req : (req as Request).url;
     // `init.body` is set by `githubGraphQL`; a bare Request also exposes it.
@@ -70,6 +73,39 @@ function stubFetch(opts: { withProjects?: boolean } = {}) {
       return new Response("not stubbed: " + url, { status: 500 });
     }
     const decoded = decodeURIComponent(url);
+
+    // ---- PR search branch (is:pr) ----
+    if (decoded.includes("is:pr")) {
+      if (!withPrs) {
+        return Response.json({ total_count: 0, incomplete_results: false, items: [] });
+      }
+      if (decoded.includes("repo:yhonda-ohishi/claude-skills")) {
+        return Response.json({ total_count: 0, incomplete_results: false, items: [] });
+      }
+      return Response.json({
+        total_count: 1,
+        incomplete_results: false,
+        items: [
+          {
+            number: 42,
+            title: "feat: fix XSS in title rendering",
+            state: "open",
+            body: "Refs #7\n\nPart of the title-escape hardening pass.",
+            user: { login: "yhonda-ohishi" },
+            labels: [],
+            assignees: [],
+            comments: 0,
+            created_at: "2026-05-11T00:00:00Z",
+            updated_at: "2026-05-11T03:00:00Z",
+            html_url: "https://github.com/ippoan/rust-alc-api/pull/42",
+            repository_url: "https://api.github.com/repos/ippoan/rust-alc-api",
+            draft: false,
+            pull_request: { url: "https://api.github.com/..." },
+          },
+        ],
+      });
+    }
+
     if (decoded.includes("repo:yhonda-ohishi/claude-skills")) {
       return Response.json({
         total_count: 1,
@@ -152,6 +188,7 @@ describe("GET /issues", () => {
   // map from a no-project fixture happily masks any subsequent fetch).
   beforeEach(async () => {
     await env.CI_STATUS.delete("issues-page:project-map");
+    await env.CI_STATUS.delete("issues-page:pr-map");
   });
   afterEach(() => { vi.restoreAllMocks(); });
 
@@ -211,16 +248,19 @@ describe("GET /issues", () => {
     await worker.fetch(req, testEnv(), ctx);
     await waitOnExecutionContext(ctx);
 
-    // `/search/issues` is hit exactly twice; the extra `/graphql` calls for
-    // the Projects v2 map are ignored by this assertion.
+    // `/search/issues` is hit four times: 2 for `is:issue` (main orgs +
+    // yhonda repo: filter) + 2 for `is:pr` (related-PR map, same shape).
+    // The extra `/graphql` calls for the Projects v2 map are ignored here.
     const searchCalls = spy.mock.calls.filter((c) =>
       String(c[0]).includes("/search/issues"));
-    expect(searchCalls).toHaveLength(2);
+    expect(searchCalls).toHaveLength(4);
     const urls = searchCalls.map((c) => c[0] as string);
     const decoded = urls.map((u) => decodeURIComponent(u));
+    const issueDecoded = decoded.filter((d) => d.includes("is:issue"));
+    expect(issueDecoded).toHaveLength(2);
 
     // Main call: ippoan + ohishi-exp orgs without a repo: qualifier.
-    const main = decoded.find((d) => d.includes("org:ippoan"));
+    const main = issueDecoded.find((d) => d.includes("org:ippoan"));
     expect(main).toBeDefined();
     expect(main!).toContain("is:issue");
     expect(main!).toContain("state:open");
@@ -234,7 +274,7 @@ describe("GET /issues", () => {
     // to the entire org), so fetchOrgIssues must omit `org:` whenever the
     // caller-supplied query contains a `repo:` qualifier. Regression guard
     // for issue #53.
-    const yhonda = decoded.find((d) => d.includes("repo:yhonda-ohishi/claude-skills"));
+    const yhonda = issueDecoded.find((d) => d.includes("repo:yhonda-ohishi/claude-skills"));
     expect(yhonda).toBeDefined();
     expect(yhonda!).toContain("is:issue");
     expect(yhonda!).toContain("state:open");
@@ -284,6 +324,8 @@ describe("GET /issues", () => {
         }
         return Response.json({ data: { repositoryOwner: null } });
       }
+      // Both `is:issue` and `is:pr` shapes hit /search/issues and we want
+      // an empty result for both — the search response shape is identical.
       return Response.json({ total_count: 0, incomplete_results: false, items: [] });
     });
     const req = new Request("http://localhost/issues");
@@ -302,6 +344,7 @@ describe("GET /issues", () => {
 describe("GET /issues — Project section", () => {
   beforeEach(async () => {
     await env.CI_STATUS.delete("issues-page:project-map");
+    await env.CI_STATUS.delete("issues-page:pr-map");
   });
   afterEach(() => { vi.restoreAllMocks(); });
 
@@ -377,7 +420,12 @@ describe("GET /issues — Project section", () => {
         });
       }
       // Search responses — only the rust-alc-api#7 issue matters here.
-      if (decodeURIComponent(url).includes("repo:yhonda-ohishi/claude-skills")) {
+      const decoded = decodeURIComponent(url);
+      // PR search: return empty so the test focuses on project chips.
+      if (decoded.includes("is:pr")) {
+        return Response.json({ total_count: 0, incomplete_results: false, items: [] });
+      }
+      if (decoded.includes("repo:yhonda-ohishi/claude-skills")) {
         return Response.json({ total_count: 0, incomplete_results: false, items: [] });
       }
       return Response.json({
@@ -444,6 +492,7 @@ describe("buildClaudeCodeLaunchUrl()", () => {
 describe("GET /issues — Claude Code launch button", () => {
   beforeEach(async () => {
     await env.CI_STATUS.delete("issues-page:project-map");
+    await env.CI_STATUS.delete("issues-page:pr-map");
   });
   afterEach(() => { vi.restoreAllMocks(); });
 
@@ -484,6 +533,121 @@ describe("GET /issues — Claude Code launch button", () => {
     expect(projectSection![0]).toContain(
       escapeHtml(buildClaudeCodeLaunchUrl("ippoan/rust-alc-api", 7)),
     );
+  });
+});
+
+describe("GET /issues — Related-PR chips", () => {
+  beforeEach(async () => {
+    await env.CI_STATUS.delete("issues-page:project-map");
+    await env.CI_STATUS.delete("issues-page:pr-map");
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it("renders a pr-chip on issues that have an open PR referencing them via Refs #N", async () => {
+    stubFetch({ withPrs: true });
+    const req = new Request("http://localhost/issues");
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(req, testEnv(), ctx);
+    await waitOnExecutionContext(ctx);
+
+    const html = await res.text();
+    // The seeded PR is rust-alc-api#42 referencing #7. We expect a pr-chip
+    // linking to that PR on issue #7's row, and no chip on the other rows.
+    expect(html).toContain('<a class="pr-chip"');
+    expect(html).toContain("https://github.com/ippoan/rust-alc-api/pull/42");
+    expect(html).toContain(">🔗 #42<");
+    // Issue #3 (ohishi-exp) and #1 (claude-skills) have no referencing PR.
+    const chipCount = (html.match(/class="pr-chip(?:\s|")/g) ?? []).length;
+    expect(chipCount).toBe(1);
+  });
+
+  it("marks draft PRs with the .draft class", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (req, init) => {
+      const url = typeof req === "string" ? req : (req as Request).url;
+      const body = (init?.body as string | undefined) ?? "";
+      if (url.includes("/graphql")) {
+        if (body.includes("projectsV2(first:")) {
+          return Response.json({
+            data: { repositoryOwner: { projectsV2: { nodes: [] } } },
+          });
+        }
+        return Response.json({ data: { repositoryOwner: null } });
+      }
+      const decoded = decodeURIComponent(url);
+      if (decoded.includes("is:pr")) {
+        if (decoded.includes("repo:yhonda-ohishi/claude-skills")) {
+          return Response.json({ total_count: 0, incomplete_results: false, items: [] });
+        }
+        return Response.json({
+          total_count: 1, incomplete_results: false,
+          items: [{
+            number: 88,
+            title: "WIP: draft fix",
+            state: "open",
+            body: "Closes #7",
+            user: { login: "yhonda-ohishi" },
+            labels: [], assignees: [], comments: 0,
+            created_at: "2026-05-11T00:00:00Z", updated_at: "2026-05-11T03:00:00Z",
+            html_url: "https://github.com/ippoan/rust-alc-api/pull/88",
+            repository_url: "https://api.github.com/repos/ippoan/rust-alc-api",
+            draft: true,
+            pull_request: { url: "..." },
+          }],
+        });
+      }
+      if (decoded.includes("repo:yhonda-ohishi/claude-skills")) {
+        return Response.json({ total_count: 0, incomplete_results: false, items: [] });
+      }
+      return Response.json({
+        total_count: 1, incomplete_results: false,
+        items: [{
+          number: 7, title: "the issue", state: "open",
+          user: { login: "yhonda-ohishi" }, labels: [], assignees: [], comments: 0,
+          created_at: "2026-05-10T00:00:00Z", updated_at: "2026-05-10T03:00:00Z",
+          html_url: "https://github.com/ippoan/rust-alc-api/issues/7",
+          repository_url: "https://api.github.com/repos/ippoan/rust-alc-api",
+        }],
+      });
+    });
+    const req = new Request("http://localhost/issues");
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(req, testEnv(), ctx);
+    await waitOnExecutionContext(ctx);
+
+    const html = await res.text();
+    expect(html).toContain('class="pr-chip draft"');
+    expect(html).toContain("(draft)");
+  });
+
+  it("does not blank the page when the PR search call fails — shows a banner instead", async () => {
+    // Issue calls succeed but PR search rejects with 403. The issues page
+    // should still render with a stale/error banner for the related-PR map,
+    // not return 502.
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (req, init) => {
+      const url = typeof req === "string" ? req : (req as Request).url;
+      const body = (init?.body as string | undefined) ?? "";
+      if (url.includes("/graphql")) {
+        if (body.includes("projectsV2(first:")) {
+          return Response.json({
+            data: { repositoryOwner: { projectsV2: { nodes: [] } } },
+          });
+        }
+        return Response.json({ data: { repositoryOwner: null } });
+      }
+      const decoded = decodeURIComponent(url);
+      if (decoded.includes("is:pr")) {
+        return new Response("rate limited", { status: 403 });
+      }
+      return Response.json({ total_count: 0, incomplete_results: false, items: [] });
+    });
+    const req = new Request("http://localhost/issues");
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(req, testEnv(), ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain("Related-PR links unavailable");
   });
 });
 
