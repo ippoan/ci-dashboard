@@ -1,5 +1,5 @@
 import { parseRepo, tokenForOrg, GitHubApiError } from "./github-api";
-import type { GitHubAppEnv } from "./github-app-auth";
+import type { AuthWorkerEnv } from "./auth-worker-client";
 import {
   extractRefIssues,
   sortSemverDesc,
@@ -39,9 +39,8 @@ import { PWA_HEAD_TAGS, PWA_REGISTER_SCRIPT } from "./pwa";
 export async function handleReleasesPage(
   req: Request,
   env: {
-    GITHUB_APP_ID: string;
-    GITHUB_APP_PRIVATE_KEY: string;
-    GITHUB_APP_INSTALLATIONS: string;
+    JWT_FOR_CI_DASHBOARD: SecretsStoreSecret;
+    INTERNAL_SHARED_SECRET: SecretsStoreSecret;
     CI_HUB: DurableObjectNamespace;
     CI_STATUS: KVNamespace;
     TAGLESS_REPOS?: string;
@@ -127,9 +126,8 @@ const TOP_TAGS_INLINE = 5;
 
 async function handleIndexPage(
   env: {
-    GITHUB_APP_ID: string;
-    GITHUB_APP_PRIVATE_KEY: string;
-    GITHUB_APP_INSTALLATIONS: string;
+    JWT_FOR_CI_DASHBOARD: SecretsStoreSecret;
+    INTERNAL_SHARED_SECRET: SecretsStoreSecret;
     CI_HUB: DurableObjectNamespace;
     CI_STATUS: KVNamespace;
     TAGLESS_REPOS?: string;
@@ -197,7 +195,7 @@ async function handleIndexPage(
 }
 
 async function loadRepoView(
-  env: GitHubAppEnv,
+  env: AuthWorkerEnv,
   repo: string,
   useSynthetic: boolean,
   kv?: KVNamespace,
@@ -394,7 +392,7 @@ interface IssueRow {
 }
 
 async function loadRelease(
-  env: GitHubAppEnv,
+  env: AuthWorkerEnv,
   repoParam: string,
   tag: string,
   kv?: KVNamespace,

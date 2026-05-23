@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { githubGraphQL, parseRepo, tokenForOrg, validateOrg, GitHubApiError } from "../../github-api";
-import { getInstallationToken, type GitHubAppEnv } from "../../github-app-auth";
+import { getGitHubToken, type AuthWorkerEnv } from "../../auth-worker-client";
 
 // --------------------------------------------------------------------------
 // GitHub Projects v2 tooling.
@@ -158,13 +158,13 @@ export interface OrgProjectsResult {
  * `validateOrg` is enforced for every org before any network call.
  */
 export async function fetchOrgProjects(
-  env: GitHubAppEnv,
+  env: AuthWorkerEnv,
   params: { orgs: string[]; first?: number; include_closed?: boolean },
 ): Promise<OrgProjectsResult[]> {
   const { orgs, first = 50, include_closed = false } = params;
   for (const o of orgs) validateOrg(o);
   return Promise.all(orgs.map(async (org) => {
-    const token = await getInstallationToken(env, org);
+    const token = await getGitHubToken(env);
     const data = await githubGraphQL<{
       repositoryOwner: {
         projectsV2?: { nodes: OrgProject[] };
@@ -211,7 +211,7 @@ export interface ProjectRef {
  * each well under 1 point of the 5000/h rate-limit budget.
  */
 export async function fetchProjectIssueMap(
-  env: GitHubAppEnv,
+  env: AuthWorkerEnv,
   params: { orgs: string[]; first?: number },
 ): Promise<Map<string, ProjectRef[]>> {
   const { orgs, first = 100 } = params;
@@ -221,7 +221,7 @@ export async function fetchProjectIssueMap(
   await Promise.all(
     orgsProjects.flatMap(({ org, projects }) =>
       projects.map(async (p) => {
-        const token = await getInstallationToken(env, org);
+        const token = await getGitHubToken(env);
         const data = await githubGraphQL<{
           node: {
             items: { nodes: Array<{
@@ -290,7 +290,7 @@ export interface ProjectItemSummary {
  * same surface as the MCP tool.
  */
 export async function fetchProjectItems(
-  env: GitHubAppEnv,
+  env: AuthWorkerEnv,
   org: string,
   number: number,
   first = 50,
@@ -348,7 +348,7 @@ export async function fetchProjectItems(
   return nodes.map(formatItem);
 }
 
-export function registerProjectsTools(server: McpServer, env: GitHubAppEnv): void {
+export function registerProjectsTools(server: McpServer, env: AuthWorkerEnv): void {
   // --------------------------------------------------------------------
   // Read tools
   // --------------------------------------------------------------------

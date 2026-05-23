@@ -1,5 +1,5 @@
 import { githubApi, parseRepo, tokenForOrg } from "./github-api";
-import type { GitHubAppEnv } from "./github-app-auth";
+import type { AuthWorkerEnv } from "./auth-worker-client";
 import { invalidateIssue } from "./release-cache";
 
 // POST /api/release-close-batch
@@ -18,7 +18,7 @@ const PAIR_RE = /^(.+):(\d+)$/;
 
 export async function handleReleaseCloseBatch(
   req: Request,
-  env: GitHubAppEnv,
+  env: AuthWorkerEnv,
   hub?: DurableObjectStub,
   ctx?: ExecutionContext,
 ): Promise<Response> {

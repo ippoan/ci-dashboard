@@ -1,4 +1,4 @@
-import { getInstallationToken, type GitHubAppEnv } from "./github-app-auth";
+import { getGitHubToken, type AuthWorkerEnv } from "./auth-worker-client";
 
 const GITHUB_API = "https://api.github.com";
 const ALLOWED_ORGS = ["ippoan", "ohishi-exp", "yhonda-ohishi"];
@@ -18,12 +18,14 @@ export function validateOrg(owner: string): void {
   }
 }
 
-/** Resolve a GitHub App installation token for the given org. Combines the
- *  allowlist check (`validateOrg`) with the per-org token mint so the common
- *  3-line pattern at call sites collapses to one. */
-export async function tokenForOrg(env: GitHubAppEnv, owner: string): Promise<string> {
+/** Resolve a GitHub access token. Since auth-worker issues a single user-scope
+ *  token that spans all orgs the operator is a member of, the `owner` arg is
+ *  only used to enforce the allowlist (defense-in-depth) — the resolved token
+ *  is org-agnostic. Kept for source-compat with the previous App-installation
+ *  code path. */
+export async function tokenForOrg(env: AuthWorkerEnv, owner: string): Promise<string> {
   validateOrg(owner);
-  return getInstallationToken(env, owner);
+  return getGitHubToken(env);
 }
 
 export class GitHubApiError extends Error {
