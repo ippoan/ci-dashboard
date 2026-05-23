@@ -52,6 +52,16 @@
       "secret_name": "JWT_FOR_CI_DASHBOARD"
     }
   ],
+  // ci-workflows/secret-verify-gcp.yml が読む宣言。GCP Secret Manager 上に
+  // 同名 entry が存在することを CI で検証し、verify SA に権限があれば
+  // `used-by-ippoan-ci-dashboard=active` label を自動付与する。
+  // top-level / env.staging 両方とも同じ JWT_FOR_CI_DASHBOARD を bind して
+  // いるので 1 entry で足りる。
+  "secrets": {
+    "required": [
+      "JWT_FOR_CI_DASHBOARD"
+    ]
+  },
   // staging を実運用 env として扱う (secrets-inventory と同じパターン)。
   // PR push 毎に `ci-dashboard-staging` Worker に auto-deploy され、`v*` tag の
   // production (top-level `ci-dashboard`) は将来用に予約。top-level 設定は
