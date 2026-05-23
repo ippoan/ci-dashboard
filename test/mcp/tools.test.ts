@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { githubApi, githubApiRaw, parseRepo, validateOrg, GitHubApiError } from "../../src/github-api";
 import { buildUpdateIssuePayload, fetchOrgIssues } from "../../src/mcp/tools/issues";
+import { appTestEnv } from "../_helpers/app-env";
 
 // Test MCP tool logic by calling the same functions the tools use.
 // The MCP protocol layer (JSON-RPC, transport) is tested by the SDK itself.
@@ -566,7 +567,7 @@ describe("list_org_issues tool logic", () => {
       Response.json({ total_count: 0, incomplete_results: false, items: [] }),
     );
 
-    await fetchOrgIssues("token", { orgs: ["ippoan"], state: "open" });
+    await fetchOrgIssues(appTestEnv(), { orgs: ["ippoan"], state: "open" });
 
     const url = fetchSpy.mock.calls[0]![0] as string;
     const decoded = decodeURIComponent(url.replace(/\+/g, " "));
@@ -578,7 +579,7 @@ describe("list_org_issues tool logic", () => {
       Response.json({ total_count: 0, incomplete_results: false, items: [] }),
     );
 
-    await fetchOrgIssues("token", {
+    await fetchOrgIssues(appTestEnv(), {
       orgs: ["ippoan"],
       state: "open",
       query: "archived:true",

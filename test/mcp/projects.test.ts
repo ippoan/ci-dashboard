@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { githubGraphQL, GitHubApiError } from "../../src/github-api";
 import { resolveProjectId, resolveIssueContentId } from "../../src/mcp/tools/projects";
+import { appTestEnv } from "../_helpers/app-env";
 
 // These tests exercise the GraphQL helper + Projects v2 tool logic against
 // mocked fetch responses. The MCP transport itself is covered by tools.test.ts.
@@ -127,7 +128,7 @@ describe("Projects v2 tools — integration via MCP server", () => {
         params: { name, arguments: args },
       }),
     });
-    const res = await handleMcpRequest(req, "test-token");
+    const res = await handleMcpRequest(req, appTestEnv());
     expect(res.status).toBe(200);
     const body = await res.json() as {
       result?: { content?: Array<{ type: string; text: string }>; isError?: boolean };

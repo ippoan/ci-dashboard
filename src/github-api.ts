@@ -1,3 +1,5 @@
+import { getInstallationToken, type GitHubAppEnv } from "./github-app-auth";
+
 const GITHUB_API = "https://api.github.com";
 const ALLOWED_ORGS = ["ippoan", "ohishi-exp", "yhonda-ohishi"];
 const DEFAULT_ORG = "ippoan";
@@ -14,6 +16,14 @@ export function validateOrg(owner: string): void {
   if (!ALLOWED_ORGS.includes(owner)) {
     throw new GitHubApiError(403, `Org not allowed: ${owner}`);
   }
+}
+
+/** Resolve a GitHub App installation token for the given org. Combines the
+ *  allowlist check (`validateOrg`) with the per-org token mint so the common
+ *  3-line pattern at call sites collapses to one. */
+export async function tokenForOrg(env: GitHubAppEnv, owner: string): Promise<string> {
+  validateOrg(owner);
+  return getInstallationToken(env, owner);
 }
 
 export class GitHubApiError extends Error {

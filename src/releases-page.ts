@@ -1,4 +1,5 @@
-import { parseRepo, validateOrg, GitHubApiError } from "./github-api";
+import { parseRepo, tokenForOrg, GitHubApiError } from "./github-api";
+import type { GitHubAppEnv } from "./github-app-auth";
 import {
   extractRefIssues,
   sortSemverDesc,
@@ -38,9 +39,11 @@ import { PWA_HEAD_TAGS, PWA_REGISTER_SCRIPT } from "./pwa";
 export async function handleReleasesPage(
   req: Request,
   env: {
-    GITHUB_TOKEN: string;
+    GITHUB_APP_ID: string;
+    GITHUB_APP_PRIVATE_KEY: string;
+    GITHUB_APP_INSTALLATIONS: string;
     CI_HUB: DurableObjectNamespace;
-    CI_STATUS?: KVNamespace;
+    CI_STATUS: KVNamespace;
     TAGLESS_REPOS?: string;
   },
 ): Promise<Response> {
@@ -63,7 +66,7 @@ export async function handleReleasesPage(
   if (repoParam && tag) {
     let result: ReleasePayload;
     try {
-      result = await loadRelease(env.GITHUB_TOKEN, repoParam, tag, env.CI_STATUS);
+      result = await loadRelease(env, repoParam, tag, env.CI_STATUS);
     } catch (err) {
       if (err instanceof GitHubApiError && err.status === 404) {
         return html(renderError(`Not found: ${err.message}`), 404);
@@ -124,9 +127,11 @@ const TOP_TAGS_INLINE = 5;
 
 async function handleIndexPage(
   env: {
-    GITHUB_TOKEN: string;
+    GITHUB_APP_ID: string;
+    GITHUB_APP_PRIVATE_KEY: string;
+    GITHUB_APP_INSTALLATIONS: string;
     CI_HUB: DurableObjectNamespace;
-    CI_STATUS?: KVNamespace;
+    CI_STATUS: KVNamespace;
     TAGLESS_REPOS?: string;
   },
   closedFlash: number[],
@@ -157,7 +162,7 @@ async function handleIndexPage(
 
   let allowlist = new Set<string>();
   try {
-    allowlist = await loadDirectPushAllowlist(env.GITHUB_TOKEN, env.CI_STATUS);
+    allowlist = await loadDirectPushAllowlist(env, env.CI_STATUS);
     for (const r of allowlist) watched.add(r);
   } catch { /* graceful: allowlist stays empty, existing tag-flow unaffected */ }
 
@@ -173,7 +178,7 @@ async function handleIndexPage(
   const views = await Promise.all(repos.map(async (repo) => {
     try {
       const useSynthetic = allowlist.has(repo) || tagless.has(repo);
-      return await loadRepoView(env.GITHUB_TOKEN, repo, useSynthetic, env.CI_STATUS);
+      return await loadRepoView(env, repo, useSynthetic, env.CI_STATUS);
     } catch {
       return null;
     }
@@ -192,13 +197,13 @@ async function handleIndexPage(
 }
 
 async function loadRepoView(
-  token: string,
+  env: GitHubAppEnv,
   repo: string,
   useSynthetic: boolean,
   kv?: KVNamespace,
 ): Promise<RepoView | null> {
   const { owner, repo: name } = parseRepo(repo);
-  validateOrg(owner);
+  const token = await tokenForOrg(env, owner);
 
   // 1. Recent semver tags. 10 gives us 5 inline + room for the predecessor
   //    pairing on the oldest of those 5 + a small "older" strip.
@@ -389,13 +394,13 @@ interface IssueRow {
 }
 
 async function loadRelease(
-  token: string,
+  env: GitHubAppEnv,
   repoParam: string,
   tag: string,
   kv?: KVNamespace,
 ): Promise<ReleasePayload> {
   const { owner, repo: name } = parseRepo(repoParam);
-  validateOrg(owner);
+  const token = await tokenForOrg(env, owner);
 
   // 1. Pull recent tags so we can pick the immediate predecessor for the
   //    compare endpoint. 30 is plenty given typical release cadence; for

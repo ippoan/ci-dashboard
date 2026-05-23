@@ -1,8 +1,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { githubApiRaw, parseRepo, validateOrg } from "../../github-api";
+import { githubApiRaw, parseRepo, tokenForOrg } from "../../github-api";
+import type { GitHubAppEnv } from "../../github-app-auth";
 
-export function registerLogsTools(server: McpServer, token: string): void {
+export function registerLogsTools(server: McpServer, env: GitHubAppEnv): void {
   server.registerTool(
     "get_job_logs",
     {
@@ -18,7 +19,7 @@ export function registerLogsTools(server: McpServer, token: string): void {
     },
     async ({ repo, job_id, tail_lines, start_line, end_line }) => {
       const { owner, repo: name } = parseRepo(repo);
-      validateOrg(owner);
+      const token = await tokenForOrg(env, owner);
 
       const raw = await githubApiRaw(
         token, "GET", `/repos/${owner}/${name}/actions/jobs/${job_id}/logs`,
@@ -72,7 +73,7 @@ export function registerLogsTools(server: McpServer, token: string): void {
     },
     async ({ repo, job_id, pattern, context_lines }) => {
       const { owner, repo: name } = parseRepo(repo);
-      validateOrg(owner);
+      const token = await tokenForOrg(env, owner);
 
       const raw = await githubApiRaw(
         token, "GET", `/repos/${owner}/${name}/actions/jobs/${job_id}/logs`,

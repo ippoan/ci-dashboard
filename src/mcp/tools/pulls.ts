@@ -1,8 +1,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { githubApi, parseRepo, validateOrg } from "../../github-api";
+import { githubApi, parseRepo, tokenForOrg } from "../../github-api";
+import type { GitHubAppEnv } from "../../github-app-auth";
 
-export function registerPullsTools(server: McpServer, token: string): void {
+export function registerPullsTools(server: McpServer, env: GitHubAppEnv): void {
   server.registerTool(
     "list_pull_requests",
     {
@@ -16,7 +17,7 @@ export function registerPullsTools(server: McpServer, token: string): void {
     },
     async ({ repo, state, per_page }) => {
       const { owner, repo: name } = parseRepo(repo);
-      validateOrg(owner);
+      const token = await tokenForOrg(env, owner);
 
       const prs = await githubApi<PullRequest[]>(
         token, "GET", `/repos/${owner}/${name}/pulls`, undefined,
@@ -53,7 +54,7 @@ export function registerPullsTools(server: McpServer, token: string): void {
     },
     async ({ repo, pull_number }) => {
       const { owner, repo: name } = parseRepo(repo);
-      validateOrg(owner);
+      const token = await tokenForOrg(env, owner);
 
       const pr = await githubApi<PullRequest>(
         token, "GET", `/repos/${owner}/${name}/pulls/${pull_number}`,
@@ -103,7 +104,7 @@ export function registerPullsTools(server: McpServer, token: string): void {
     },
     async ({ repo, pull_number, commit_title }) => {
       const { owner, repo: name } = parseRepo(repo);
-      validateOrg(owner);
+      const token = await tokenForOrg(env, owner);
 
       const body: Record<string, unknown> = { merge_method: "squash" };
       if (commit_title) body.commit_title = commit_title;

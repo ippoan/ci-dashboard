@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { githubApi, parseRepo, validateOrg } from "../../github-api";
+import { githubApi, parseRepo, tokenForOrg, validateOrg } from "../../github-api";
+import { getInstallationToken, type GitHubAppEnv } from "../../github-app-auth";
 
 /** Build the PATCH body for `update_issue` from optional fields. Strips
  *  fields the caller did not provide (= `undefined`); preserves empty
@@ -28,7 +29,7 @@ export function buildUpdateIssuePayload(input: {
   return payload;
 }
 
-export function registerIssuesTools(server: McpServer, token: string): void {
+export function registerIssuesTools(server: McpServer, env: GitHubAppEnv): void {
   server.registerTool(
     "list_issues",
     {
@@ -43,7 +44,7 @@ export function registerIssuesTools(server: McpServer, token: string): void {
     },
     async ({ repo, state, labels, per_page }) => {
       const { owner, repo: name } = parseRepo(repo);
-      validateOrg(owner);
+      const token = await tokenForOrg(env, owner);
 
       const params: Record<string, string> = {
         state,
@@ -86,7 +87,7 @@ export function registerIssuesTools(server: McpServer, token: string): void {
     },
     async ({ repo, issue_number }) => {
       const { owner, repo: name } = parseRepo(repo);
-      validateOrg(owner);
+      const token = await tokenForOrg(env, owner);
 
       const [issue, comments] = await Promise.all([
         githubApi<Issue>(token, "GET", `/repos/${owner}/${name}/issues/${issue_number}`),
@@ -129,7 +130,7 @@ export function registerIssuesTools(server: McpServer, token: string): void {
     },
     async ({ repo, title, body, labels, assignees }) => {
       const { owner, repo: name } = parseRepo(repo);
-      validateOrg(owner);
+      const token = await tokenForOrg(env, owner);
 
       const payload: Record<string, unknown> = { title };
       if (body) payload.body = body;
@@ -173,7 +174,7 @@ export function registerIssuesTools(server: McpServer, token: string): void {
     },
     async ({ repo, issue_number, title, body, labels, assignees, milestone }) => {
       const { owner, repo: name } = parseRepo(repo);
-      validateOrg(owner);
+      const token = await tokenForOrg(env, owner);
 
       const payload = buildUpdateIssuePayload({ title, body, labels, assignees, milestone });
 
@@ -206,7 +207,7 @@ export function registerIssuesTools(server: McpServer, token: string): void {
     },
     async ({ repo, issue_number, body }) => {
       const { owner, repo: name } = parseRepo(repo);
-      validateOrg(owner);
+      const token = await tokenForOrg(env, owner);
 
       const created = await githubApi<{ id: number; html_url: string; created_at: string }>(
         token, "POST", `/repos/${owner}/${name}/issues/${issue_number}/comments`, { body },
@@ -235,7 +236,7 @@ export function registerIssuesTools(server: McpServer, token: string): void {
     },
     async ({ repo, issue_number, labels }) => {
       const { owner, repo: name } = parseRepo(repo);
-      validateOrg(owner);
+      const token = await tokenForOrg(env, owner);
 
       const updated = await githubApi<Array<{ name: string }>>(
         token, "POST", `/repos/${owner}/${name}/issues/${issue_number}/labels`, { labels },
@@ -259,7 +260,7 @@ export function registerIssuesTools(server: McpServer, token: string): void {
     },
     async ({ repo, issue_number, label }) => {
       const { owner, repo: name } = parseRepo(repo);
-      validateOrg(owner);
+      const token = await tokenForOrg(env, owner);
 
       const remaining = await githubApi<Array<{ name: string }>>(
         token, "DELETE",
@@ -285,7 +286,7 @@ export function registerIssuesTools(server: McpServer, token: string): void {
     },
     async ({ repo, issue_number, state_reason }) => {
       const { owner, repo: name } = parseRepo(repo);
-      validateOrg(owner);
+      const token = await tokenForOrg(env, owner);
 
       const payload: Record<string, unknown> = { state: "closed" };
       payload.state_reason = state_reason ?? "completed";
@@ -317,7 +318,7 @@ export function registerIssuesTools(server: McpServer, token: string): void {
     },
     async ({ repo, issue_number }) => {
       const { owner, repo: name } = parseRepo(repo);
-      validateOrg(owner);
+      const token = await tokenForOrg(env, owner);
 
       const updated = await githubApi<Issue>(
         token, "PATCH", `/repos/${owner}/${name}/issues/${issue_number}`,
@@ -358,7 +359,7 @@ export function registerIssuesTools(server: McpServer, token: string): void {
       annotations: { readOnlyHint: true },
     },
     async ({ orgs, state, labels, assignee, query, per_page }) => {
-      const result = await fetchOrgIssues(token, {
+      const result = await fetchOrgIssues(env, {
         orgs, state, labels, assignee, query, per_page,
       });
       return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
@@ -400,20 +401,59 @@ export interface FetchOrgIssuesResult {
   items: OrgIssue[];
 }
 
+/** Cross-org issue search.
+ *
+ * GitHub App installation tokens are scoped per-org, so we cannot run
+ * `org:ippoan org:ohishi-exp` in a single search call: that token would
+ * only return results from its own installation. We fan out: one search
+ * per org with that org's installation token, then merge the rows.
+ *
+ * The special case is when `params.query` pins a specific `repo:owner/...`.
+ * In that case all repos belong to a single owner, so a single search call
+ * with that owner's token is correct (and required, because GitHub silently
+ * drops `repo:` when combined with `org:`, so we never want to add `org:`
+ * in that branch). */
 export async function fetchOrgIssues(
+  env: GitHubAppEnv,
+  params: FetchOrgIssuesParams,
+): Promise<FetchOrgIssuesResult> {
+  const { orgs, query } = params;
+  for (const o of orgs) validateOrg(o);
+
+  const queryHasRepoFilter = !!query && /\brepo:/.test(query);
+
+  if (queryHasRepoFilter) {
+    // All repos in the query must share an owner (else we couldn't pick one
+    // installation token). Extract the first owner and use that.
+    const m = query!.match(/\brepo:([\w.-]+)\//);
+    if (!m) throw new Error("fetchOrgIssues: query has repo: qualifier but owner could not be parsed");
+    const owner = m[1]!;
+    const token = await tokenForOrg(env, owner);
+    return runIssueSearch(token, params, /*omitOrgQualifier*/ true);
+  }
+
+  // Per-org fan-out.
+  const results = await Promise.all(
+    orgs.map(async (org) => {
+      const token = await getInstallationToken(env, org);
+      return runIssueSearch(token, { ...params, orgs: [org] }, /*omitOrgQualifier*/ false);
+    }),
+  );
+
+  return {
+    total_count: results.reduce((s, r) => s + r.total_count, 0),
+    incomplete: results.some((r) => r.incomplete),
+    items: results.flatMap((r) => r.items),
+  };
+}
+
+async function runIssueSearch(
   token: string,
   params: FetchOrgIssuesParams,
+  omitOrgQualifier: boolean,
 ): Promise<FetchOrgIssuesResult> {
   const { orgs, state = "open", labels, assignee, query, per_page = 30 } = params;
 
-  for (const o of orgs) validateOrg(o);
-
-  // GitHub Search silently drops `repo:` qualifiers when `org:` is also
-  // present in the same query — the result widens to the entire org. When
-  // the caller-supplied `query` already pins specific repos via `repo:`, omit
-  // the `org:` qualifier (the `repo:` already implies the owner). The
-  // `validateOrg` allowlist check above still runs, so this is safe.
-  const queryHasRepoFilter = !!query && /\brepo:/.test(query);
   // Default-exclude archived repos so old projects like cf-secrets-mcp don't
   // leak open issues into the dashboard. Caller can still opt back in (or
   // request archived-only) by passing `archived:true` / `archived:false` in
@@ -422,7 +462,7 @@ export async function fetchOrgIssues(
 
   const parts: string[] = ["is:issue"];
   if (state !== "all") parts.push(`state:${state}`);
-  if (!queryHasRepoFilter) {
+  if (!omitOrgQualifier) {
     for (const o of orgs) parts.push(`org:${o}`);
   }
   if (!queryHasArchivedFilter) parts.push("archived:false");

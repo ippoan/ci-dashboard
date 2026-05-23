@@ -103,12 +103,13 @@ npm run deploy                       # production (top-level, 予約) に手動 
 npx wrangler deploy --env staging    # staging に手動 deploy
 ```
 
-### GitHub 認証 (PAT → GitHub App 移行中: #112)
+### GitHub 認証 (GitHub App — #112 で PAT 廃止済み)
 
-`refactor(auth): replace PAT with GitHub App installation token (3-org)` の
-移行作業中。新規セットアップは GitHub App、既存の PAT 設定は段階的に廃止する。
+PAT (`GITHUB_TOKEN`) は完全廃止。Worker は GitHub App installation token
+(per-org、1 h TTL、KV cache ~55 min) を `src/github-app-auth.ts` 経由で
+発行・更新する。手動 rotation は不要。
 
-#### GitHub App セットアップ (推奨、最終形)
+#### GitHub App セットアップ
 
 1. **App 作成** (Settings → Developer settings → GitHub Apps → New GitHub App)
    - Homepage URL: `https://ci-dashboard.ippoan.org`
@@ -138,15 +139,16 @@ npx wrangler deploy --env staging    # staging に手動 deploy
 5. installation token は worker 内で JWT 経由で交換し、KV (`gh-app:token:<installation_id>`) に
    ~55 min キャッシュされる。手動 rotation 不要。
 
-#### PAT (旧、廃止予定)
+#### 移行作業の最終ステップ
+
+旧 PAT secret は #112 で全 code path から外したので、デプロイ後に各 worker
+(`ci-dashboard-staging` / `ci-dashboard`) から `GITHUB_TOKEN` secret を
+削除すること:
 
 ```bash
-wrangler secret put GITHUB_TOKEN --env staging
-wrangler secret put GITHUB_TOKEN
+npx wrangler secret delete GITHUB_TOKEN --env staging
+npx wrangler secret delete GITHUB_TOKEN
 ```
-
-`repo` / `workflow` スコープ + Projects v2 用に `project` (write) または `read:project` を追加。
-**#112 完了後にこの secret は不要になるので削除すること。**
 
 ## 開発ルール
 

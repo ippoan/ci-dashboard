@@ -1,3 +1,4 @@
+import { appTestEnv } from "./_helpers/app-env";
 import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   computeReleaseAlert,
@@ -82,7 +83,7 @@ describe("computeReleaseAlert", () => {
 
   it("returns null when the repo has no tags", async () => {
     stubGithub({ tags: [] });
-    const result = await computeReleaseAlert("token", "ippoan/foo");
+    const result = await computeReleaseAlert(appTestEnv(), "ippoan/foo");
     expect(result).toBeNull();
   });
 
@@ -93,7 +94,7 @@ describe("computeReleaseAlert", () => {
         "v1.0.0...v1.1.0": { commits: [{ commit: { message: "feat: noop" } }] },
       },
     });
-    const result = await computeReleaseAlert("token", "ippoan/foo");
+    const result = await computeReleaseAlert(appTestEnv(), "ippoan/foo");
     expect(result).toBeNull();
   });
 
@@ -107,7 +108,7 @@ describe("computeReleaseAlert", () => {
       },
       issues: { 42: closedIssue(42) },
     });
-    const result = await computeReleaseAlert("token", "ippoan/foo");
+    const result = await computeReleaseAlert(appTestEnv(), "ippoan/foo");
     expect(result).toBeNull();
   });
 
@@ -128,7 +129,7 @@ describe("computeReleaseAlert", () => {
         12: openIssue(12, "open two"),
       },
     });
-    const result = await computeReleaseAlert("token", "ippoan/foo");
+    const result = await computeReleaseAlert(appTestEnv(), "ippoan/foo");
     expect(result).not.toBeNull();
     expect(result!.repo).toBe("ippoan/foo");
     expect(result!.tag).toBe("v1.2.0");
@@ -150,7 +151,7 @@ describe("computeReleaseAlert", () => {
       },
       issues: { 99: openIssue(99) },
     });
-    const result = await computeReleaseAlert("token", "ippoan/foo", "v1.2.0");
+    const result = await computeReleaseAlert(appTestEnv(), "ippoan/foo", "v1.2.0");
     expect(result?.tag).toBe("v1.2.0");
     expect(result?.openIssues[0]?.number).toBe(99);
   });
@@ -160,13 +161,13 @@ describe("computeReleaseAlert", () => {
       tags: [{ name: "v1.0.0" }],
     });
     await expect(
-      computeReleaseAlert("token", "ippoan/foo", "v9.9.9"),
+      computeReleaseAlert(appTestEnv(), "ippoan/foo", "v9.9.9"),
     ).rejects.toThrow(/Tag .* not present/);
   });
 
   it("rejects disallowed orgs", async () => {
     await expect(
-      computeReleaseAlert("token", "evil-org/foo"),
+      computeReleaseAlert(appTestEnv(), "evil-org/foo"),
     ).rejects.toThrow(/Org not allowed/);
   });
 
@@ -184,7 +185,7 @@ describe("computeReleaseAlert", () => {
       if (issueMatch) return Response.json(openIssue(Number(issueMatch[1])));
       return new Response("unstubbed", { status: 500 });
     });
-    const result = await computeReleaseAlert("token", "ippoan/foo");
+    const result = await computeReleaseAlert(appTestEnv(), "ippoan/foo");
     expect(result?.openIssues.map((i) => i.number)).toEqual([1]);
   });
 
@@ -202,7 +203,7 @@ describe("computeReleaseAlert", () => {
         51: { ...openIssue(51), pull_request: { url: "x" } },
       },
     });
-    const result = await computeReleaseAlert("token", "ippoan/foo");
+    const result = await computeReleaseAlert(appTestEnv(), "ippoan/foo");
     expect(result?.openIssues.map((i) => i.number)).toEqual([50]);
   });
 });
@@ -220,7 +221,7 @@ describe("recomputeAlert", () => {
       },
       issues: { 7: openIssue(7) },
     });
-    const fresh = await recomputeAlert("token", "ippoan/foo", "v1.1.0");
+    const fresh = await recomputeAlert(appTestEnv(), "ippoan/foo", "v1.1.0");
     expect(fresh?.tag).toBe("v1.1.0");
     expect(fresh?.openIssues[0]?.number).toBe(7);
   });
@@ -235,7 +236,7 @@ describe("recomputeAlert", () => {
       },
       issues: { 7: closedIssue(7) },
     });
-    const fresh = await recomputeAlert("token", "ippoan/foo", "v1.1.0");
+    const fresh = await recomputeAlert(appTestEnv(), "ippoan/foo", "v1.1.0");
     expect(fresh).toBeNull();
   });
 });
@@ -265,7 +266,7 @@ describe("computeReleaseAlertForPr", () => {
       },
     });
     const result = await computeReleaseAlertForPr(
-      "token", "ippoan/secrets-inventory-gcp", 42, "deadbeef12345", "main",
+      appTestEnv(), "ippoan/secrets-inventory-gcp", 42, "deadbeef12345", "main",
     );
     expect(result).not.toBeNull();
     expect(result!.repo).toBe("ippoan/secrets-inventory-gcp");
@@ -282,7 +283,7 @@ describe("computeReleaseAlertForPr", () => {
       prCommits: { 1: [{ commit: { message: "feat: thing" } }] },
     });
     const result = await computeReleaseAlertForPr(
-      "token", "ippoan/foo", 1, "abc1234", "main",
+      appTestEnv(), "ippoan/foo", 1, "abc1234", "main",
     );
     expect(result).toBeNull();
   });
@@ -294,7 +295,7 @@ describe("computeReleaseAlertForPr", () => {
       issues: { 5: closedIssue(5) },
     });
     const result = await computeReleaseAlertForPr(
-      "token", "ippoan/foo", 2, "abc1234", "main",
+      appTestEnv(), "ippoan/foo", 2, "abc1234", "main",
     );
     expect(result).toBeNull();
   });
@@ -306,14 +307,14 @@ describe("computeReleaseAlertForPr", () => {
       issues: { 8: openIssue(8) },
     });
     const result = await computeReleaseAlertForPr(
-      "token", "ippoan/foo", 3, null, "main",
+      appTestEnv(), "ippoan/foo", 3, null, "main",
     );
     expect(result?.tag).toBe("main@pr-3");
   });
 
   it("rejects disallowed orgs", async () => {
     await expect(
-      computeReleaseAlertForPr("token", "evil-org/foo", 1, "abc", "main"),
+      computeReleaseAlertForPr(appTestEnv(), "evil-org/foo", 1, "abc", "main"),
     ).rejects.toThrow(/Org not allowed/);
   });
 
@@ -327,7 +328,7 @@ describe("computeReleaseAlertForPr", () => {
       },
     });
     const result = await computeReleaseAlertForPr(
-      "token", "ippoan/foo", 4, "abc1234", "main",
+      appTestEnv(), "ippoan/foo", 4, "abc1234", "main",
     );
     expect(result?.openIssues.map((i) => i.number)).toEqual([50]);
   });

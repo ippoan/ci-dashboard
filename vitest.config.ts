@@ -12,6 +12,7 @@ export default defineConfig({
   test: {
     globals: true,
     include: ["test/**/*.test.ts"],
+    setupFiles: ["./test/_helpers/setup-app-env.ts"],
     coverage: {
       provider: "istanbul",
       reporter: ["text", "json-summary", "html"],

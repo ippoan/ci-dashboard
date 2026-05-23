@@ -1,8 +1,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { githubApi, parseRepo, validateOrg } from "../../github-api";
+import { githubApi, parseRepo, tokenForOrg } from "../../github-api";
+import type { GitHubAppEnv } from "../../github-app-auth";
 
-export function registerCommitsTools(server: McpServer, token: string): void {
+export function registerCommitsTools(server: McpServer, env: GitHubAppEnv): void {
   server.registerTool(
     "list_commits",
     {
@@ -17,7 +18,7 @@ export function registerCommitsTools(server: McpServer, token: string): void {
     },
     async ({ repo, sha, path, per_page }) => {
       const { owner, repo: name } = parseRepo(repo);
-      validateOrg(owner);
+      const token = await tokenForOrg(env, owner);
 
       const params: Record<string, string> = {
         sha,
@@ -52,7 +53,7 @@ export function registerCommitsTools(server: McpServer, token: string): void {
     },
     async ({ repo, sha }) => {
       const { owner, repo: name } = parseRepo(repo);
-      validateOrg(owner);
+      const token = await tokenForOrg(env, owner);
 
       const commit = await githubApi<CommitDetail>(
         token, "GET", `/repos/${owner}/${name}/commits/${sha}`,

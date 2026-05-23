@@ -1,3 +1,4 @@
+import { appTestEnv } from "./_helpers/app-env";
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { extractIssueRefs, fetchOpenPrsByIssue, fetchAllOpenPrsByIssue } from "../src/issue-prs";
 
@@ -82,7 +83,7 @@ describe("fetchOpenPrsByIssue()", () => {
       }),
     );
 
-    const map = await fetchOpenPrsByIssue("token", { orgs: ["ippoan"] });
+    const map = await fetchOpenPrsByIssue(appTestEnv(), { orgs: ["ippoan"] });
     expect(spy).toHaveBeenCalledTimes(1);
     const url = String(spy.mock.calls[0]![0]);
     const decoded = decodeURIComponent(url);
@@ -102,7 +103,7 @@ describe("fetchOpenPrsByIssue()", () => {
     const spy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       Response.json({ total_count: 0, incomplete_results: false, items: [] }),
     );
-    await fetchOpenPrsByIssue("token", {
+    await fetchOpenPrsByIssue(appTestEnv(), {
       repos: ["yhonda-ohishi/claude-skills", "yhonda-ohishi/claude-hooks"],
     });
     const url = String(spy.mock.calls[0]![0]);
@@ -113,7 +114,7 @@ describe("fetchOpenPrsByIssue()", () => {
   });
 
   it("rejects unknown orgs via validateOrg", async () => {
-    await expect(fetchOpenPrsByIssue("token", { orgs: ["evil-org"] }))
+    await expect(fetchOpenPrsByIssue(appTestEnv(), { orgs: ["evil-org"] }))
       .rejects.toThrow(/Org not allowed/);
   });
 });
@@ -154,7 +155,7 @@ describe("fetchAllOpenPrsByIssue()", () => {
     });
 
     const map = await fetchAllOpenPrsByIssue(
-      "token", ["ippoan"], ["yhonda-ohishi/claude-skills"],
+      appTestEnv(), ["ippoan"], ["yhonda-ohishi/claude-skills"],
     );
     const refs = map.get("ippoan/foo#5");
     expect(refs).toBeDefined();
