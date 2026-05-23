@@ -38,14 +38,18 @@
   // GitHub auth は @ippoan/auth-client-worker 経由で auth-worker に delegate
   // (issue #118)。`/oauth/login` ブラウザフロー (Auth Code + PKCE) でログイン後、
   // access_token + refresh_token は CI_STATUS KV に SDK が保存する。
-  // Cloudflare 側に必要な long-lived secret は INTERNAL_SHARED_SECRET だけ
-  // (auth-worker `/mcp/introspect` の認証用、auth-worker と同値、cc-relay
-  // broker / github-mcp-server-rs と共有)。
+  // Cloudflare 側に必要な long-lived secret は INTERNAL_SHARED_SECRET (binding 名)
+  // だけ — auth-worker `/mcp/introspect` の worker-to-worker doorman として使う。
+  // 値は ci-dashboard 専用 `JWT_FOR_CI_DASHBOARD` Secrets Store entry。
+  // auth-worker 側は `INTERNAL_SHARED_SECRET_CI_DASHBOARD` binding で同 entry を
+  // bind しており、`resolveAllSharedSecrets` (auth-worker #190) が prefix match
+  // で発見する (auth-worker #192)。MCP CLI 系 `mcp-internal-shared-secret-*` とは
+  // 切り離してある (blast radius / rotation を独立化)。
   "secrets_store_secrets": [
     {
       "binding": "INTERNAL_SHARED_SECRET",
       "store_id": "bd7bc91a3e5f4111add4acf6cb4b8733",
-      "secret_name": "INTERNAL_SHARED_SECRET"
+      "secret_name": "JWT_FOR_CI_DASHBOARD"
     }
   ],
   // staging を実運用 env として扱う (secrets-inventory と同じパターン)。
@@ -96,7 +100,7 @@
         {
           "binding": "INTERNAL_SHARED_SECRET",
           "store_id": "bd7bc91a3e5f4111add4acf6cb4b8733",
-          "secret_name": "INTERNAL_SHARED_SECRET"
+          "secret_name": "JWT_FOR_CI_DASHBOARD"
         }
       ]
     }
