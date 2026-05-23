@@ -1,6 +1,7 @@
 import { fetchOrgIssues, type OrgIssue } from "./mcp/tools/issues";
 import { fetchProjectIssueMap, type ProjectRef } from "./mcp/tools/projects";
 import { fetchAllOpenPrsByIssue, type IssuePrRef } from "./issue-prs";
+import type { GitHubAppEnv } from "./github-app-auth";
 import { renderTabs, TAB_STYLES } from "./nav-tabs";
 import { PWA_HEAD_TAGS, PWA_REGISTER_SCRIPT } from "./pwa";
 
@@ -78,17 +79,17 @@ interface ProjectMapResult {
 }
 
 async function loadProjectMap(
-  kv: KVNamespace,
-  token: string,
+  env: GitHubAppEnv,
   orgs: string[],
 ): Promise<ProjectMapResult> {
+  const kv = env.CI_STATUS;
   const cached = await kv.get(PROJECT_MAP_CACHE_KEY, "json") as ProjectMapCacheEntry | null;
   const now = Date.now();
   if (cached && now - cached.storedAt < PROJECT_MAP_FRESH_SECONDS * 1000) {
     return { map: new Map(Object.entries(cached.data)), stale: false, error: null };
   }
   try {
-    const fresh = await fetchProjectIssueMap(token, { orgs });
+    const fresh = await fetchProjectIssueMap(env, { orgs });
     const entry: ProjectMapCacheEntry = { storedAt: now, data: Object.fromEntries(fresh) };
     await kv.put(PROJECT_MAP_CACHE_KEY, JSON.stringify(entry), {
       expirationTtl: PROJECT_MAP_STORE_SECONDS,
@@ -124,18 +125,18 @@ interface PrMapResult {
 }
 
 async function loadPrMap(
-  kv: KVNamespace,
-  token: string,
+  env: GitHubAppEnv,
   mainOrgs: string[],
   yhondaRepos: string[],
 ): Promise<PrMapResult> {
+  const kv = env.CI_STATUS;
   const cached = await kv.get(PR_MAP_CACHE_KEY, "json") as PrMapCacheEntry | null;
   const now = Date.now();
   if (cached && now - cached.storedAt < PR_MAP_FRESH_SECONDS * 1000) {
     return { map: new Map(Object.entries(cached.data)), stale: false, error: null };
   }
   try {
-    const fresh = await fetchAllOpenPrsByIssue(token, mainOrgs, yhondaRepos);
+    const fresh = await fetchAllOpenPrsByIssue(env, mainOrgs, yhondaRepos);
     const entry: PrMapCacheEntry = { storedAt: now, data: Object.fromEntries(fresh) };
     await kv.put(PR_MAP_CACHE_KEY, JSON.stringify(entry), {
       expirationTtl: PR_MAP_STORE_SECONDS,
@@ -150,21 +151,19 @@ async function loadPrMap(
   }
 }
 
-export async function handleIssuesPage(
-  env: { GITHUB_TOKEN: string; CI_STATUS: KVNamespace },
-): Promise<Response> {
+export async function handleIssuesPage(env: GitHubAppEnv): Promise<Response> {
   // Search REST gives us the issues themselves; this is the only fetch that
   // can fail the page outright. Project map is loaded separately below so a
   // GraphQL rate-limit doesn't blank the page (Refs #94 follow-up).
   let merged;
   try {
     const [main, yhonda] = await Promise.all([
-      fetchOrgIssues(env.GITHUB_TOKEN, {
+      fetchOrgIssues(env, {
         orgs: ORGS,
         state: "open",
         per_page: 100,
       }),
-      fetchOrgIssues(env.GITHUB_TOKEN, {
+      fetchOrgIssues(env, {
         orgs: ["yhonda-ohishi"],
         state: "open",
         per_page: 100,
@@ -185,8 +184,8 @@ export async function handleIssuesPage(
   }
 
   const [project, prs] = await Promise.all([
-    loadProjectMap(env.CI_STATUS, env.GITHUB_TOKEN, PROJECT_ORGS),
-    loadPrMap(env.CI_STATUS, env.GITHUB_TOKEN, ORGS, YHONDA_REPOS),
+    loadProjectMap(env, PROJECT_ORGS),
+    loadPrMap(env, ORGS, YHONDA_REPOS),
   ]);
   const projectMap = project.map;
   const prMap = prs.map;

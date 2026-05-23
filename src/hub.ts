@@ -7,7 +7,7 @@ import {
   computeReleaseAlert,
   computeReleaseAlertForPr,
 } from "./release-alert";
-import { parseRepo } from "./github-api";
+import { parseRepo, tokenForOrg } from "./github-api";
 import { invalidateIssue } from "./release-cache";
 
 // WebSocket message envelope. All broadcasts now share `{ type, data }` so
@@ -173,7 +173,7 @@ export class CIDashboardHub extends DurableObject<Env> {
       await this.ensureAlerts();
       try {
         const alert = await computeReleaseAlert(
-          this.env.GITHUB_TOKEN, repo, tag, this.env.CI_STATUS,
+          this.env, repo, tag, this.env.CI_STATUS,
         );
         this.persistAlertAtKey(tagAlertKey(repo), alert);
         this.broadcastAlerts();
@@ -198,7 +198,7 @@ export class CIDashboardHub extends DurableObject<Env> {
       await this.ensureAlerts();
       try {
         const alert = await computeReleaseAlertForPr(
-          this.env.GITHUB_TOKEN, repo, prNumber, mergeSha, defaultBranch, this.env.CI_STATUS,
+          this.env, repo, prNumber, mergeSha, defaultBranch, this.env.CI_STATUS,
         );
         this.persistAlertAtKey(prAlertKey(repo, prNumber), alert);
         this.broadcastAlerts();
@@ -227,13 +227,13 @@ export class CIDashboardHub extends DurableObject<Env> {
         try {
           const fresh = existing.prNumber !== undefined
             ? await computeReleaseAlertForPr(
-                this.env.GITHUB_TOKEN, repo, existing.prNumber,
+                this.env, repo, existing.prNumber,
                 /* mergeSha */ null,
                 /* defaultBranch */ existing.tag.split("@")[0] ?? "main",
                 this.env.CI_STATUS,
               )
             : await recomputeAlert(
-                this.env.GITHUB_TOKEN, repo, existing.tag, this.env.CI_STATUS,
+                this.env, repo, existing.tag, this.env.CI_STATUS,
               );
           this.persistAlertAtKey(kvKey, fresh);
           changed = true;
@@ -503,11 +503,12 @@ export class CIDashboardHub extends DurableObject<Env> {
   // shipping (1) alone the bug recurred — the cache only cleared when an
   // operator manually purged it. (2)+(3) defend against that recurrence.
   private async fetchLiveIssueState(owner: string, name: string, n: number): Promise<string> {
+    const token = await tokenForOrg(this.env, owner);
     const init: RequestInit & { cache?: string } = {
       method: "GET",
       cache: "no-store",
       headers: {
-        Authorization: `Bearer ${this.env.GITHUB_TOKEN}`,
+        Authorization: `Bearer ${token}`,
         Accept: "application/vnd.github+json",
         "User-Agent": "ci-dashboard-mcp",
         "X-GitHub-Api-Version": "2022-11-28",

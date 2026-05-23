@@ -1,4 +1,5 @@
-import { githubApi, parseRepo, validateOrg } from "./github-api";
+import { githubApi, parseRepo, tokenForOrg } from "./github-api";
+import type { GitHubAppEnv } from "./github-app-auth";
 import { invalidateIssue } from "./release-cache";
 
 // POST /api/release-close-batch
@@ -17,7 +18,7 @@ const PAIR_RE = /^(.+):(\d+)$/;
 
 export async function handleReleaseCloseBatch(
   req: Request,
-  env: { GITHUB_TOKEN: string; CI_STATUS?: KVNamespace },
+  env: GitHubAppEnv,
   hub?: DurableObjectStub,
   ctx?: ExecutionContext,
 ): Promise<Response> {
@@ -52,10 +53,10 @@ export async function handleReleaseCloseBatch(
     return redirect("/releases");
   }
 
-  let owner: string, name: string;
+  let owner: string, name: string, token: string;
   try {
     ({ owner, repo: name } = parseRepo(repoParam));
-    validateOrg(owner);
+    token = await tokenForOrg(env, owner);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return new Response(`Bad repo: ${msg}`, { status: 400 });
@@ -72,12 +73,12 @@ export async function handleReleaseCloseBatch(
   const settled = await Promise.allSettled(
     ops.map(async ({ tag, issue }) => {
       await githubApi(
-        env.GITHUB_TOKEN, "POST",
+        token, "POST",
         `/repos/${owner}/${name}/issues/${issue}/comments`,
         { body: `Closed by release ${tag}` },
       );
       await githubApi(
-        env.GITHUB_TOKEN, "PATCH",
+        token, "PATCH",
         `/repos/${owner}/${name}/issues/${issue}`,
         { state: "closed", state_reason: "completed" },
       );
@@ -94,9 +95,11 @@ export async function handleReleaseCloseBatch(
 
   // Invalidate cached issue snapshots so the next /releases load reflects the
   // newly-closed state instead of the 60s-stale "open" row.
-  await Promise.all(
-    closed.map((n) => invalidateIssue(env.CI_STATUS, owner, name, n)),
-  );
+  if (env.CI_STATUS) {
+    await Promise.all(
+      closed.map((n) => invalidateIssue(env.CI_STATUS, owner, name, n)),
+    );
+  }
 
   // Kick Hub to recompute alert state for this repo when at least one close
   // succeeded. Same waitUntil pattern as release-close.ts so the redirect

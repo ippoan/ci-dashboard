@@ -1,8 +1,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { githubApi, parseRepo, validateOrg } from "../../github-api";
+import { githubApi, parseRepo, tokenForOrg } from "../../github-api";
+import type { GitHubAppEnv } from "../../github-app-auth";
 
-export function registerActionsTools(server: McpServer, token: string): void {
+export function registerActionsTools(server: McpServer, env: GitHubAppEnv): void {
   server.registerTool(
     "list_workflow_runs",
     {
@@ -16,7 +17,7 @@ export function registerActionsTools(server: McpServer, token: string): void {
     },
     async ({ repo, status, per_page }) => {
       const { owner, repo: name } = parseRepo(repo);
-      validateOrg(owner);
+      const token = await tokenForOrg(env, owner);
       const params: Record<string, string> = { per_page: String(per_page) };
       if (status) params.status = status;
 
@@ -52,7 +53,7 @@ export function registerActionsTools(server: McpServer, token: string): void {
     },
     async ({ repo, run_id }) => {
       const { owner, repo: name } = parseRepo(repo);
-      validateOrg(owner);
+      const token = await tokenForOrg(env, owner);
 
       const run = await githubApi<WorkflowRun>(
         token, "GET", `/repos/${owner}/${name}/actions/runs/${run_id}`,
@@ -90,7 +91,7 @@ export function registerActionsTools(server: McpServer, token: string): void {
     },
     async ({ repo, run_id }) => {
       const { owner, repo: name } = parseRepo(repo);
-      validateOrg(owner);
+      const token = await tokenForOrg(env, owner);
 
       const data = await githubApi<{ jobs: WorkflowJob[] }>(
         token, "GET", `/repos/${owner}/${name}/actions/runs/${run_id}/jobs`,
@@ -122,7 +123,7 @@ export function registerActionsTools(server: McpServer, token: string): void {
     },
     async ({ repo, run_id }) => {
       const { owner, repo: name } = parseRepo(repo);
-      validateOrg(owner);
+      const token = await tokenForOrg(env, owner);
       await githubApi(token, "POST", `/repos/${owner}/${name}/actions/runs/${run_id}/rerun`);
       return { content: [{ type: "text" as const, text: `Rerun triggered for run ${run_id}` }] };
     },
@@ -140,7 +141,7 @@ export function registerActionsTools(server: McpServer, token: string): void {
     },
     async ({ repo, run_id }) => {
       const { owner, repo: name } = parseRepo(repo);
-      validateOrg(owner);
+      const token = await tokenForOrg(env, owner);
       await githubApi(token, "POST", `/repos/${owner}/${name}/actions/runs/${run_id}/rerun-failed-jobs`);
       return { content: [{ type: "text" as const, text: `Rerun of failed jobs triggered for run ${run_id}` }] };
     },
@@ -158,7 +159,7 @@ export function registerActionsTools(server: McpServer, token: string): void {
     },
     async ({ repo, run_id }) => {
       const { owner, repo: name } = parseRepo(repo);
-      validateOrg(owner);
+      const token = await tokenForOrg(env, owner);
       await githubApi(token, "POST", `/repos/${owner}/${name}/actions/runs/${run_id}/cancel`);
       return { content: [{ type: "text" as const, text: `Cancelled run ${run_id}` }] };
     },

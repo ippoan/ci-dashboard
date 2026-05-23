@@ -1,13 +1,15 @@
-import { createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
+import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { describe, it, expect, vi } from "vitest";
 import worker from "../src/index";
 import type { Env } from "../src/index";
 
 function testEnv(): Env {
   return {
-    CI_STATUS: {} as unknown as KVNamespace,
+    CI_STATUS: env.CI_STATUS,
     WEBHOOK_SECRET: "test-secret",
-    GITHUB_TOKEN: "ghp_test_token",
+    GITHUB_APP_ID: "1",
+    GITHUB_APP_PRIVATE_KEY: "-----BEGIN PRIVATE KEY-----\nTEST\n-----END PRIVATE KEY-----",
+    GITHUB_APP_INSTALLATIONS: JSON.stringify({"ippoan":111,"ohishi-exp":222,"yhonda-ohishi":333}),
     CI_HUB: {} as unknown as DurableObjectNamespace,
   };
 }

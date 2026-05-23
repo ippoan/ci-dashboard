@@ -4,6 +4,7 @@ import {
   type OrgProject,
   type ProjectItemSummary,
 } from "./mcp/tools/projects";
+import type { GitHubAppEnv } from "./github-app-auth";
 import { renderTabs, TAB_STYLES } from "./nav-tabs";
 import { PWA_HEAD_TAGS, PWA_REGISTER_SCRIPT } from "./pwa";
 import { escapeHtml } from "./issues-page";
@@ -24,12 +25,10 @@ interface OrgSection {
   projects: ProjectWithItems[];
 }
 
-export async function handleProjectsPage(
-  env: { GITHUB_TOKEN: string },
-): Promise<Response> {
+export async function handleProjectsPage(env: GitHubAppEnv): Promise<Response> {
   let perOrg;
   try {
-    perOrg = await fetchOrgProjects(env.GITHUB_TOKEN, { orgs: PROJECT_ORGS });
+    perOrg = await fetchOrgProjects(env, { orgs: PROJECT_ORGS });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return new Response(renderError(msg), {
@@ -47,7 +46,7 @@ export async function handleProjectsPage(
   );
   const itemResults = await Promise.allSettled(
     flat.map(({ org, project }) =>
-      fetchProjectItems(env.GITHUB_TOKEN, org, project.number),
+      fetchProjectItems(env, org, project.number),
     ),
   );
 

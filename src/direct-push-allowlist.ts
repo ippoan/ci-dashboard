@@ -10,7 +10,8 @@
 // set so the rest of the page still renders — direct-push UI just silently
 // won't appear until the fetch recovers.
 
-import { githubApi, GitHubApiError } from "./github-api";
+import { githubApi, GitHubApiError, tokenForOrg } from "./github-api";
+import type { GitHubAppEnv } from "./github-app-auth";
 
 export const ALLOWLIST_REPO = "yhonda-ohishi/claude-skills";
 export const ALLOWLIST_PATH = "wt-direct-push/config/direct-push-ok.txt";
@@ -29,9 +30,10 @@ interface CachedAllowlist {
 
 // Returns the parsed allowlist as a Set so callers do O(1) membership checks.
 // `kv` is optional so unit tests can exercise the pure-fetch path without
-// stubbing a KV namespace; production passes `env.CI_STATUS`.
+// stubbing a KV namespace; production passes `env.CI_STATUS`. The token is
+// resolved against `yhonda-ohishi` (owner of ALLOWLIST_REPO).
 export async function loadDirectPushAllowlist(
-  token: string,
+  env: GitHubAppEnv,
   kv?: KVNamespace,
 ): Promise<Set<string>> {
   if (kv) {
@@ -41,6 +43,7 @@ export async function loadDirectPushAllowlist(
     }
   }
 
+  const token = await tokenForOrg(env, "yhonda-ohishi");
   const repos = await fetchAllowlistFromGitHub(token);
 
   if (kv && repos.length > 0) {

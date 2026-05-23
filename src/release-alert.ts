@@ -19,9 +19,10 @@
 
 import {
   parseRepo,
-  validateOrg,
+  tokenForOrg,
   GitHubApiError,
 } from "./github-api";
+import type { GitHubAppEnv } from "./github-app-auth";
 import {
   extractRefIssues,
   extractPrNumber,
@@ -117,13 +118,13 @@ export async function fetchIssuesByNumbers(
 // compute the alert payload, return null when no open issues are referenced
 // (banner suppressed).
 export async function computeReleaseAlert(
-  token: string,
+  env: GitHubAppEnv,
   repo: string,
   tagOverride?: string,
   kv?: KVNamespace,
 ): Promise<ReleaseAlert | null> {
   const { owner, repo: name } = parseRepo(repo);
-  validateOrg(owner);
+  const token = await tokenForOrg(env, owner);
 
   const tags = await cachedTags(token, kv, owner, name, 30);
   const tagNames = tags.map((t) => t.name);
@@ -169,12 +170,12 @@ export async function computeReleaseAlert(
 // are no open referenced issues left (banner should clear). Used by the
 // release-close path so a successful close immediately drops the banner.
 export async function recomputeAlert(
-  token: string,
+  env: GitHubAppEnv,
   repo: string,
   tag: string,
   kv?: KVNamespace,
 ): Promise<ReleaseAlert | null> {
-  return computeReleaseAlert(token, repo, tag, kv);
+  return computeReleaseAlert(env, repo, tag, kv);
 }
 
 // PR-merge variant of computeReleaseAlert for tagless repos. A merged PR is
@@ -186,7 +187,7 @@ export async function recomputeAlert(
 // `<defaultBranch>@pr-<n>` — the alert is still functional; the only loss is a
 // less-clickable label.
 export async function computeReleaseAlertForPr(
-  token: string,
+  env: GitHubAppEnv,
   repo: string,
   prNumber: number,
   mergeSha: string | null,
@@ -194,7 +195,7 @@ export async function computeReleaseAlertForPr(
   kv?: KVNamespace,
 ): Promise<ReleaseAlert | null> {
   const { owner, repo: name } = parseRepo(repo);
-  validateOrg(owner);
+  const token = await tokenForOrg(env, owner);
 
   const issueNumbers = new Set<number>();
 

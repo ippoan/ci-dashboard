@@ -1,8 +1,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { githubApi, parseRepo, validateOrg } from "../../github-api";
+import { githubApi, parseRepo, tokenForOrg } from "../../github-api";
+import type { GitHubAppEnv } from "../../github-app-auth";
 
-export function registerReleasesTools(server: McpServer, token: string): void {
+export function registerReleasesTools(server: McpServer, env: GitHubAppEnv): void {
   server.registerTool(
     "list_tags",
     {
@@ -15,7 +16,7 @@ export function registerReleasesTools(server: McpServer, token: string): void {
     },
     async ({ repo, per_page }) => {
       const { owner, repo: name } = parseRepo(repo);
-      validateOrg(owner);
+      const token = await tokenForOrg(env, owner);
 
       const tags = await githubApi<Tag[]>(
         token, "GET", `/repos/${owner}/${name}/tags`, undefined,
@@ -42,7 +43,7 @@ export function registerReleasesTools(server: McpServer, token: string): void {
     },
     async ({ repo }) => {
       const { owner, repo: name } = parseRepo(repo);
-      validateOrg(owner);
+      const token = await tokenForOrg(env, owner);
 
       const release = await githubApi<Release>(
         token, "GET", `/repos/${owner}/${name}/releases/latest`,
@@ -74,7 +75,7 @@ export function registerReleasesTools(server: McpServer, token: string): void {
     },
     async ({ repo }) => {
       const { owner, repo: name } = parseRepo(repo);
-      validateOrg(owner);
+      const token = await tokenForOrg(env, owner);
 
       await githubApi(
         token, "POST",

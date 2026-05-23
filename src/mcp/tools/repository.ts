@@ -1,8 +1,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { githubApi, parseRepo, validateOrg } from "../../github-api";
+import { githubApi, parseRepo, tokenForOrg } from "../../github-api";
+import type { GitHubAppEnv } from "../../github-app-auth";
 
-export function registerRepositoryTools(server: McpServer, token: string): void {
+export function registerRepositoryTools(server: McpServer, env: GitHubAppEnv): void {
   server.registerTool(
     "get_file_tree",
     {
@@ -16,7 +17,7 @@ export function registerRepositoryTools(server: McpServer, token: string): void 
     },
     async ({ repo, ref, path }) => {
       const { owner, repo: name } = parseRepo(repo);
-      validateOrg(owner);
+      const token = await tokenForOrg(env, owner);
 
       const data = await githubApi<GitTree>(
         token, "GET", `/repos/${owner}/${name}/git/trees/${ref}`, undefined,
@@ -61,7 +62,7 @@ export function registerRepositoryTools(server: McpServer, token: string): void 
     },
     async ({ repo, path, ref, start_line, end_line }) => {
       const { owner, repo: name } = parseRepo(repo);
-      validateOrg(owner);
+      const token = await tokenForOrg(env, owner);
 
       const params: Record<string, string> = {};
       if (ref) params.ref = ref;
@@ -129,7 +130,7 @@ export function registerRepositoryTools(server: McpServer, token: string): void 
     },
     async ({ repo, query, path, extension, per_page }) => {
       const { owner, repo: name } = parseRepo(repo);
-      validateOrg(owner);
+      const token = await tokenForOrg(env, owner);
 
       let q = `${query} repo:${owner}/${name}`;
       if (path) q += ` path:${path}`;
@@ -169,7 +170,7 @@ export function registerRepositoryTools(server: McpServer, token: string): void 
     },
     async ({ repo, symbol, kind, language, per_page }) => {
       const { owner, repo: name } = parseRepo(repo);
-      validateOrg(owner);
+      const token = await tokenForOrg(env, owner);
 
       const keyword = kind ? symbolKeyword(kind, language) : "";
       const quotedSymbol = keyword ? `"${keyword} ${symbol}"` : `"${symbol}"`;

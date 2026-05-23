@@ -7,7 +7,9 @@ function testEnv(): Env {
   return {
     CI_STATUS: env.CI_STATUS,
     WEBHOOK_SECRET: "test-secret",
-    GITHUB_TOKEN: "test-token",
+    GITHUB_APP_ID: "1",
+    GITHUB_APP_PRIVATE_KEY: "-----BEGIN PRIVATE KEY-----\nTEST\n-----END PRIVATE KEY-----",
+    GITHUB_APP_INSTALLATIONS: JSON.stringify({"ippoan":111,"ohishi-exp":222,"yhonda-ohishi":333}),
     CI_HUB: {
       idFromName: () => ({}),
       get: () => ({ fetch: async () => new Response("OK") }),

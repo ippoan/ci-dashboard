@@ -8,7 +8,9 @@ function testEnv(): Env {
   return {
     CI_STATUS: env.CI_STATUS,
     WEBHOOK_SECRET: "test-secret",
-    GITHUB_TOKEN: "test-token",
+    GITHUB_APP_ID: "1",
+    GITHUB_APP_PRIVATE_KEY: "-----BEGIN PRIVATE KEY-----\nTEST\n-----END PRIVATE KEY-----",
+    GITHUB_APP_INSTALLATIONS: JSON.stringify({"ippoan":111,"ohishi-exp":222,"yhonda-ohishi":333}),
     CI_HUB: { idFromName: () => ({}), get: () => ({ fetch: async () => new Response("OK") }) } as unknown as DurableObjectNamespace,
   };
 }
@@ -82,6 +84,11 @@ function stubFetch(opts: { withProjects?: boolean; withPrs?: boolean } = {}) {
       if (decoded.includes("repo:yhonda-ohishi/claude-skills")) {
         return Response.json({ total_count: 0, incomplete_results: false, items: [] });
       }
+      // Per-org fan-out: only `org:ippoan` returns the seeded PR (it lives in
+      // ippoan/rust-alc-api). Other orgs return empty.
+      if (!decoded.includes("org:ippoan")) {
+        return Response.json({ total_count: 0, incomplete_results: false, items: [] });
+      }
       return Response.json({
         total_count: 1,
         incomplete_results: false,
@@ -127,51 +134,73 @@ function stubFetch(opts: { withProjects?: boolean; withPrs?: boolean } = {}) {
         ],
       });
     }
+    // GitHub App per-org fan-out: each cross-org search is issued separately
+    // with its own installation token. Match on the `org:` qualifier so the
+    // stub returns ONLY that org's rows (mirrors how real GitHub Search
+    // behaves with a per-org-scoped token: cross-org results aren't visible).
+    const ippoanItems = [
+      {
+        number: 7,
+        title: "<script>alert('xss')</script> & ok",
+        state: "open",
+        user: { login: "yhonda-ohishi" },
+        labels: [{ name: "bug" }, { name: "needs-triage" }],
+        assignees: [],
+        comments: 0,
+        created_at: "2026-05-10T00:00:00Z",
+        updated_at: "2026-05-10T03:00:00Z",
+        html_url: "https://github.com/ippoan/rust-alc-api/issues/7",
+        repository_url: "https://api.github.com/repos/ippoan/rust-alc-api",
+      },
+      {
+        number: 99,
+        title: "This is a PR, must be excluded",
+        state: "open",
+        user: { login: "yhonda-ohishi" },
+        labels: [],
+        assignees: [],
+        comments: 0,
+        created_at: "2026-05-08T00:00:00Z",
+        updated_at: "2026-05-08T00:00:00Z",
+        html_url: "https://github.com/ippoan/rust-alc-api/pull/99",
+        repository_url: "https://api.github.com/repos/ippoan/rust-alc-api",
+        pull_request: { url: "https://api.github.com/..." },
+      },
+    ];
+    const ohishiItems = [
+      {
+        number: 3,
+        title: "Add feature X",
+        state: "open",
+        user: { login: "yhonda-ohishi" },
+        labels: [],
+        assignees: [{ login: "yhonda-ohishi" }],
+        comments: 2,
+        created_at: "2026-05-09T00:00:00Z",
+        updated_at: "2026-05-09T05:00:00Z",
+        html_url: "https://github.com/ohishi-exp/daiun-salary/issues/3",
+        repository_url: "https://api.github.com/repos/ohishi-exp/daiun-salary",
+      },
+    ];
+    if (decoded.includes("org:ippoan")) {
+      return Response.json({
+        total_count: ippoanItems.length,
+        incomplete_results: false,
+        items: ippoanItems,
+      });
+    }
+    if (decoded.includes("org:ohishi-exp")) {
+      return Response.json({
+        total_count: ohishiItems.length,
+        incomplete_results: false,
+        items: ohishiItems,
+      });
+    }
+    // Fallback (no org qualifier — preserves callers that hit the bare URL).
     return Response.json({
-      total_count: 3,
+      total_count: ippoanItems.length + ohishiItems.length,
       incomplete_results: false,
-      items: [
-        {
-          number: 7,
-          title: "<script>alert('xss')</script> & ok",
-          state: "open",
-          user: { login: "yhonda-ohishi" },
-          labels: [{ name: "bug" }, { name: "needs-triage" }],
-          assignees: [],
-          comments: 0,
-          created_at: "2026-05-10T00:00:00Z",
-          updated_at: "2026-05-10T03:00:00Z",
-          html_url: "https://github.com/ippoan/rust-alc-api/issues/7",
-          repository_url: "https://api.github.com/repos/ippoan/rust-alc-api",
-        },
-        {
-          number: 3,
-          title: "Add feature X",
-          state: "open",
-          user: { login: "yhonda-ohishi" },
-          labels: [],
-          assignees: [{ login: "yhonda-ohishi" }],
-          comments: 2,
-          created_at: "2026-05-09T00:00:00Z",
-          updated_at: "2026-05-09T05:00:00Z",
-          html_url: "https://github.com/ohishi-exp/daiun-salary/issues/3",
-          repository_url: "https://api.github.com/repos/ohishi-exp/daiun-salary",
-        },
-        {
-          number: 99,
-          title: "This is a PR, must be excluded",
-          state: "open",
-          user: { login: "yhonda-ohishi" },
-          labels: [],
-          assignees: [],
-          comments: 0,
-          created_at: "2026-05-08T00:00:00Z",
-          updated_at: "2026-05-08T00:00:00Z",
-          html_url: "https://github.com/ippoan/rust-alc-api/pull/99",
-          repository_url: "https://api.github.com/repos/ippoan/rust-alc-api",
-          pull_request: { url: "https://api.github.com/..." },
-        },
-      ],
+      items: [...ippoanItems, ...ohishiItems],
     });
   });
 }
@@ -241,32 +270,40 @@ describe("GET /issues", () => {
     expect(html).toContain("&amp;");
   });
 
-  it("queries GitHub Search twice: main orgs and yhonda-ohishi/claude-* repo filter", async () => {
+  it("fans out one /search/issues call per org for both is:issue and is:pr (App auth per-org token requirement)", async () => {
     const spy = stubSearchIssues();
     const req = new Request("http://localhost/issues");
     const ctx = createExecutionContext();
     await worker.fetch(req, testEnv(), ctx);
     await waitOnExecutionContext(ctx);
 
-    // `/search/issues` is hit four times: 2 for `is:issue` (main orgs +
-    // yhonda repo: filter) + 2 for `is:pr` (related-PR map, same shape).
-    // The extra `/graphql` calls for the Projects v2 map are ignored here.
+    // GitHub App installation tokens are scoped per-org so `org:ippoan org:ohishi-exp`
+    // cannot be served by a single search call. After #112 (PAT → App migration),
+    // each cross-org search splits into one call per org. So /search/issues is hit:
+    //   is:issue × 3 (ippoan, ohishi-exp, yhonda-ohishi repo: filter)
+    //   is:pr    × 3 (same shape, related-PR map fan-out)
+    // = 6 total. /graphql calls for the Projects v2 map are ignored here.
     const searchCalls = spy.mock.calls.filter((c) =>
       String(c[0]).includes("/search/issues"));
-    expect(searchCalls).toHaveLength(4);
+    expect(searchCalls).toHaveLength(6);
     const urls = searchCalls.map((c) => c[0] as string);
     const decoded = urls.map((u) => decodeURIComponent(u));
-    const issueDecoded = decoded.filter((d) => d.includes("is:issue"));
-    expect(issueDecoded).toHaveLength(2);
+    const issueDecoded = decoded.filter((d) => d.includes("is:issue") && !d.includes("is:pr"));
+    expect(issueDecoded).toHaveLength(3);
 
-    // Main call: ippoan + ohishi-exp orgs without a repo: qualifier.
-    const main = issueDecoded.find((d) => d.includes("org:ippoan"));
-    expect(main).toBeDefined();
-    expect(main!).toContain("is:issue");
-    expect(main!).toContain("state:open");
-    expect(main!).toContain("org:ippoan");
-    expect(main!).toContain("org:ohishi-exp");
-    expect(main!).not.toContain("repo:yhonda-ohishi/claude-");
+    // Each main org gets its own search with a single `org:` qualifier.
+    const ippoan = issueDecoded.find((d) => d.includes("org:ippoan"));
+    expect(ippoan).toBeDefined();
+    expect(ippoan!).toContain("is:issue");
+    expect(ippoan!).toContain("state:open");
+    expect(ippoan!).toContain("org:ippoan");
+    expect(ippoan!).not.toContain("org:ohishi-exp");
+    expect(ippoan!).not.toContain("repo:yhonda-ohishi/claude-");
+
+    const ohishi = issueDecoded.find((d) => d.includes("org:ohishi-exp"));
+    expect(ohishi).toBeDefined();
+    expect(ohishi!).toContain("org:ohishi-exp");
+    expect(ohishi!).not.toContain("org:ippoan");
 
     // yhonda-ohishi call: repo: qualifiers (OR) for the two active claude
     // tooling repos only — and CRUCIALLY no `org:yhonda-ohishi`. GitHub Search
@@ -282,10 +319,11 @@ describe("GET /issues", () => {
     expect(yhonda!).toContain("repo:yhonda-ohishi/claude-hooks");
     expect(yhonda!).not.toContain("org:yhonda-ohishi");
 
-    // Both calls must exclude archived repos so old projects (e.g.
+    // Every call must exclude archived repos so old projects (e.g.
     // ippoan/cf-secrets-mcp) don't leak open issues into the dashboard.
     // Regression guard for issue #99.
-    expect(main!).toContain("archived:false");
+    expect(ippoan!).toContain("archived:false");
+    expect(ohishi!).toContain("archived:false");
     expect(yhonda!).toContain("archived:false");
 
     for (const u of urls) expect(u).toContain("per_page=100");

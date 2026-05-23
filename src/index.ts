@@ -22,8 +22,13 @@ export { CIDashboardHub } from "./hub";
 export interface Env {
   CI_STATUS: KVNamespace;
   WEBHOOK_SECRET: string;
-  GITHUB_TOKEN: string;
   CI_HUB: DurableObjectNamespace;
+  // GitHub App credentials. Replaces the classic-PAT `GITHUB_TOKEN` secret;
+  // each Worker request mints (or reads from KV cache) per-org installation
+  // tokens via src/github-app-auth.ts. Refs #112.
+  GITHUB_APP_ID: string;
+  GITHUB_APP_PRIVATE_KEY: string;
+  GITHUB_APP_INSTALLATIONS: string;
   // Comma-separated `owner/name` list of repos that don't cut tags. PR merges
   // into the default branch are treated as releases for these. See
   // wrangler.jsonc and src/tagless-repos.ts.
@@ -134,6 +139,6 @@ app.get("/sw.js", () => handlePwaServiceWorker());
 app.get("/icons/:file", (c) => handlePwaIcon("/icons/" + c.req.param("file")));
 
 // MCP endpoint (Streamable HTTP)
-app.all("/mcp", (c) => handleMcpRequest(c.req.raw, c.env.GITHUB_TOKEN));
+app.all("/mcp", (c) => handleMcpRequest(c.req.raw, c.env));
 
 export default app;

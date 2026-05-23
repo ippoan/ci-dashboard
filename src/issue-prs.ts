@@ -1,4 +1,5 @@
 import { githubApi, validateOrg } from "./github-api";
+import { getInstallationToken, type GitHubAppEnv } from "./github-app-auth";
 
 /** Lightweight PR descriptor used by the issues page to render "related PR"
  *  chips. Body is intentionally not retained — it's only used to extract
@@ -57,16 +58,25 @@ interface SearchPrsResponse {
   items: SearchPrItem[];
 }
 
-/** Single GitHub search call for open PRs. Pass `orgs` for `org:` qualifiers
- *  or `repos` for `repo:` qualifiers (mutually exclusive — GitHub silently
- *  drops `repo:` when combined with `org:`, mirroring fetchOrgIssues). */
+/** Single GitHub search call for open PRs. Pass either `orgs` (for `org:`
+ *  qualifiers) or `repos` (for `repo:` qualifiers) — mutually exclusive.
+ *  Either way the call is run with a single installation token, so the
+ *  caller must guarantee that all orgs/repos belong to one owner (typically
+ *  the same App installation). Cross-org fan-out lives in
+ *  `fetchAllOpenPrsByIssue`. */
 export async function fetchOpenPrsByIssue(
-  token: string,
+  env: GitHubAppEnv,
   params: { orgs?: string[]; repos?: string[]; per_page?: number },
 ): Promise<Map<string, IssuePrRef[]>> {
   const { orgs = [], repos = [], per_page = 100 } = params;
   for (const o of orgs) validateOrg(o);
   for (const r of repos) validateOrg(r.split("/")[0]!);
+
+  // Resolve a single owner for the installation token. `repos` win because
+  // we know the explicit owner; otherwise `orgs[0]` (callers either pass one
+  // org per call after fan-out, or a same-owner repos list).
+  const owner = repos.length > 0 ? repos[0]!.split("/")[0]! : orgs[0]!;
+  const token = await getInstallationToken(env, owner);
 
   const parts: string[] = ["is:pr", "state:open", "archived:false"];
   if (repos.length > 0) {
@@ -108,21 +118,28 @@ export async function fetchOpenPrsByIssue(
  *  issues page uses (main orgs + yhonda `repo:` filter). Mirrors the parallel
  *  pattern in issues-page.ts so a partial failure aborts the whole call. */
 export async function fetchAllOpenPrsByIssue(
-  token: string,
+  env: GitHubAppEnv,
   mainOrgs: string[],
   yhondaRepos: string[],
 ): Promise<Map<string, IssuePrRef[]>> {
-  const [main, yhonda] = await Promise.all([
-    fetchOpenPrsByIssue(token, { orgs: mainOrgs }),
-    yhondaRepos.length > 0
-      ? fetchOpenPrsByIssue(token, { repos: yhondaRepos })
-      : Promise.resolve(new Map<string, IssuePrRef[]>()),
-  ]);
-  const merged = new Map<string, IssuePrRef[]>(main);
-  for (const [k, prs] of yhonda) {
-    const existing = merged.get(k);
-    if (existing) existing.push(...prs);
-    else merged.set(k, prs);
+  // Per-org fan-out: GitHub App installation tokens are per-org so a single
+  // `org:ippoan org:ohishi-exp` search can't be served by one token. Mirror
+  // the same fan-out used by fetchOrgIssues — one search call per org.
+  const tasks: Array<Promise<Map<string, IssuePrRef[]>>> = mainOrgs.map((org) =>
+    fetchOpenPrsByIssue(env, { orgs: [org] }),
+  );
+  if (yhondaRepos.length > 0) {
+    tasks.push(fetchOpenPrsByIssue(env, { repos: yhondaRepos }));
+  }
+  const results = await Promise.all(tasks);
+
+  const merged = new Map<string, IssuePrRef[]>();
+  for (const m of results) {
+    for (const [k, prs] of m) {
+      const existing = merged.get(k);
+      if (existing) existing.push(...prs);
+      else merged.set(k, prs.slice());
+    }
   }
   // Sort each list by recency so the most-recently-updated PR renders first.
   for (const prs of merged.values()) {

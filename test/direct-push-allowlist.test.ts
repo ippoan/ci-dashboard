@@ -1,3 +1,4 @@
+import { appTestEnv } from "./_helpers/app-env";
 import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   parseAllowlist,
@@ -75,7 +76,7 @@ describe("loadDirectPushAllowlist", () => {
       "yhonda-ohishi/claude-hooks",
     ]);
     const kv = memoryKv();
-    const set = await loadDirectPushAllowlist("token", kv);
+    const set = await loadDirectPushAllowlist(appTestEnv(), kv);
     expect([...set].sort()).toEqual([
       "ippoan/ci-workflows",
       "yhonda-ohishi/claude-hooks",
@@ -96,7 +97,7 @@ describe("loadDirectPushAllowlist", () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
       throw new Error("should not be called");
     });
-    const set = await loadDirectPushAllowlist("token", kv);
+    const set = await loadDirectPushAllowlist(appTestEnv(), kv);
     expect([...set]).toEqual(["cached/repo"]);
     expect(fetchSpy).not.toHaveBeenCalled();
   });
@@ -106,7 +107,7 @@ describe("loadDirectPushAllowlist", () => {
       new Response("Not Found", { status: 404 }),
     );
     const kv = memoryKv();
-    const set = await loadDirectPushAllowlist("token", kv);
+    const set = await loadDirectPushAllowlist(appTestEnv(), kv);
     expect(set.size).toBe(0);
     // Empty fetches must NOT poison the cache; the next load gets a real
     // chance against GitHub.
@@ -116,7 +117,7 @@ describe("loadDirectPushAllowlist", () => {
 
   it("works without a KV namespace (pure fetch fallback)", async () => {
     stubContentsResponse(["a/b"]);
-    const set = await loadDirectPushAllowlist("token");
+    const set = await loadDirectPushAllowlist(appTestEnv());
     expect([...set]).toEqual(["a/b"]);
   });
 });

@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { githubGraphQL, parseRepo, validateOrg, GitHubApiError } from "../../github-api";
+import { githubGraphQL, parseRepo, tokenForOrg, validateOrg, GitHubApiError } from "../../github-api";
+import { getInstallationToken, type GitHubAppEnv } from "../../github-app-auth";
 
 // --------------------------------------------------------------------------
 // GitHub Projects v2 tooling.
@@ -157,12 +158,13 @@ export interface OrgProjectsResult {
  * `validateOrg` is enforced for every org before any network call.
  */
 export async function fetchOrgProjects(
-  token: string,
+  env: GitHubAppEnv,
   params: { orgs: string[]; first?: number; include_closed?: boolean },
 ): Promise<OrgProjectsResult[]> {
   const { orgs, first = 50, include_closed = false } = params;
   for (const o of orgs) validateOrg(o);
   return Promise.all(orgs.map(async (org) => {
+    const token = await getInstallationToken(env, org);
     const data = await githubGraphQL<{
       repositoryOwner: {
         projectsV2?: { nodes: OrgProject[] };
@@ -209,16 +211,17 @@ export interface ProjectRef {
  * each well under 1 point of the 5000/h rate-limit budget.
  */
 export async function fetchProjectIssueMap(
-  token: string,
+  env: GitHubAppEnv,
   params: { orgs: string[]; first?: number },
 ): Promise<Map<string, ProjectRef[]>> {
   const { orgs, first = 100 } = params;
-  const orgsProjects = await fetchOrgProjects(token, { orgs, include_closed: false });
+  const orgsProjects = await fetchOrgProjects(env, { orgs, include_closed: false });
 
   const map = new Map<string, ProjectRef[]>();
   await Promise.all(
     orgsProjects.flatMap(({ org, projects }) =>
       projects.map(async (p) => {
+        const token = await getInstallationToken(env, org);
         const data = await githubGraphQL<{
           node: {
             items: { nodes: Array<{
@@ -287,12 +290,12 @@ export interface ProjectItemSummary {
  * same surface as the MCP tool.
  */
 export async function fetchProjectItems(
-  token: string,
+  env: GitHubAppEnv,
   org: string,
   number: number,
   first = 50,
 ): Promise<ProjectItemSummary[]> {
-  validateOrg(org);
+  const token = await tokenForOrg(env, org);
   const data = await githubGraphQL<{
     repositoryOwner: { projectV2?: { items: { nodes: ProjectItemNode[] } } | null } | null;
   }>(
@@ -345,7 +348,7 @@ export async function fetchProjectItems(
   return nodes.map(formatItem);
 }
 
-export function registerProjectsTools(server: McpServer, token: string): void {
+export function registerProjectsTools(server: McpServer, env: GitHubAppEnv): void {
   // --------------------------------------------------------------------
   // Read tools
   // --------------------------------------------------------------------
@@ -370,7 +373,7 @@ export function registerProjectsTools(server: McpServer, token: string): void {
       annotations: { readOnlyHint: true },
     },
     async ({ orgs, first, include_closed }) => {
-      const perOrg = await fetchOrgProjects(token, { orgs, first, include_closed });
+      const perOrg = await fetchOrgProjects(env, { orgs, first, include_closed });
       // Tool shape stays the same (number/title/url/closed/shortDescription)
       // — the `id` is internal-only and dropped here.
       const result = perOrg.map(({ org, projects }) => ({
@@ -403,7 +406,7 @@ export function registerProjectsTools(server: McpServer, token: string): void {
       annotations: { readOnlyHint: true },
     },
     async ({ org, number }) => {
-      validateOrg(org);
+      const token = await tokenForOrg(env, org);
       // Named fragment on `ProjectV2Owner` so the big field-list block only
       // lives once and the inline-fragment spread covers both User and
       // Organization owners.
@@ -473,7 +476,8 @@ export function registerProjectsTools(server: McpServer, token: string): void {
       annotations: { readOnlyHint: true },
     },
     async ({ org, number, first }) => {
-      const result = await fetchProjectItems(token, org, number, first);
+      validateOrg(org);
+      const result = await fetchProjectItems(env, org, number, first);
       return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
     },
   );
@@ -501,8 +505,13 @@ export function registerProjectsTools(server: McpServer, token: string): void {
       annotations: { destructiveHint: true },
     },
     async ({ org, project_number, repo, issue_number }) => {
-      validateOrg(org);
+      const token = await tokenForOrg(env, org);
       const { owner, repo: name } = parseRepo(repo);
+      // The issue/PR may live in a different org from the project — but
+      // GitHub App installation tokens are per-org. We use the project
+      // owner's token here: the `contentId` resolution only needs the
+      // issue's *node id*, which Issues GraphQL exposes to any installation
+      // that can see the repo (public repos are visible to all our installs).
       validateOrg(owner);
       const [projectId, contentId] = await Promise.all([
         resolveProjectId(token, org, project_number),
@@ -545,6 +554,7 @@ export function registerProjectsTools(server: McpServer, token: string): void {
       annotations: { destructiveHint: true },
     },
     async ({ org, project_number, item_id }) => {
+      const token = await tokenForOrg(env, org);
       const projectId = await resolveProjectId(token, org, project_number);
       const data = await githubGraphQL<{
         deleteProjectV2Item: { deletedItemId: string };
@@ -585,6 +595,7 @@ export function registerProjectsTools(server: McpServer, token: string): void {
       annotations: { destructiveHint: true },
     },
     async ({ org, project_number, item_id, field_name, value }) => {
+      const token = await tokenForOrg(env, org);
       const projectId = await resolveProjectId(token, org, project_number);
       const fields = await getProjectFields(token, projectId);
       const field = fields.find((f) => f.name === field_name);
@@ -712,6 +723,7 @@ export function registerProjectsTools(server: McpServer, token: string): void {
       annotations: { destructiveHint: true },
     },
     async ({ org, project_number, name, data_type, single_select_options }) => {
+      const token = await tokenForOrg(env, org);
       const projectId = await resolveProjectId(token, org, project_number);
 
       const dataTypeMap = {
@@ -780,7 +792,7 @@ export function registerProjectsTools(server: McpServer, token: string): void {
       annotations: { destructiveHint: true },
     },
     async ({ org, title, short_description }) => {
-      validateOrg(org);
+      const token = await tokenForOrg(env, org);
 
       // Step 1: resolve the owner's GraphQL node ID (needed as ownerId).
       // `repositoryOwner` handles both User and Organization logins.
