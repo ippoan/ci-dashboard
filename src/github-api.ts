@@ -4,6 +4,16 @@ const GITHUB_API = "https://api.github.com";
 const ALLOWED_ORGS = ["ippoan", "ohishi-exp", "yhonda-ohishi"];
 const DEFAULT_ORG = "ippoan";
 
+// auth-worker MCP OAuth Provider origin. Defined here (not in index.ts) to
+// avoid a circular import — many src/*.ts modules pull this constant via
+// tokenForOrg() and indirectly via getGitHubToken default. `index.ts` also
+// re-imports from here for OAUTH_OPTS in /oauth/login + /oauth/callback.
+//
+// Staging worker (`auth-staging.ippoan.org`) で固定。top-level prod
+// (`auth.ippoan.org`) は `MCP_OAUTH_KV` を持たず /mcp/* 系が 503 になる
+// (ippoan/auth-worker wrangler.toml 参照、Refs #118)。
+export const AUTH_WORKER_ORIGIN = "https://auth-staging.ippoan.org";
+
 export function parseRepo(repo: string): { owner: string; repo: string } {
   if (repo.includes("/")) {
     const [owner, name] = repo.split("/", 2);
@@ -25,7 +35,7 @@ export function validateOrg(owner: string): void {
  *  code path. */
 export async function tokenForOrg(env: AuthClientWorkerEnv, owner: string): Promise<string> {
   validateOrg(owner);
-  return getGitHubToken(env);
+  return getGitHubToken(env, { authWorkerOrigin: AUTH_WORKER_ORIGIN });
 }
 
 export class GitHubApiError extends Error {

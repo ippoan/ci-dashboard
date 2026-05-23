@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { githubApi, parseRepo, tokenForOrg, validateOrg } from "../../github-api";
+import { githubApi, parseRepo, tokenForOrg, validateOrg, AUTH_WORKER_ORIGIN } from "../../github-api";
 import { getGitHubToken, type AuthClientWorkerEnv } from "@ippoan/auth-client-worker";
 
 /** Build the PATCH body for `update_issue` from optional fields. Strips
@@ -437,7 +437,7 @@ export async function fetchOrgIssues(
   if (query) parts.push(query);
   const q = parts.join(" ");
 
-  const token = await getGitHubToken(env);
+  const token = await getGitHubToken(env, { authWorkerOrigin: AUTH_WORKER_ORIGIN });
   const data = await githubApi<SearchIssuesResponse>(
     token, "GET", "/search/issues", undefined,
     { q, per_page: String(per_page) },

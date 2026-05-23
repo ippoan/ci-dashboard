@@ -5,6 +5,7 @@ import {
   handleOAuthCallback,
   type AuthClientWorkerEnv,
 } from "@ippoan/auth-client-worker";
+import { AUTH_WORKER_ORIGIN } from "./github-api";
 import { handleWebhook } from "./webhook";
 import { handleDashboard } from "./dashboard";
 import { handleIssuesPage } from "./issues-page";
@@ -38,13 +39,11 @@ export interface Env extends AuthClientWorkerEnv {
   TAGLESS_REPOS?: string;
 }
 
-// OAuth flow config — shared between /oauth/login and /oauth/callback.
-// `authWorkerOrigin` は staging worker を指す。`auth.ippoan.org` (top-level prod)
-// は `MCP_OAUTH_KV` バインドを持たず `/mcp/register` が 503 になる仕様
-// (ippoan/auth-worker の wrangler.toml top-level vs `[env.staging]` 参照)。
-// ci-dashboard 自身も staging-as-prod 運用なので staging 側に揃える。
+// OAuth flow config — shared between /oauth/login, /oauth/callback, and the
+// runtime `tokenForOrg()` -> `getGitHubToken()` calls. `AUTH_WORKER_ORIGIN`
+// lives in github-api.ts to avoid a circular import.
 const OAUTH_OPTS = {
-  authWorkerOrigin: "https://auth-staging.ippoan.org",
+  authWorkerOrigin: AUTH_WORKER_ORIGIN,
   redirectUri: "https://ci-dashboard.ippoan.org/oauth/callback",
   scope: "mcp.write mcp.workflow mcp.project",
   clientName: "ci-dashboard",
