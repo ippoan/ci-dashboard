@@ -17,6 +17,44 @@ const YHONDA_REPOS = ["yhonda-ohishi/claude-skills", "yhonda-ohishi/claude-hooks
 // board, even though only a subset of their repos surface as issues here.
 const PROJECT_ORGS = ["ippoan", "ohishi-exp", "yhonda-ohishi"];
 
+// Repos pre-attached when launching a Claude Code on Web session from an
+// issue row's 🚀 button. Mirrors the GitHub MCP scope a typical web session
+// runs with (cross-repo tasks routinely need consumers / shared hooks beyond
+// the issue's own repo — see open-multirepo skill "Default repo set").
+// Update in sync with the session install template if the scope changes.
+export const CLAUDE_CODE_LAUNCH_REPOS = [
+  "ippoan/auth-worker",
+  "ippoan/mcp-relay-rs",
+  "ippoan/ref-files-worker",
+  "ippoan/cc-relay",
+  "ippoan/ci-workflows",
+  "ippoan/claude-md",
+  "ippoan/ci-dashboard",
+  "ippoan/secrets-inventory",
+  "ippoan/secrets-inventory-gcp",
+  "yhonda-ohishi/claude-skills",
+  "yhonda-ohishi/claude-hooks",
+];
+
+// Build a claude.ai/code launch URL pre-attached with the standard repo set
+// and a minimal `<owner>/<repo>#<N> を read して処理` prompt. Spec lives in
+// the issue body — the prompt only carries the ref (open-multirepo "prompt
+// body MUST stay minimal" rule).
+export function buildClaudeCodeLaunchUrl(repo: string, issueNumber: number): string {
+  const prompt = `${repo}#${issueNumber} を read して処理`;
+  // encodeURIComponent leaves `!*'()` per RFC3986. They're harmless inside
+  // an HTML href attribute, but encoding them keeps the URL safe if it's
+  // ever copy-pasted into Markdown (where `)` would terminate a link).
+  const encoded = encodeURIComponent(prompt)
+    .replace(/!/g, "%21")
+    .replace(/\*/g, "%2A")
+    .replace(/'/g, "%27")
+    .replace(/\(/g, "%28")
+    .replace(/\)/g, "%29");
+  // claude.ai/code accepts raw `,` between repos — do NOT URL-encode commas.
+  return `https://claude.ai/code?repositories=${CLAUDE_CODE_LAUNCH_REPOS.join(",")}&prompt=${encoded}`;
+}
+
 // KV cache for the cross-org Project v2 → issue map. GraphQL fan-out is
 // expensive (one call per open project × per org) and its 5000 points/h budget
 // is easy to exhaust when the dashboard's MCP tools share the same token. A
@@ -259,6 +297,18 @@ function renderHtml(
       font-variant-numeric: tabular-nums;
       white-space: nowrap;
     }
+    td.launch { width: 44px; text-align: center; }
+    .cc-launch {
+      display: inline-block;
+      text-decoration: none;
+      font-size: 15px;
+      line-height: 1;
+      padding: 4px 6px;
+      border-radius: 6px;
+      opacity: 0.55;
+      transition: opacity 0.15s, background 0.15s;
+    }
+    .cc-launch:hover { opacity: 1; background: #1f6feb33; }
     .labels { margin-top: 4px; }
     .label {
       display: inline-block;
@@ -321,7 +371,7 @@ function renderProjectSection(
   return `<section class="projects">
   <h2>📋 Project 付き<span class="count">(${items.length})</span></h2>
   <table>
-    <thead><tr><th>#</th><th>Repo</th><th>Title</th><th>Author</th><th>Updated</th></tr></thead>
+    <thead><tr><th>#</th><th>Repo</th><th>Title</th><th>Author</th><th>Updated</th><th></th></tr></thead>
     <tbody>${rows}</tbody>
   </table>
 </section>`;
@@ -341,6 +391,7 @@ function renderProjectRow(i: OrgIssue, projects: ReadonlyArray<ProjectRef>): str
     <td class="title"><a href="${escapeHtml(i.url)}" target="_blank" rel="noopener">${escapeHtml(i.title)}</a><div class="labels">${chips}</div>${labelChips}</td>
     <td class="author">@${escapeHtml(i.author)}</td>
     <td class="updated">${escapeHtml(i.updated_at.slice(0, 10))}</td>
+    ${renderLaunchCell(i)}
   </tr>`;
 }
 
@@ -350,7 +401,7 @@ function renderRepoSection(repo: string, items: OrgIssue[]): string {
   return `<section class="repo">
   <h2><a href="${escapeHtml(repoUrl)}" target="_blank" rel="noopener">${escapeHtml(repo)}</a><span class="count">(${items.length})</span></h2>
   <table>
-    <thead><tr><th>#</th><th>Title</th><th>Author</th><th>Updated</th></tr></thead>
+    <thead><tr><th>#</th><th>Title</th><th>Author</th><th>Updated</th><th></th></tr></thead>
     <tbody>${rows}</tbody>
   </table>
 </section>`;
@@ -366,7 +417,13 @@ function renderRow(i: OrgIssue): string {
     <td class="title"><a href="${escapeHtml(i.url)}" target="_blank" rel="noopener">${escapeHtml(i.title)}</a>${labelChips}</td>
     <td class="author">@${escapeHtml(i.author)}</td>
     <td class="updated">${escapeHtml(i.updated_at.slice(0, 10))}</td>
+    ${renderLaunchCell(i)}
   </tr>`;
+}
+
+function renderLaunchCell(i: OrgIssue): string {
+  const url = buildClaudeCodeLaunchUrl(i.repo, i.number);
+  return `<td class="launch"><a class="cc-launch" href="${escapeHtml(url)}" target="_blank" rel="noopener" title="Claude Code で起動 (${escapeHtml(i.repo)}#${i.number})">🚀</a></td>`;
 }
 
 function renderError(msg: string): string {

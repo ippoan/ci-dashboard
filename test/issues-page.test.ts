@@ -2,7 +2,7 @@ import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import worker from "../src/index";
 import type { Env } from "../src/index";
-import { escapeHtml } from "../src/issues-page";
+import { escapeHtml, buildClaudeCodeLaunchUrl, CLAUDE_CODE_LAUNCH_REPOS } from "../src/issues-page";
 
 function testEnv(): Env {
   return {
@@ -409,6 +409,81 @@ describe("GET /issues — Project section", () => {
     expect(sec).toContain("Board B");
     const chipMatches = sec.match(/project-chip/g) ?? [];
     expect(chipMatches.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe("buildClaudeCodeLaunchUrl()", () => {
+  it("returns claude.ai/code URL pre-attached with the standard repo set and an issue-ref prompt", () => {
+    const url = buildClaudeCodeLaunchUrl("ippoan/auth-worker", 130);
+    expect(url.startsWith("https://claude.ai/code?")).toBe(true);
+    // repositories= must be raw comma-separated (claude.ai/code accepts `,`)
+    expect(url).toContain(`repositories=${CLAUDE_CODE_LAUNCH_REPOS.join(",")}`);
+    // prompt is URL-encoded; decode and verify it references the issue.
+    const params = new URL(url).searchParams;
+    expect(params.get("prompt")).toBe("ippoan/auth-worker#130 を read して処理");
+  });
+
+  it("encodes `()'!*` so the URL is safe in Markdown link syntax", () => {
+    // We rely on `encodeURIComponent` for most chars; the helper adds an
+    // extra pass for `!*'()` which encodeURIComponent leaves untouched.
+    // Use a number — parens come from the prompt's static text, not the
+    // arguments, so we verify by injecting via the repo string.
+    const url = buildClaudeCodeLaunchUrl("ippoan/foo(bar)", 1);
+    expect(url).not.toMatch(/[()'!*]/);
+    expect(url).toContain("foo%28bar%29");
+  });
+
+  it("preserves commas between repositories (not URL-encoded)", () => {
+    const url = buildClaudeCodeLaunchUrl("ippoan/ci-dashboard", 42);
+    const reposPart = url.split("repositories=")[1]!.split("&")[0]!;
+    expect(reposPart.includes(",")).toBe(true);
+    expect(reposPart).not.toContain("%2C");
+  });
+});
+
+describe("GET /issues — Claude Code launch button", () => {
+  beforeEach(async () => {
+    await env.CI_STATUS.delete("issues-page:project-map");
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it("renders a 🚀 launch link per issue row pointing at claude.ai/code", async () => {
+    stubFetch();
+    const req = new Request("http://localhost/issues");
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(req, testEnv(), ctx);
+    await waitOnExecutionContext(ctx);
+
+    const html = await res.text();
+    // Each rendered issue gets one cc-launch anchor. With the default stub
+    // we have 3 issues total (#7, #3, and the claude-skills #1), all in
+    // per-repo sections (no project map seeded).
+    const launchAnchors = html.match(/<a class="cc-launch"/g) ?? [];
+    expect(launchAnchors.length).toBe(3);
+    // URL contains the expected issue-specific prompt.
+    expect(html).toContain(
+      `href="${escapeHtml(buildClaudeCodeLaunchUrl("ippoan/rust-alc-api", 7))}"`,
+    );
+    // Opens in a new tab.
+    expect(html).toContain('target="_blank"');
+  });
+
+  it("renders a launch link in the Project section too", async () => {
+    stubFetch({ withProjects: true });
+    const req = new Request("http://localhost/issues");
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(req, testEnv(), ctx);
+    await waitOnExecutionContext(ctx);
+
+    const html = await res.text();
+    const projectSection = html.match(
+      /<section class="projects">[\s\S]*?<\/section>/,
+    );
+    expect(projectSection).not.toBeNull();
+    expect(projectSection![0]).toContain('<a class="cc-launch"');
+    expect(projectSection![0]).toContain(
+      escapeHtml(buildClaudeCodeLaunchUrl("ippoan/rust-alc-api", 7)),
+    );
   });
 });
 
