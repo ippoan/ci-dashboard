@@ -91,7 +91,7 @@ npm run typecheck    # tsc --noEmit
 
 | env | name | trigger | route |
 |---|---|---|---|
-| staging (live) | `ci-dashboard-staging` | PR (non-draft) / main push | `workers.dev` |
+| staging (live) | `ci-dashboard-staging` | PR (non-draft) / main push | `ci-dashboard.ippoan.org` (Custom Domain) + `workers.dev` |
 | production | `ci-dashboard` | `v*` tag push | (未割当) |
 
 PR を上げると `frontend-ci.yml` 経由で staging に auto-deploy される。
