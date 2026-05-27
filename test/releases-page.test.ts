@@ -11,7 +11,7 @@ function testEnv(opts: { watched?: string[] } = {}): Env {
   const watched = opts.watched ?? [];
   return {
     CI_STATUS: env.CI_STATUS,
-    WEBHOOK_SECRET: "test-secret",
+    WEBHOOK_SECRET: { get: async () => "test-secret" } as unknown as SecretsStoreSecret,
     INTERNAL_SHARED_SECRET: { get: async () => "test-internal" } as unknown as SecretsStoreSecret,
     CI_HUB: {
       idFromName: () => ({}),

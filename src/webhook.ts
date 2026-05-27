@@ -105,7 +105,8 @@ export async function handleWebhook(
 
   const body = await request.text();
 
-  const valid = await verifySignature(env.WEBHOOK_SECRET, body, signature);
+  const secret = await env.WEBHOOK_SECRET.get();
+  const valid = await verifySignature(secret, body, signature);
   if (!valid) {
     return new Response("Invalid signature", { status: 401 });
   }

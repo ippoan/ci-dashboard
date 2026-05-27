@@ -50,16 +50,25 @@
       "binding": "INTERNAL_SHARED_SECRET",
       "store_id": "bd7bc91a3e5f4111add4acf6cb4b8733",
       "secret_name": "JWT_FOR_CI_DASHBOARD"
+    },
+    // GitHub webhook 配信の HMAC-SHA256 検証用 secret (src/webhook.ts の
+    // env.WEBHOOK_SECRET)。各 GH repo の Webhook 設定の Secret 欄と同値。
+    // 旧 per-worker secret から Secrets Store binding に移行 (Refs #127)。
+    {
+      "binding": "WEBHOOK_SECRET",
+      "store_id": "bd7bc91a3e5f4111add4acf6cb4b8733",
+      "secret_name": "webhook-secret-ci-dashboard"
     }
   ],
   // ci-workflows/secret-verify-gcp.yml が読む宣言。GCP Secret Manager 上に
   // 同名 entry が存在することを CI で検証し、verify SA に権限があれば
   // `used-by-ippoan-ci-dashboard=active` label を自動付与する。
-  // top-level / env.staging 両方とも同じ JWT_FOR_CI_DASHBOARD を bind して
-  // いるので 1 entry で足りる。
+  // top-level / env.staging 両方とも同じ JWT_FOR_CI_DASHBOARD /
+  // webhook-secret-ci-dashboard を bind しているので 1 entry で足りる。
   "secrets": {
     "required": [
-      "JWT_FOR_CI_DASHBOARD"
+      "JWT_FOR_CI_DASHBOARD",
+      "webhook-secret-ci-dashboard"
     ]
   },
   // staging を実運用 env として扱う (secrets-inventory と同じパターン)。
@@ -111,6 +120,11 @@
           "binding": "INTERNAL_SHARED_SECRET",
           "store_id": "bd7bc91a3e5f4111add4acf6cb4b8733",
           "secret_name": "JWT_FOR_CI_DASHBOARD"
+        },
+        {
+          "binding": "WEBHOOK_SECRET",
+          "store_id": "bd7bc91a3e5f4111add4acf6cb4b8733",
+          "secret_name": "webhook-secret-ci-dashboard"
         }
       ]
     }

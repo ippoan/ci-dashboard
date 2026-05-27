@@ -31,7 +31,7 @@ export { CIDashboardHub } from "./hub";
 // (`auth-client-worker:oauth-tokens`) by the SDK after `/oauth/login`
 // browser flow — there is no operator-facing secret to rotate. Refs #118.
 export interface Env extends AuthClientWorkerEnv {
-  WEBHOOK_SECRET: string;
+  WEBHOOK_SECRET: SecretsStoreSecret;
   CI_HUB: DurableObjectNamespace;
   // Comma-separated `owner/name` list of repos that don't cut tags. PR merges
   // into the default branch are treated as releases for these. See
