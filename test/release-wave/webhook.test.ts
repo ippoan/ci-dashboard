@@ -1,25 +1,47 @@
 import { describe, it, expect, vi } from "vitest";
-import { handleContractAppliedWebhook } from "../../src/release-wave/webhook";
+import {
+  handleContractAppliedWebhook,
+  handleStageReportWebhook,
+  handleFlipReportWebhook,
+} from "../../src/release-wave/webhook";
 import type { Env } from "../../src/index";
 import type { ReleaseWaveHub } from "../../src/release-wave/do";
 
-// 各 test で hub method の呼び出しと secret 値を切替えられる fake env を作る。
+// ----------------------------------------------------------------------------
+// Fake env / request builder (3 endpoint 共通)
+// ----------------------------------------------------------------------------
+
+type FakeSpies = {
+  contractApplied: ReturnType<typeof vi.fn>;
+  stageReport: ReturnType<typeof vi.fn>;
+  flipReport: ReturnType<typeof vi.fn>;
+};
+
 function fakeEnv(opts: {
   secret?: string | null;
   contractAppliedReturn?:
     | { ok: true; data: unknown }
     | { ok: false; code: string; error: string };
-}): {
-  env: Env;
-  spy: ReturnType<typeof vi.fn>;
-} {
-  const spy = vi.fn().mockResolvedValue(
-    opts.contractAppliedReturn ?? {
-      ok: true,
-      data: { wave_id: "w1", state: "flipped" },
-    },
-  );
-  const hub = { contractApplied: spy } as unknown as ReleaseWaveHub;
+  stageReportReturn?:
+    | { ok: true; data: unknown }
+    | { ok: false; code: string; error: string };
+  flipReportReturn?:
+    | { ok: true; data: unknown }
+    | { ok: false; code: string; error: string };
+} = {}): { env: Env; spies: FakeSpies } {
+  const okState = { wave_id: "w1", state: "staging" };
+  const spies: FakeSpies = {
+    contractApplied: vi
+      .fn()
+      .mockResolvedValue(opts.contractAppliedReturn ?? { ok: true, data: okState }),
+    stageReport: vi
+      .fn()
+      .mockResolvedValue(opts.stageReportReturn ?? { ok: true, data: okState }),
+    flipReport: vi
+      .fn()
+      .mockResolvedValue(opts.flipReportReturn ?? { ok: true, data: okState }),
+  };
+  const hub = spies as unknown as ReleaseWaveHub;
   const env = {
     RELEASE_WAVE_HUB: {
       idFromName: () => ({}),
@@ -30,10 +52,11 @@ function fakeEnv(opts: {
         opts.secret === undefined ? "expected-secret" : opts.secret,
     },
   } as unknown as Env;
-  return { env, spy };
+  return { env, spies };
 }
 
 function jsonRequest(opts: {
+  url?: string;
   method?: string;
   body?: unknown;
   secret?: string | null;
@@ -45,24 +68,26 @@ function jsonRequest(opts: {
     headers["X-Release-Wave-Webhook-Secret"] = opts.secret;
   }
   const method = opts.method ?? "POST";
-  // GET/HEAD with body は Request constructor が TypeError を投げるので、
-  // body は POST のみで attach する (= method check の test では body 不要)。
   const init: RequestInit = { method, headers };
   if (method !== "GET" && method !== "HEAD" && opts.body !== undefined) {
     init.body =
       typeof opts.body === "string" ? opts.body : JSON.stringify(opts.body);
   }
   return new Request(
-    "https://ci-dashboard.ippoan.org/webhooks/release-wave/contract-applied",
+    opts.url ?? "https://ci-dashboard.ippoan.org/webhooks/release-wave/contract-applied",
     init,
   );
 }
 
+// ============================================================================
+// /webhooks/release-wave/contract-applied
+// ============================================================================
+
 describe("handleContractAppliedWebhook", () => {
   it("rejects non-POST with 405", async () => {
-    const { env } = fakeEnv({});
+    const { env } = fakeEnv();
     const resp = await handleContractAppliedWebhook(
-      jsonRequest({ method: "GET", secret: "expected-secret", body: {} }),
+      jsonRequest({ method: "GET", secret: "expected-secret" }),
       env,
     );
     expect(resp.status).toBe(405);
@@ -75,35 +100,28 @@ describe("handleContractAppliedWebhook", () => {
     const resp = await handleContractAppliedWebhook(
       jsonRequest({
         secret: "anything",
-        body: {
-          wave_id: "w1",
-          repo: "ippoan/a",
-          migration_id: "m",
-        },
+        body: { wave_id: "w1", repo: "ippoan/a", migration_id: "m" },
       }),
       env,
     );
     expect(resp.status).toBe(500);
-    const body = (await resp.json()) as { code: string };
-    expect(body.code).toBe("SECRET_NOT_CONFIGURED");
+    expect(((await resp.json()) as { code: string }).code).toBe("SECRET_NOT_CONFIGURED");
   });
 
   it("rejects with 401 on missing header", async () => {
-    const { env } = fakeEnv({});
+    const { env } = fakeEnv();
     const resp = await handleContractAppliedWebhook(
       jsonRequest({
-        secret: null, // do not set header
+        secret: null,
         body: { wave_id: "w1", repo: "ippoan/a", migration_id: "m" },
       }),
       env,
     );
     expect(resp.status).toBe(401);
-    const body = (await resp.json()) as { code: string };
-    expect(body.code).toBe("UNAUTHORIZED");
   });
 
   it("rejects with 401 on wrong header value", async () => {
-    const { env } = fakeEnv({});
+    const { env } = fakeEnv();
     const resp = await handleContractAppliedWebhook(
       jsonRequest({
         secret: "wrong-secret",
@@ -115,7 +133,7 @@ describe("handleContractAppliedWebhook", () => {
   });
 
   it("rejects with 401 on different-length header (constant-time path)", async () => {
-    const { env } = fakeEnv({});
+    const { env } = fakeEnv();
     const resp = await handleContractAppliedWebhook(
       jsonRequest({
         secret: "short",
@@ -127,18 +145,17 @@ describe("handleContractAppliedWebhook", () => {
   });
 
   it("rejects with 400 on non-JSON body", async () => {
-    const { env } = fakeEnv({});
+    const { env } = fakeEnv();
     const resp = await handleContractAppliedWebhook(
       jsonRequest({ secret: "expected-secret", body: "not json {" }),
       env,
     );
     expect(resp.status).toBe(400);
-    const body = (await resp.json()) as { code: string };
-    expect(body.code).toBe("BAD_JSON");
+    expect(((await resp.json()) as { code: string }).code).toBe("BAD_JSON");
   });
 
   it("rejects with 400 on missing fields", async () => {
-    const { env } = fakeEnv({});
+    const { env } = fakeEnv();
     const resp = await handleContractAppliedWebhook(
       jsonRequest({ secret: "expected-secret", body: { wave_id: "w1" } }),
       env,
@@ -151,7 +168,7 @@ describe("handleContractAppliedWebhook", () => {
   });
 
   it("succeeds (200) when secret OK and DO returns ok", async () => {
-    const { env, spy } = fakeEnv({});
+    const { env, spies } = fakeEnv();
     const resp = await handleContractAppliedWebhook(
       jsonRequest({
         secret: "expected-secret",
@@ -164,9 +181,7 @@ describe("handleContractAppliedWebhook", () => {
       env,
     );
     expect(resp.status).toBe(200);
-    const body = (await resp.json()) as { ok: boolean; state: unknown };
-    expect(body.ok).toBe(true);
-    expect(spy).toHaveBeenCalledWith({
+    expect(spies.contractApplied).toHaveBeenCalledWith({
       wave_id: "wave_2026_05_27_01",
       repo: "ippoan/rust-alc-api",
       migration_id: "20260601_001_drop",
@@ -184,26 +199,16 @@ describe("handleContractAppliedWebhook", () => {
     const resp = await handleContractAppliedWebhook(
       jsonRequest({
         secret: "expected-secret",
-        body: {
-          wave_id: "w1",
-          repo: "ippoan/a",
-          migration_id: "m",
-        },
+        body: { wave_id: "w1", repo: "ippoan/a", migration_id: "m" },
       }),
       env,
     );
     expect(resp.status).toBe(409);
-    const body = (await resp.json()) as { code: string };
-    expect(body.code).toBe("INVALID_TRANSITION");
   });
 
   it("maps NOT_FOUND to 404", async () => {
     const { env } = fakeEnv({
-      contractAppliedReturn: {
-        ok: false,
-        code: "NOT_FOUND",
-        error: "no such wave",
-      },
+      contractAppliedReturn: { ok: false, code: "NOT_FOUND", error: "no wave" },
     });
     const resp = await handleContractAppliedWebhook(
       jsonRequest({
@@ -231,5 +236,294 @@ describe("handleContractAppliedWebhook", () => {
       env,
     );
     expect(resp.status).toBe(404);
+  });
+});
+
+// ============================================================================
+// /webhooks/release-wave/stage-report
+// ============================================================================
+
+const STAGE_URL =
+  "https://ci-dashboard.ippoan.org/webhooks/release-wave/stage-report";
+
+describe("handleStageReportWebhook", () => {
+  it("returns 405 on GET", async () => {
+    const { env } = fakeEnv();
+    const resp = await handleStageReportWebhook(
+      jsonRequest({ url: STAGE_URL, method: "GET", secret: "expected-secret" }),
+      env,
+    );
+    expect(resp.status).toBe(405);
+  });
+
+  it("returns 401 on wrong secret", async () => {
+    const { env } = fakeEnv();
+    const resp = await handleStageReportWebhook(
+      jsonRequest({
+        url: STAGE_URL,
+        secret: "wrong",
+        body: { wave_id: "w1", repo: "ippoan/a", ok: true },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(401);
+  });
+
+  it("returns 400 on missing fields", async () => {
+    const { env } = fakeEnv();
+    const resp = await handleStageReportWebhook(
+      jsonRequest({
+        url: STAGE_URL,
+        secret: "expected-secret",
+        body: { wave_id: "w1" },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(400);
+    const body = (await resp.json()) as { error: string };
+    expect(body.error).toContain("repo");
+    expect(body.error).toContain("ok");
+  });
+
+  it("returns 400 on invalid preview_url (non-URL)", async () => {
+    const { env } = fakeEnv();
+    const resp = await handleStageReportWebhook(
+      jsonRequest({
+        url: STAGE_URL,
+        secret: "expected-secret",
+        body: {
+          wave_id: "w1",
+          repo: "ippoan/a",
+          ok: true,
+          preview_url: "not a url",
+        },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(400);
+  });
+
+  it("succeeds with full payload (ok=true)", async () => {
+    const { env, spies } = fakeEnv();
+    const resp = await handleStageReportWebhook(
+      jsonRequest({
+        url: STAGE_URL,
+        secret: "expected-secret",
+        body: {
+          wave_id: "w1",
+          repo: "ippoan/a",
+          ok: true,
+          preview_url: "https://preview-a.ippoan.org/",
+          flip_from_revision: "a-old-rev",
+        },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(200);
+    expect(spies.stageReport).toHaveBeenCalledWith({
+      wave_id: "w1",
+      repo: "ippoan/a",
+      ok: true,
+      preview_url: "https://preview-a.ippoan.org/",
+      flip_from_revision: "a-old-rev",
+      error: null,
+    });
+  });
+
+  it("succeeds with failure payload (ok=false, error)", async () => {
+    const { env, spies } = fakeEnv();
+    const resp = await handleStageReportWebhook(
+      jsonRequest({
+        url: STAGE_URL,
+        secret: "expected-secret",
+        body: {
+          wave_id: "w1",
+          repo: "ippoan/a",
+          ok: false,
+          error: "build broke",
+        },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(200);
+    expect(spies.stageReport).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ok: false,
+        error: "build broke",
+        preview_url: null,
+        flip_from_revision: null,
+      }),
+    );
+  });
+
+  it("nullifies omitted optional fields", async () => {
+    const { env, spies } = fakeEnv();
+    await handleStageReportWebhook(
+      jsonRequest({
+        url: STAGE_URL,
+        secret: "expected-secret",
+        body: { wave_id: "w1", repo: "ippoan/a", ok: true },
+      }),
+      env,
+    );
+    expect(spies.stageReport).toHaveBeenCalledWith(
+      expect.objectContaining({
+        preview_url: null,
+        flip_from_revision: null,
+        error: null,
+      }),
+    );
+  });
+
+  it("maps NOT_FOUND to 404", async () => {
+    const { env } = fakeEnv({
+      stageReportReturn: { ok: false, code: "NOT_FOUND", error: "no wave" },
+    });
+    const resp = await handleStageReportWebhook(
+      jsonRequest({
+        url: STAGE_URL,
+        secret: "expected-secret",
+        body: { wave_id: "ghost", repo: "ippoan/a", ok: true },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(404);
+  });
+
+  it("maps INVALID_TRANSITION to 409", async () => {
+    const { env } = fakeEnv({
+      stageReportReturn: {
+        ok: false,
+        code: "INVALID_TRANSITION",
+        error: "wave is flipping",
+      },
+    });
+    const resp = await handleStageReportWebhook(
+      jsonRequest({
+        url: STAGE_URL,
+        secret: "expected-secret",
+        body: { wave_id: "w1", repo: "ippoan/a", ok: true },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(409);
+  });
+});
+
+// ============================================================================
+// /webhooks/release-wave/flip-report
+// ============================================================================
+
+const FLIP_URL =
+  "https://ci-dashboard.ippoan.org/webhooks/release-wave/flip-report";
+
+describe("handleFlipReportWebhook", () => {
+  it("returns 405 on GET", async () => {
+    const { env } = fakeEnv();
+    const resp = await handleFlipReportWebhook(
+      jsonRequest({ url: FLIP_URL, method: "GET", secret: "expected-secret" }),
+      env,
+    );
+    expect(resp.status).toBe(405);
+  });
+
+  it("returns 401 on wrong secret", async () => {
+    const { env } = fakeEnv();
+    const resp = await handleFlipReportWebhook(
+      jsonRequest({
+        url: FLIP_URL,
+        secret: "wrong",
+        body: { wave_id: "w1", repo: "ippoan/a", ok: true },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(401);
+  });
+
+  it("returns 400 on missing fields", async () => {
+    const { env } = fakeEnv();
+    const resp = await handleFlipReportWebhook(
+      jsonRequest({
+        url: FLIP_URL,
+        secret: "expected-secret",
+        body: { wave_id: "w1" },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(400);
+  });
+
+  it("succeeds with ok=true", async () => {
+    const { env, spies } = fakeEnv();
+    const resp = await handleFlipReportWebhook(
+      jsonRequest({
+        url: FLIP_URL,
+        secret: "expected-secret",
+        body: { wave_id: "w1", repo: "ippoan/a", ok: true },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(200);
+    expect(spies.flipReport).toHaveBeenCalledWith({
+      wave_id: "w1",
+      repo: "ippoan/a",
+      ok: true,
+      error: null,
+    });
+  });
+
+  it("succeeds with ok=false + error", async () => {
+    const { env, spies } = fakeEnv();
+    const resp = await handleFlipReportWebhook(
+      jsonRequest({
+        url: FLIP_URL,
+        secret: "expected-secret",
+        body: {
+          wave_id: "w1",
+          repo: "ippoan/a",
+          ok: false,
+          error: "traffic update denied",
+        },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(200);
+    expect(spies.flipReport).toHaveBeenCalledWith(
+      expect.objectContaining({ ok: false, error: "traffic update denied" }),
+    );
+  });
+
+  it("maps NOT_FOUND to 404", async () => {
+    const { env } = fakeEnv({
+      flipReportReturn: { ok: false, code: "NOT_FOUND", error: "no wave" },
+    });
+    const resp = await handleFlipReportWebhook(
+      jsonRequest({
+        url: FLIP_URL,
+        secret: "expected-secret",
+        body: { wave_id: "ghost", repo: "ippoan/a", ok: true },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(404);
+  });
+
+  it("maps INVALID_TRANSITION to 409", async () => {
+    const { env } = fakeEnv({
+      flipReportReturn: {
+        ok: false,
+        code: "INVALID_TRANSITION",
+        error: "wave not in flipping",
+      },
+    });
+    const resp = await handleFlipReportWebhook(
+      jsonRequest({
+        url: FLIP_URL,
+        secret: "expected-secret",
+        body: { wave_id: "w1", repo: "ippoan/a", ok: true },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(409);
   });
 });

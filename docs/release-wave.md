@@ -133,7 +133,46 @@ action)、MCP tool は自動化 / IDE 統合用。
 
 ---
 
-## GitHub Actions step 経由の運用 (contract migration 通知)
+## GitHub Actions step 経由の運用 (release-wave-handler reusable + 3 webhook)
+
+GitHub Actions が release-wave 機構と連携する経路は以下 3 endpoint の shared
+secret 認証 HTTP webhook で統一されている (= MCP OAuth を Actions で動かさ
+ない設計)。すべて `X-Release-Wave-Webhook-Secret` header + JSON body。
+
+| endpoint | 用途 | DO method |
+|---|---|---|
+| `POST /webhooks/release-wave/stage-report` | release-wave-handler の stage 完了 callback | `stageReport` |
+| `POST /webhooks/release-wave/flip-report`  | flip 完了 callback                          | `flipReport` |
+| `POST /webhooks/release-wave/contract-applied` | contract migration deploy 後の通知       | `contractApplied` |
+
+### stage-report body
+
+```json
+{
+  "wave_id": "wave_2026_05_27_01",
+  "repo": "ippoan/rust-alc-api",
+  "ok": true,
+  "preview_url": "https://preview-rust-alc-api.ippoan.org",
+  "flip_from_revision": "rust-alc-api-00041-zzz"
+}
+```
+
+`ok=false` 時は `error` フィールドで失敗詳細を渡し、`preview_url` /
+`flip_from_revision` は省略可。
+
+### flip-report body
+
+```json
+{
+  "wave_id": "wave_2026_05_27_01",
+  "repo": "ippoan/rust-alc-api",
+  "ok": true
+}
+```
+
+`ok=false` 時は `error` 必要。
+
+### contract-applied 通知 step (caller repo 側)
 
 caller repo (e.g. `rust-alc-api`) の migration deploy workflow に以下 step を
 追加:
