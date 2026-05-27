@@ -19,6 +19,15 @@ import { handleTagRelease } from "./tag-release";
 import { handleMcpRequest } from "./mcp/server";
 import { handleContractAppliedWebhook } from "./release-wave/webhook";
 import {
+  handleReleaseWaveListPage,
+  handleReleaseWaveDetailPage,
+} from "./release-wave/page";
+import {
+  handleReleaseWaveApprove,
+  handleReleaseWaveRollback,
+  handleReleaseWaveAbort,
+} from "./release-wave/api";
+import {
   handlePwaManifest,
   handlePwaServiceWorker,
   handlePwaIcon,
@@ -177,6 +186,25 @@ app.all("/mcp", (c) => handleMcpRequest(c.req.raw, c.env));
 // shared secret (`RELEASE_WAVE_WEBHOOK_SECRET`) で済む。
 app.post("/webhooks/release-wave/contract-applied", (c) =>
   handleContractAppliedWebhook(c.req.raw, c.env),
+);
+
+// Release Wave admin UI (Refs #137 Phase 3e)。
+// Auth は ci-dashboard 全体に被さる Cloudflare Access (Google OAuth + email
+// allowlist) edge gate に委譲。/releases ページと同じトラストモデル。
+app.get("/release-wave", (c) => handleReleaseWaveListPage(c.env));
+app.get("/release-wave/:wave_id", (c) =>
+  handleReleaseWaveDetailPage(c.env, c.req.param("wave_id")),
+);
+// Action buttons (state 遷移を起こす side-effectful POST)。完了後は
+// 303 で詳細ページに redirect する。
+app.post("/api/release-wave/:wave_id/approve", (c) =>
+  handleReleaseWaveApprove(c.req.raw, c.env, c.req.param("wave_id")),
+);
+app.post("/api/release-wave/:wave_id/rollback", (c) =>
+  handleReleaseWaveRollback(c.req.raw, c.env, c.req.param("wave_id")),
+);
+app.post("/api/release-wave/:wave_id/abort", (c) =>
+  handleReleaseWaveAbort(c.req.raw, c.env, c.req.param("wave_id")),
 );
 
 export default app;
