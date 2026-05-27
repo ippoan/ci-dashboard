@@ -3,6 +3,7 @@ import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import {
   getOrFetchOrgProjects,
   getOrFetchProjectItems,
+  getOrFetchProjectIssueMap,
   invalidateOrgList,
   invalidateOrgItems,
   invalidateIssuesPageProjectMap,
@@ -156,6 +157,98 @@ describe("project-cache", () => {
         projects_v2: { id: 1, node_id: "PVT_1" },
       });
       expect(await env.CI_STATUS.get(orgListKey("ippoan"))).toBe('[]');
+    });
+  });
+
+  describe("getOrFetchProjectIssueMap (Refs #135)", () => {
+    it("Project items の Issue を repo#number → ProjectRef[] に集約する", async () => {
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (req, init) => {
+        const url = typeof req === "string" ? req : (req as Request).url;
+        if (url.includes("auth-worker") || url.includes("/mcp/token")) {
+          return Response.json({ access_token: "tok" });
+        }
+        if (url.includes("/graphql")) {
+          const body = (init?.body as string | undefined)
+            ?? (typeof req === "string" ? "" : await (req as Request).clone().text());
+          if (body.includes("projectsV2(first:")) {
+            return Response.json({
+              data: { repositoryOwner: { projectsV2: { nodes: [
+                { id: "PVT_1", number: 1, title: "Board",
+                  url: "https://github.com/orgs/ippoan/projects/1",
+                  closed: false, shortDescription: null },
+              ] } } },
+            });
+          }
+          if (body.includes("projectV2(number:")) {
+            return Response.json({
+              data: { repositoryOwner: { projectV2: { items: { nodes: [
+                { id: "PVTI_1", type: "ISSUE", content: {
+                  __typename: "Issue", number: 42, title: "t",
+                  url: "u", state: "OPEN",
+                  repository: { nameWithOwner: "ippoan/foo" },
+                }, fieldValues: { nodes: [] } },
+                { id: "PVTI_2", type: "DRAFT_ISSUE", content: {
+                  __typename: "DraftIssue", title: "d",
+                }, fieldValues: { nodes: [] } },
+              ] } } } },
+            });
+          }
+        }
+        return new Response("ignored", { status: 404 });
+      });
+
+      const result = await getOrFetchProjectIssueMap(env, ["ippoan"]);
+      expect(result.error).toBeNull();
+      expect(result.stale).toBe(false);
+      // Issue だけ map に乗る、DraftIssue は無視
+      const ref = result.map.get("ippoan/foo#42");
+      expect(ref).toHaveLength(1);
+      expect(ref![0]!.title).toBe("Board");
+      expect(ref![0]!.org).toBe("ippoan");
+      expect(ref![0]!.number).toBe(1);
+    });
+
+    it("org list fetch が fail したら error をセットして空 map を返す", async () => {
+      vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+        return new Response("rate limit", { status: 403 });
+      });
+      const result = await getOrFetchProjectIssueMap(env, ["ippoan"]);
+      expect(result.map.size).toBe(0);
+      expect(result.error).toBeTruthy();
+    });
+
+    it("2 回目は cache hit で GraphQL を叩かない", async () => {
+      const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async (req, init) => {
+        const url = typeof req === "string" ? req : (req as Request).url;
+        if (url.includes("auth-worker") || url.includes("/mcp/token")) {
+          return Response.json({ access_token: "tok" });
+        }
+        if (url.includes("/graphql")) {
+          const body = (init?.body as string | undefined)
+            ?? (typeof req === "string" ? "" : await (req as Request).clone().text());
+          if (body.includes("projectsV2(first:")) {
+            return Response.json({
+              data: { repositoryOwner: { projectsV2: { nodes: [
+                { id: "PVT_1", number: 1, title: "B", url: "u",
+                  closed: false, shortDescription: null },
+              ] } } },
+            });
+          }
+          if (body.includes("projectV2(number:")) {
+            return Response.json({
+              data: { repositoryOwner: { projectV2: { items: { nodes: [] } } } },
+            });
+          }
+        }
+        return new Response("ignored", { status: 404 });
+      });
+      await getOrFetchProjectIssueMap(env, ["ippoan"]);
+      const calls1 = spy.mock.calls.filter((c) =>
+        String(c[0]).includes("/graphql")).length;
+      await getOrFetchProjectIssueMap(env, ["ippoan"]);
+      const calls2 = spy.mock.calls.filter((c) =>
+        String(c[0]).includes("/graphql")).length;
+      expect(calls2).toBe(calls1);
     });
   });
 

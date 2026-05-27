@@ -1,10 +1,14 @@
 import { type OrgIssue } from "./mcp/tools/issues";
-import { fetchProjectIssueMap, type ProjectRef } from "./mcp/tools/projects";
+import { type ProjectRef } from "./mcp/tools/projects";
 import { fetchAllOpenPrsByIssue, type IssuePrRef } from "./issue-prs";
 import type { AuthClientWorkerEnv } from "@ippoan/auth-client-worker";
 import { renderTabs, TAB_STYLES } from "./nav-tabs";
 import { PWA_HEAD_TAGS, PWA_REGISTER_SCRIPT } from "./pwa";
 import { listCachedOpenIssues, reconcileIssues } from "./issue-cache";
+import {
+  getOrFetchProjectIssueMap,
+  type ProjectIssueMapResult,
+} from "./project-cache";
 
 // Orgs fetched in full. Same allowlist as github-api.ts (not imported because
 // ALLOWED_ORGS isn't exported; keep the two in sync if either grows).
@@ -58,52 +62,10 @@ export function buildClaudeCodeLaunchUrl(repo: string, issueNumber: number): str
   return `https://claude.ai/code?repositories=${CLAUDE_CODE_LAUNCH_REPOS.join(",")}&prompt=${encoded}`;
 }
 
-// KV cache for the cross-org Project v2 → issue map. GraphQL fan-out is
-// expensive (one call per open project × per org) and its 5000 points/h budget
-// is easy to exhaust when the dashboard's MCP tools share the same token. A
-// short fresh window (5 min) is plenty for the issues page — Project boards
-// don't churn second-by-second — and a long store window (24 h) keeps a stale
-// copy around so a temporary rate-limit hit doesn't blank the page.
-const PROJECT_MAP_CACHE_KEY = "issues-page:project-map";
-const PROJECT_MAP_FRESH_SECONDS = 300;
-const PROJECT_MAP_STORE_SECONDS = 86400;
-
-interface ProjectMapCacheEntry {
-  storedAt: number;
-  data: Record<string, ProjectRef[]>;
-}
-
-interface ProjectMapResult {
-  map: Map<string, ProjectRef[]>;
-  stale: boolean;
-  error: string | null;
-}
-
-async function loadProjectMap(
-  env: AuthClientWorkerEnv,
-  orgs: string[],
-): Promise<ProjectMapResult> {
-  const kv = env.CI_STATUS;
-  const cached = await kv.get(PROJECT_MAP_CACHE_KEY, "json") as ProjectMapCacheEntry | null;
-  const now = Date.now();
-  if (cached && now - cached.storedAt < PROJECT_MAP_FRESH_SECONDS * 1000) {
-    return { map: new Map(Object.entries(cached.data)), stale: false, error: null };
-  }
-  try {
-    const fresh = await fetchProjectIssueMap(env, { orgs });
-    const entry: ProjectMapCacheEntry = { storedAt: now, data: Object.fromEntries(fresh) };
-    await kv.put(PROJECT_MAP_CACHE_KEY, JSON.stringify(entry), {
-      expirationTtl: PROJECT_MAP_STORE_SECONDS,
-    });
-    return { map: fresh, stale: false, error: null };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    if (cached) {
-      return { map: new Map(Object.entries(cached.data)), stale: true, error: message };
-    }
-    return { map: new Map(), stale: false, error: message };
-  }
-}
+// Cross-org Project v2 → issue map は `/projects` page と共通の KV cache
+// (project-cache.ts) を経由して取得する (Refs #135)。`/projects` を先に開いて
+// あれば warm cache を共有して即返、`projects_v2_item` webhook が来ると
+// project-cache.applyProjectsV2ItemEvent が KV を flush する。
 
 // PR map cache mirrors the project-map cache pattern. The freshness window is
 // shorter (2 min) because PR state churns faster than Project board edits — a
@@ -213,7 +175,7 @@ export async function handleIssuesPage(env: AuthClientWorkerEnv): Promise<Respon
   };
 
   const [project, prs] = await Promise.all([
-    loadProjectMap(env, PROJECT_ORGS),
+    getOrFetchProjectIssueMap(env, PROJECT_ORGS),
     loadPrMap(env, ORGS, YHONDA_REPOS),
   ]);
   const projectMap = project.map;
@@ -257,7 +219,7 @@ function renderHtml(
   incomplete: boolean,
   projectTagged: ReadonlyArray<{ issue: OrgIssue; projects: ProjectRef[] }>,
   repos: ReadonlyArray<readonly [string, OrgIssue[]]>,
-  project: ProjectMapResult,
+  project: ProjectIssueMapResult,
   prs: PrMapResult,
   issueStaleError: string | null,
 ): string {

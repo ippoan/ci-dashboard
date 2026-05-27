@@ -55,10 +55,29 @@ function stubFetch(
           data: { repositoryOwner: { projectsV2: { nodes: [] } } },
         });
       }
-      if (body.includes("items(first:")) {
-        // Second-pass: items for a specific project. Map our seed project to
-        // the rust-alc-api#7 issue (the hostile-title one), plus a draft we
+      if (body.includes("projectV2(number:")) {
+        // Phase 2/Refs #135: /issues page uses fetchProjectItems via
+        // getOrFetchProjectIssueMap (shared with /projects). Returns the
+        // richer ProjectItemSummary shape with fieldValues. Map our seed
+        // project to the rust-alc-api#7 issue (hostile-title) + a draft we
         // must ignore.
+        return Response.json({
+          data: { repositoryOwner: { projectV2: { items: { nodes: [
+            { id: "PVTI_1", type: "ISSUE", content: {
+              __typename: "Issue",
+              number: 7, title: "x", url: "u", state: "OPEN",
+              repository: { nameWithOwner: "ippoan/rust-alc-api" },
+            }, fieldValues: { nodes: [] } },
+            { id: "PVTI_2", type: "DRAFT_ISSUE", content: {
+              __typename: "DraftIssue", title: "draft",
+            }, fieldValues: { nodes: [] } },
+          ] } } } },
+        });
+      }
+      if (body.includes("items(first:")) {
+        // Legacy fetchProjectIssueMap shape (node(id:$id) → ProjectV2). 現状
+        // /issues は projectV2(number:) 経路に移行 (Refs #135) したため未到達
+        // だが、mcp tool 等が将来的に呼ぶ可能性があるため残す。
         return Response.json({
           data: { node: { items: { nodes: [
             { content: {
@@ -223,12 +242,16 @@ describe("GET /issues", () => {
     // reconcile が fresh window 判定で skip し、cold-start の fetch が
     // 走らないため stub が当たらず空 cache を返す。
     await env.CI_STATUS.delete("issues:watermark");
-    let cursor: string | undefined;
-    do {
-      const page = await env.CI_STATUS.list({ prefix: "issue:", cursor });
-      await Promise.all(page.keys.map((k) => env.CI_STATUS.delete(k.name)));
-      cursor = page.list_complete ? undefined : page.cursor;
-    } while (cursor);
+    // Refs #135: /issues も project-cache の KV (`project:*`) を共有するため
+    // テスト間で flush しないと前テストの fixture が漏れる。
+    for (const prefix of ["issue:", "project:"]) {
+      let cursor: string | undefined;
+      do {
+        const page = await env.CI_STATUS.list({ prefix, cursor });
+        await Promise.all(page.keys.map((k) => env.CI_STATUS.delete(k.name)));
+        cursor = page.list_complete ? undefined : page.cursor;
+      } while (cursor);
+    }
   });
   afterEach(() => { vi.restoreAllMocks(); });
 
@@ -414,12 +437,16 @@ describe("GET /issues — Project section", () => {
     // reconcile が fresh window 判定で skip し、cold-start の fetch が
     // 走らないため stub が当たらず空 cache を返す。
     await env.CI_STATUS.delete("issues:watermark");
-    let cursor: string | undefined;
-    do {
-      const page = await env.CI_STATUS.list({ prefix: "issue:", cursor });
-      await Promise.all(page.keys.map((k) => env.CI_STATUS.delete(k.name)));
-      cursor = page.list_complete ? undefined : page.cursor;
-    } while (cursor);
+    // Refs #135: /issues も project-cache の KV (`project:*`) を共有するため
+    // テスト間で flush しないと前テストの fixture が漏れる。
+    for (const prefix of ["issue:", "project:"]) {
+      let cursor: string | undefined;
+      do {
+        const page = await env.CI_STATUS.list({ prefix, cursor });
+        await Promise.all(page.keys.map((k) => env.CI_STATUS.delete(k.name)));
+        cursor = page.list_complete ? undefined : page.cursor;
+      } while (cursor);
+    }
   });
   afterEach(() => { vi.restoreAllMocks(); });
 
@@ -482,8 +509,22 @@ describe("GET /issues — Project section", () => {
             data: { repositoryOwner: { projectsV2: { nodes: [] } } },
           });
         }
-        // Both projects claim the same issue #7. Map both project IDs to
-        // the same item list so the issue ends up with two refs.
+        // Both projects claim the same issue #7. Refs #135: /issues は
+        // fetchProjectItems (projectV2(number:) query) 経由なので新 shape で
+        // 返す。両 project の items query で同じ #7 を出して 2 refs にする。
+        if (body.includes("projectV2(number:")) {
+          return Response.json({
+            data: { repositoryOwner: { projectV2: { items: { nodes: [
+              { id: "PVTI_1", type: "ISSUE", content: {
+                __typename: "Issue",
+                number: 7, title: "x", url: "u", state: "OPEN",
+                repository: { nameWithOwner: "ippoan/rust-alc-api" },
+              }, fieldValues: { nodes: [] } },
+            ] } } } },
+          });
+        }
+        // Legacy node(id:) shape — kept for fetchProjectIssueMap callers
+        // (現状 unreachable).
         return Response.json({
           data: { node: { items: { nodes: [
             { content: {
@@ -572,12 +613,16 @@ describe("GET /issues — Claude Code launch button", () => {
     // reconcile が fresh window 判定で skip し、cold-start の fetch が
     // 走らないため stub が当たらず空 cache を返す。
     await env.CI_STATUS.delete("issues:watermark");
-    let cursor: string | undefined;
-    do {
-      const page = await env.CI_STATUS.list({ prefix: "issue:", cursor });
-      await Promise.all(page.keys.map((k) => env.CI_STATUS.delete(k.name)));
-      cursor = page.list_complete ? undefined : page.cursor;
-    } while (cursor);
+    // Refs #135: /issues も project-cache の KV (`project:*`) を共有するため
+    // テスト間で flush しないと前テストの fixture が漏れる。
+    for (const prefix of ["issue:", "project:"]) {
+      let cursor: string | undefined;
+      do {
+        const page = await env.CI_STATUS.list({ prefix, cursor });
+        await Promise.all(page.keys.map((k) => env.CI_STATUS.delete(k.name)));
+        cursor = page.list_complete ? undefined : page.cursor;
+      } while (cursor);
+    }
   });
   afterEach(() => { vi.restoreAllMocks(); });
 
@@ -629,12 +674,16 @@ describe("GET /issues — Related-PR chips", () => {
     // reconcile が fresh window 判定で skip し、cold-start の fetch が
     // 走らないため stub が当たらず空 cache を返す。
     await env.CI_STATUS.delete("issues:watermark");
-    let cursor: string | undefined;
-    do {
-      const page = await env.CI_STATUS.list({ prefix: "issue:", cursor });
-      await Promise.all(page.keys.map((k) => env.CI_STATUS.delete(k.name)));
-      cursor = page.list_complete ? undefined : page.cursor;
-    } while (cursor);
+    // Refs #135: /issues も project-cache の KV (`project:*`) を共有するため
+    // テスト間で flush しないと前テストの fixture が漏れる。
+    for (const prefix of ["issue:", "project:"]) {
+      let cursor: string | undefined;
+      do {
+        const page = await env.CI_STATUS.list({ prefix, cursor });
+        await Promise.all(page.keys.map((k) => env.CI_STATUS.delete(k.name)));
+        cursor = page.list_complete ? undefined : page.cursor;
+      } while (cursor);
+    }
   });
   afterEach(() => { vi.restoreAllMocks(); });
 
