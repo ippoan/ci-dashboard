@@ -44,11 +44,18 @@ function jsonRequest(opts: {
   if (opts.secret !== null && opts.secret !== undefined) {
     headers["X-Release-Wave-Webhook-Secret"] = opts.secret;
   }
-  return new Request("https://ci-dashboard.ippoan.org/webhooks/release-wave/contract-applied", {
-    method: opts.method ?? "POST",
-    headers,
-    body: typeof opts.body === "string" ? opts.body : JSON.stringify(opts.body),
-  });
+  const method = opts.method ?? "POST";
+  // GET/HEAD with body は Request constructor が TypeError を投げるので、
+  // body は POST のみで attach する (= method check の test では body 不要)。
+  const init: RequestInit = { method, headers };
+  if (method !== "GET" && method !== "HEAD" && opts.body !== undefined) {
+    init.body =
+      typeof opts.body === "string" ? opts.body : JSON.stringify(opts.body);
+  }
+  return new Request(
+    "https://ci-dashboard.ippoan.org/webhooks/release-wave/contract-applied",
+    init,
+  );
 }
 
 describe("handleContractAppliedWebhook", () => {
