@@ -17,6 +17,7 @@ import { handleRecheck } from "./recheck";
 import { handleSecretGenPage } from "./secret-gen-page";
 import { handleTagRelease } from "./tag-release";
 import { handleMcpRequest } from "./mcp/server";
+import { handleContractAppliedWebhook } from "./release-wave/webhook";
 import {
   handlePwaManifest,
   handlePwaServiceWorker,
@@ -36,6 +37,11 @@ export interface Env extends AuthClientWorkerEnv {
   CI_HUB: DurableObjectNamespace;
   /** Release Wave 機構の hub DO。Refs #137。 */
   RELEASE_WAVE_HUB: DurableObjectNamespace;
+  /**
+   * GitHub Actions step が `/webhooks/release-wave/contract-applied` を叩く
+   * 際の shared secret (Secrets Store)。Refs #137 Phase 3d。
+   */
+  RELEASE_WAVE_WEBHOOK_SECRET: SecretsStoreSecret;
   // Comma-separated `owner/name` list of repos that don't cut tags. PR merges
   // into the default branch are treated as releases for these. See
   // wrangler.jsonc and src/tagless-repos.ts.
@@ -165,5 +171,12 @@ app.get("/oauth/callback", (c) => handleOAuthCallback(c.req.raw, c.env, OAUTH_OP
 
 // MCP endpoint (Streamable HTTP)
 app.all("/mcp", (c) => handleMcpRequest(c.req.raw, c.env));
+
+// Release Wave: contract migration 適用通知 webhook (Refs #137 Phase 3d)。
+// GitHub Actions step が curl で叩く。MCP 経路と機能等価だが、OAuth 不要の
+// shared secret (`RELEASE_WAVE_WEBHOOK_SECRET`) で済む。
+app.post("/webhooks/release-wave/contract-applied", (c) =>
+  handleContractAppliedWebhook(c.req.raw, c.env),
+);
 
 export default app;

@@ -97,12 +97,28 @@ export interface ContractAppliedInput {
 }
 
 /** RPC で返す統一エラー型。HTTP / MCP 層でそのまま status code に map できる。 */
+export type RpcErrorCode =
+  | TransitionErrorCode
+  | "NOT_FOUND"
+  | "ALREADY_EXISTS"
+  | "WAVE_IN_PROGRESS";
+
 export interface RpcError {
-  code: TransitionErrorCode | "NOT_FOUND" | "ALREADY_EXISTS" | "WAVE_IN_PROGRESS";
+  code: RpcErrorCode;
   error: string;
 }
 
-export type RpcResult<T> = { ok: true; data: T } | { ok: false } & RpcError;
+/**
+ * 全 RPC method 共通の結果型。
+ *
+ * 注意: `| ({ ok: false } & RpcError)` と書くと operator precedence で
+ * narrowing が壊れる (= caller 側 `if (result.ok)` の後で result.data に
+ * アクセスしても TS が false 分岐に詰まる)。明示的 object literal で
+ * 両分岐を書く形に統一する。
+ */
+export type RpcResult<T> =
+  | { ok: true; data: T }
+  | { ok: false; code: RpcErrorCode; error: string };
 
 // ----------------------------------------------------------------------------
 // DO 本体
