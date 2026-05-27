@@ -65,11 +65,13 @@ describe("createWave", () => {
 // ----------------------------------------------------------------------------
 
 describe("isTerminal", () => {
-  it("classifies states correctly", () => {
+  it("classifies states correctly (flipped is NOT terminal)", () => {
+    // flipped は中間定常 state: rollback / contract_applied を受けるため
+    // terminal 扱いしない。完全終了は rolled-back / failed / aborted の 3 つ。
     expect(isTerminal("staging")).toBe(false);
     expect(isTerminal("pending-approval")).toBe(false);
     expect(isTerminal("flipping")).toBe(false);
-    expect(isTerminal("flipped")).toBe(true);
+    expect(isTerminal("flipped")).toBe(false);
     expect(isTerminal("rolled-back")).toBe(true);
     expect(isTerminal("failed")).toBe(true);
     expect(isTerminal("aborted")).toBe(true);
@@ -682,11 +684,10 @@ describe("transition: contract_applied", () => {
     if (!r.ok) expect(r.code).toBe("REPO_NOT_IN_WAVE");
   });
 
-  it("contract_applied is the only event accepted on a terminal (flipped) state", () => {
-    // flipped is treated as terminal for `isTerminal()` but transition()
-    // exposes contract_applied as the single allowed event on terminal states.
-    // Verify by ensuring rollback (also valid on flipped) still works,
-    // i.e. flipped is NOT blanket-blocked.
+  it("accepts contract_applied on flipped state (not blanket-blocked)", () => {
+    // flipped は中間定常 state なので contract_applied / rollback の両方を受ける。
+    // 旧仕様で flipped を terminal 扱いした際に rollback が TERMINAL_STATE で
+    // reject される regression があったため、このテストで覆う。
     const s = flippedWave();
     const r1 = assertOk(
       transition(s, {
@@ -697,6 +698,39 @@ describe("transition: contract_applied", () => {
       }),
     );
     expect(r1.state.rollback.safe).toBe(false);
+  });
+});
+
+// ----------------------------------------------------------------------------
+// fail rejects on flipped (use rollback instead)
+// ----------------------------------------------------------------------------
+
+describe("transition: fail (flipped guard)", () => {
+  function flippedWave(): WaveState {
+    let s = makeWave({ flip_policy: "auto" });
+    s = assertOk(
+      transition(s, { kind: "stage_report", now: T1, repo: "ippoan/rust-alc-api", ok: true }),
+    ).state;
+    s = assertOk(
+      transition(s, { kind: "stage_report", now: T2, repo: "ippoan/auth-worker", ok: true }),
+    ).state;
+    s = assertOk(
+      transition(s, { kind: "flip_report", now: T2, repo: "ippoan/rust-alc-api", ok: true }),
+    ).state;
+    s = assertOk(
+      transition(s, { kind: "flip_report", now: T2, repo: "ippoan/auth-worker", ok: true }),
+    ).state;
+    return s;
+  }
+
+  it("rejects fail on flipped (use rollback)", () => {
+    const s = flippedWave();
+    const r = transition(s, { kind: "fail", now: T3, reason: "smoke fail" });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.code).toBe("INVALID_TRANSITION");
+      expect(r.error).toContain("rollback");
+    }
   });
 });
 

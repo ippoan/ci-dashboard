@@ -353,11 +353,20 @@ function applyFail(
   state: WaveState,
   event: Extract<WaveEvent, { kind: "fail" }>,
 ): TransitionResult {
-  // fail は終了 state 以外ならいつでも受け付ける (operator が手動で kill する用途含む)。
+  // fail は in-progress (= staging / pending-approval / flipping) でのみ受ける。
+  // 終了 state は TERMINAL_STATE で reject (= 重複 fail / `flipped` から逆走する fail を阻止)。
+  // `flipped` も非 terminal だが「成功側」に進んだ wave なので、問題が出た場合は
+  // fail ではなく rollback を使う設計 (issue #137 diagram 参照)。
   if (isTerminal(state.state)) {
     return fail(
       "TERMINAL_STATE",
       `wave already in terminal state ${state.state}`,
+    );
+  }
+  if (state.state === "flipped") {
+    return fail(
+      "INVALID_TRANSITION",
+      `fail invalid on 'flipped' state, use rollback instead`,
     );
   }
   const next = cloneWaveForUpdate(state);
@@ -417,9 +426,14 @@ function applyContractApplied(
 // Helpers
 // ----------------------------------------------------------------------------
 
-/** state が終了 (= 以降の遷移を受けない) state か。 */
+/**
+ * state が「以降の遷移を受け付けない」終了 state か。
+ *
+ * `flipped` は **terminal ではない**: rollback と contract_applied を受ける
+ * 中間定常 state。本関数の対象は rolled-back / failed / aborted の 3 つ。
+ */
 export function isTerminal(state: WaveStateName): boolean {
-  return state === "flipped" || state === "rolled-back" || state === "failed" || state === "aborted";
+  return state === "rolled-back" || state === "failed" || state === "aborted";
 }
 
 function fail(code: TransitionErrorCode, error: string): TransitionResult {
