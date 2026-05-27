@@ -219,6 +219,16 @@ describe("GET /issues", () => {
   beforeEach(async () => {
     await env.CI_STATUS.delete("issues-page:project-map");
     await env.CI_STATUS.delete("issues-page:pr-map:v2");
+    // KV cache (Refs #129) も毎テスト前にクリア。watermark が残っていると
+    // reconcile が fresh window 判定で skip し、cold-start の fetch が
+    // 走らないため stub が当たらず空 cache を返す。
+    await env.CI_STATUS.delete("issues:watermark");
+    let cursor: string | undefined;
+    do {
+      const page = await env.CI_STATUS.list({ prefix: "issue:", cursor });
+      await Promise.all(page.keys.map((k) => env.CI_STATUS.delete(k.name)));
+      cursor = page.list_complete ? undefined : page.cursor;
+    } while (cursor);
   });
   afterEach(() => { vi.restoreAllMocks(); });
 
@@ -400,6 +410,16 @@ describe("GET /issues — Project section", () => {
   beforeEach(async () => {
     await env.CI_STATUS.delete("issues-page:project-map");
     await env.CI_STATUS.delete("issues-page:pr-map:v2");
+    // KV cache (Refs #129) も毎テスト前にクリア。watermark が残っていると
+    // reconcile が fresh window 判定で skip し、cold-start の fetch が
+    // 走らないため stub が当たらず空 cache を返す。
+    await env.CI_STATUS.delete("issues:watermark");
+    let cursor: string | undefined;
+    do {
+      const page = await env.CI_STATUS.list({ prefix: "issue:", cursor });
+      await Promise.all(page.keys.map((k) => env.CI_STATUS.delete(k.name)));
+      cursor = page.list_complete ? undefined : page.cursor;
+    } while (cursor);
   });
   afterEach(() => { vi.restoreAllMocks(); });
 
@@ -548,6 +568,16 @@ describe("GET /issues — Claude Code launch button", () => {
   beforeEach(async () => {
     await env.CI_STATUS.delete("issues-page:project-map");
     await env.CI_STATUS.delete("issues-page:pr-map:v2");
+    // KV cache (Refs #129) も毎テスト前にクリア。watermark が残っていると
+    // reconcile が fresh window 判定で skip し、cold-start の fetch が
+    // 走らないため stub が当たらず空 cache を返す。
+    await env.CI_STATUS.delete("issues:watermark");
+    let cursor: string | undefined;
+    do {
+      const page = await env.CI_STATUS.list({ prefix: "issue:", cursor });
+      await Promise.all(page.keys.map((k) => env.CI_STATUS.delete(k.name)));
+      cursor = page.list_complete ? undefined : page.cursor;
+    } while (cursor);
   });
   afterEach(() => { vi.restoreAllMocks(); });
 
@@ -595,6 +625,16 @@ describe("GET /issues — Related-PR chips", () => {
   beforeEach(async () => {
     await env.CI_STATUS.delete("issues-page:project-map");
     await env.CI_STATUS.delete("issues-page:pr-map:v2");
+    // KV cache (Refs #129) も毎テスト前にクリア。watermark が残っていると
+    // reconcile が fresh window 判定で skip し、cold-start の fetch が
+    // 走らないため stub が当たらず空 cache を返す。
+    await env.CI_STATUS.delete("issues:watermark");
+    let cursor: string | undefined;
+    do {
+      const page = await env.CI_STATUS.list({ prefix: "issue:", cursor });
+      await Promise.all(page.keys.map((k) => env.CI_STATUS.delete(k.name)));
+      cursor = page.list_complete ? undefined : page.cursor;
+    } while (cursor);
   });
   afterEach(() => { vi.restoreAllMocks(); });
 

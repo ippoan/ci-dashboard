@@ -1,5 +1,12 @@
 import type { Env } from "./index";
 import { parseTaglessRepos } from "./tagless-repos";
+import {
+  upsertIssue,
+  webhookIssueToOrgIssue,
+  applyIssueCommentEvent,
+  type IssueWebhookPayload,
+  type IssueCommentWebhookPayload,
+} from "./issue-cache";
 
 interface WorkflowRunPayload {
   action: string;
@@ -183,6 +190,25 @@ export async function handleWebhook(
         }),
       }));
     }
+    return new Response("OK", { status: 200 });
+  }
+
+  // /issues SSR page の KV cache (issue-cache.ts) 更新経路。Webhook で来た
+  // 個別 issue を upsert する。watermark は意図的に touch しない (配信ミス
+  // 時に list-since reconcile が必ず拾うための担保)。Refs #129。
+  if (event === "issues") {
+    const payload: IssueWebhookPayload = JSON.parse(body);
+    const issue = webhookIssueToOrgIssue(payload);
+    await upsertIssue(env.CI_STATUS, issue);
+    return new Response("OK", { status: 200 });
+  }
+
+  // /issues SSR の comment 数表示用。`created` / `deleted` だけ反映、
+  // `edited` は無視 (件数変わらない)。cache miss (該当 issue が KV に
+  // 居ない) は no-op — 次の reconcile delta が full record で上書きする。
+  if (event === "issue_comment") {
+    const payload: IssueCommentWebhookPayload = JSON.parse(body);
+    await applyIssueCommentEvent(env.CI_STATUS, payload);
     return new Response("OK", { status: 200 });
   }
 

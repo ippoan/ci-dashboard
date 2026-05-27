@@ -1,0 +1,197 @@
+import type { OrgIssue, FetchOrgIssuesParams } from "./mcp/tools/issues";
+import { fetchOrgIssues } from "./mcp/tools/issues";
+import type { AuthClientWorkerEnv } from "@ippoan/auth-client-worker";
+
+// KV schema:
+//   issue:<owner>/<name>#<number>  -> OrgIssue JSON   (open issues only;
+//                                                      closed → delete)
+//   issues:watermark               -> ISO timestamp   (last successful
+//                                                      list-since reconcile)
+//
+// 設計方針 (Refs #129):
+// - SSR は KV から read のみ。reconcile は watermark が古い時だけ走る。
+// - Webhook (issues / issue_comment) は個別 issue を patch するが watermark
+//   は触らない。watermark の意味は「ここまでは list-since が確実に拾った」。
+//   webhook 配信ミスは次の reconcile の delta クエリが必ず救う。
+
+const KEY_WATERMARK = "issues:watermark";
+const KEY_PREFIX = "issue:";
+
+// SSR 連続リロード時の thundering herd を吸収しつつ「stale すぎる」と
+// 感じさせない値。書き込みは webhook が数秒以内に届くので 60s 内の更新
+// ラグは webhook 側でほぼ埋まる。
+const FRESH_THRESHOLD_MS = 60 * 1000;
+
+// Watermark を `now - SAFETY_WINDOW_MS` でセット。次回 delta の
+// `updated:>=watermark` が clock skew 5s ぶんを overlap 検索するための
+// バッファ。upsert は idempotent なので overlap は無害。
+const SAFETY_WINDOW_MS = 5 * 1000;
+
+export function issueKey(repo: string, number: number): string {
+  return `${KEY_PREFIX}${repo}#${number}`;
+}
+
+/** Webhook 経路から呼ぶ単一 issue 反映。open → put / closed → delete。
+ *  watermark は意図的に touch しない (上記設計方針参照)。 */
+export async function upsertIssue(
+  kv: KVNamespace,
+  issue: OrgIssue,
+): Promise<void> {
+  const key = issueKey(issue.repo, issue.number);
+  if (issue.state === "open") {
+    await kv.put(key, JSON.stringify(issue));
+  } else {
+    await kv.delete(key);
+  }
+}
+
+/** Cache 上の全 open issue を返す。KV.list で prefix 走査。現状 issue 数
+ *  数百のオーダーなので 1-2 page で完了する。 */
+export async function listCachedOpenIssues(kv: KVNamespace): Promise<OrgIssue[]> {
+  const out: OrgIssue[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await kv.list({ prefix: KEY_PREFIX, cursor });
+    const vals = await Promise.all(
+      page.keys.map((k) => kv.get(k.name, "json") as Promise<OrgIssue | null>),
+    );
+    for (const v of vals) if (v) out.push(v);
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor);
+  return out;
+}
+
+export interface ReconcileParams {
+  mainOrgs: string[];
+  yhondaRepos: string[];
+}
+
+export interface ReconcileResult {
+  /** Number of issues touched by this reconcile. 0 if cache was fresh. */
+  patched: number;
+  /** Whether we actually hit GitHub. false = within FRESH_THRESHOLD_MS. */
+  fetched: boolean;
+}
+
+/** Watermark を見て GitHub に当てに行く。fresh window 内なら no-op。
+ *  Cold start (watermark なし) は state:open の全件取得、それ以降は
+ *  state:all + updated:>=watermark の delta。auth error 等はそのまま throw。 */
+export async function reconcileIssues(
+  env: AuthClientWorkerEnv,
+  params: ReconcileParams,
+): Promise<ReconcileResult> {
+  const kv = env.CI_STATUS;
+  const watermark = await kv.get(KEY_WATERMARK);
+  const now = Date.now();
+  if (watermark && now - Date.parse(watermark) < FRESH_THRESHOLD_MS) {
+    return { patched: 0, fetched: false };
+  }
+
+  const isCold = !watermark;
+  // Cold start: state:open で「現時点の open 集合」をブートストラップ。
+  // Warm: state:all + updated:>= で delta のみ (close も拾う)。
+  const sinceQ = watermark ? `updated:>=${watermark}` : "";
+  const stateFilter: FetchOrgIssuesParams["state"] = isCold ? "open" : "all";
+
+  // 既存の issues-page.ts と同じ 2-query pattern。GitHub search は org: と
+  // repo: を組み合わせると repo: 側を黙って drop するので yhonda-ohishi
+  // 特定 repo は別 query に分離する必要がある (mcp/tools/issues.ts 参照)。
+  const mainParams: FetchOrgIssuesParams = {
+    orgs: params.mainOrgs,
+    state: stateFilter,
+    per_page: 100,
+  };
+  if (sinceQ) mainParams.query = sinceQ;
+
+  const yhondaQ = [
+    ...params.yhondaRepos.map((r) => `repo:${r}`),
+    sinceQ,
+  ].filter(Boolean).join(" ");
+  const yhondaParams: FetchOrgIssuesParams = {
+    orgs: ["yhonda-ohishi"],
+    state: stateFilter,
+    per_page: 100,
+    query: yhondaQ,
+  };
+
+  const [main, yhonda] = await Promise.all([
+    fetchOrgIssues(env, mainParams),
+    fetchOrgIssues(env, yhondaParams),
+  ]);
+
+  const all = [...main.items, ...yhonda.items];
+  for (const issue of all) {
+    await upsertIssue(kv, issue);
+  }
+
+  const newWm = new Date(now - SAFETY_WINDOW_MS).toISOString();
+  await kv.put(KEY_WATERMARK, newWm);
+
+  return { patched: all.length, fetched: true };
+}
+
+// ───── Webhook payload → OrgIssue 正規化 ─────
+
+export interface IssueWebhookPayload {
+  action: string;
+  issue: {
+    number: number;
+    title: string;
+    state: "open" | "closed";
+    user: { login: string } | null;
+    labels: Array<{ name: string }>;
+    assignees: Array<{ login: string }>;
+    comments: number;
+    created_at: string;
+    updated_at: string;
+    html_url: string;
+  };
+  repository: { full_name: string };
+}
+
+export function webhookIssueToOrgIssue(p: IssueWebhookPayload): OrgIssue {
+  return {
+    repo: p.repository.full_name,
+    number: p.issue.number,
+    title: p.issue.title,
+    state: p.issue.state,
+    author: p.issue.user?.login ?? "",
+    labels: p.issue.labels.map((l) => l.name),
+    assignees: p.issue.assignees.map((a) => a.login),
+    comments: p.issue.comments,
+    created_at: p.issue.created_at,
+    updated_at: p.issue.updated_at,
+    url: p.issue.html_url,
+  };
+}
+
+export interface IssueCommentWebhookPayload {
+  action: "created" | "edited" | "deleted";
+  issue: { number: number };
+  repository: { full_name: string };
+}
+
+/** issue_comment event を反映。comment 数だけ inc/dec する。`edited` は
+ *  comment 数を変えないので skip。cache miss (該当 issue が KV に居ない)
+ *  は no-op — どうせ次の reconcile delta で full record が来る。 */
+export async function applyIssueCommentEvent(
+  kv: KVNamespace,
+  p: IssueCommentWebhookPayload,
+): Promise<void> {
+  if (p.action === "edited") return;
+  const key = issueKey(p.repository.full_name, p.issue.number);
+  const existing = await kv.get(key, "json") as OrgIssue | null;
+  if (!existing) return;
+  existing.comments += p.action === "created" ? 1 : -1;
+  if (existing.comments < 0) existing.comments = 0;
+  existing.updated_at = new Date().toISOString();
+  await kv.put(key, JSON.stringify(existing));
+}
+
+// Test 用に内部定数を公開。production code からは呼ばない。
+export const __testing = {
+  KEY_WATERMARK,
+  KEY_PREFIX,
+  FRESH_THRESHOLD_MS,
+  SAFETY_WINDOW_MS,
+};
