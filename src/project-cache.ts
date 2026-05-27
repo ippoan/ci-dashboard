@@ -5,6 +5,7 @@ import {
   type OrgProject,
   type OrgProjectsResult,
   type ProjectItemSummary,
+  type ProjectRef,
 } from "./mcp/tools/projects";
 
 // KV schema (Refs #131):
@@ -64,6 +65,69 @@ export async function getOrFetchProjectItems(
   const items = await fetchProjectItems(env, org, number);
   await kv.put(itemsKey(org, number), JSON.stringify(items), { expirationTtl: TTL_SECONDS });
   return items;
+}
+
+// ───── /issues page 向け project map (Refs #135) ─────
+
+export interface ProjectIssueMapResult {
+  map: Map<string, ProjectRef[]>;
+  /** True if the result is from cache because fresh fetch failed. 本実装は
+   *  cache 層が個別に TTL 管理するため常に false。元の loadProjectMap API と
+   *  互換性を保つために残してある。 */
+  stale: boolean;
+  /** いずれかの per-project fetch / org list fetch が失敗した場合の最初の
+   *  メッセージ。map は best-effort で部分結果を返す。 */
+  error: string | null;
+}
+
+/** `/issues` page の `Project 付き` セクション用に `repo#number → ProjectRef[]`
+ *  map を返す。`/projects` page と同じ KV cache (`project:org-list:*` /
+ *  `project:items:*`) を共有するので、片方を warm にしておくともう片方の
+ *  初回ロードが速い。Refs #135 (旧 issues-page:project-map cache の置換)。 */
+export async function getOrFetchProjectIssueMap(
+  env: AuthClientWorkerEnv,
+  orgs: string[],
+): Promise<ProjectIssueMapResult> {
+  let perOrg: OrgProjectsResult[];
+  try {
+    perOrg = await getOrFetchOrgProjects(env, orgs);
+  } catch (err) {
+    return {
+      map: new Map(),
+      stale: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+
+  const map = new Map<string, ProjectRef[]>();
+  let firstError: string | null = null;
+
+  await Promise.all(
+    perOrg.flatMap(({ org, projects }) =>
+      projects.map(async (p) => {
+        try {
+          const items = await getOrFetchProjectItems(env, org, p.number);
+          for (const item of items) {
+            if (item.content.type !== "issue") continue;
+            const c = item.content;
+            const key = `${c.repo}#${c.number}`;
+            const ref: ProjectRef = {
+              org, number: p.number, title: p.title, url: p.url,
+            };
+            const cur = map.get(key);
+            if (cur) cur.push(ref);
+            else map.set(key, [ref]);
+          }
+        } catch (err) {
+          if (!firstError) {
+            firstError = err instanceof Error ? err.message : String(err);
+          }
+        }
+      }),
+    ),
+  );
+
+  return { map, stale: false, error: firstError };
 }
 
 /** 該当 org の board list cache だけ flush。`projects_v2` event 用 (board
