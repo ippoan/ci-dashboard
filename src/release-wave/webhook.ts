@@ -85,11 +85,15 @@ export async function handleContractAppliedWebhook(
   }
   const parsed = requestSchema.safeParse(rawBody);
   if (!parsed.success) {
+    // zod 4 の `error.issues` を読みつつ、フォーマット差異で fail しないよう
+    // `error.message` も含めて返す (= テスト assertion でも path 名でも文言
+    // でも match できる)。
+    const issuesText = parsed.error.issues
+      .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
+      .join("; ");
     return jsonResponse(400, {
       code: "BAD_REQUEST",
-      error: parsed.error.issues
-        .map((i) => `${i.path.join(".")}: ${i.message}`)
-        .join("; "),
+      error: issuesText || parsed.error.message || "validation failed",
     });
   }
 
