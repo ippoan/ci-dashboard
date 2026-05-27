@@ -1,9 +1,10 @@
-import { fetchOrgIssues, type OrgIssue } from "./mcp/tools/issues";
+import { type OrgIssue } from "./mcp/tools/issues";
 import { fetchProjectIssueMap, type ProjectRef } from "./mcp/tools/projects";
 import { fetchAllOpenPrsByIssue, type IssuePrRef } from "./issue-prs";
 import type { AuthClientWorkerEnv } from "@ippoan/auth-client-worker";
 import { renderTabs, TAB_STYLES } from "./nav-tabs";
 import { PWA_HEAD_TAGS, PWA_REGISTER_SCRIPT } from "./pwa";
+import { listCachedOpenIssues, reconcileIssues } from "./issue-cache";
 
 // Orgs fetched in full. Same allowlist as github-api.ts (not imported because
 // ALLOWED_ORGS isn't exported; keep the two in sync if either grows).
@@ -169,29 +170,12 @@ function isAuthError(err: unknown): boolean {
 }
 
 export async function handleIssuesPage(env: AuthClientWorkerEnv): Promise<Response> {
-  // Search REST gives us the issues themselves; this is the only fetch that
-  // can fail the page outright. Project map is loaded separately below so a
-  // GraphQL rate-limit doesn't blank the page (Refs #94 follow-up).
-  let merged;
+  // KV cache-first 読み出し (Refs #129)。reconcile は watermark が古い時
+  // だけ走り、それ以外は KV read で完結する (= GitHub API 0 call)。
+  // reconcile 失敗時も cache が空でなければ stale banner 付きで render する。
+  let reconcileError: string | null = null;
   try {
-    const [main, yhonda] = await Promise.all([
-      fetchOrgIssues(env, {
-        orgs: ORGS,
-        state: "open",
-        per_page: 100,
-      }),
-      fetchOrgIssues(env, {
-        orgs: ["yhonda-ohishi"],
-        state: "open",
-        per_page: 100,
-        query: YHONDA_REPOS.map((r) => `repo:${r}`).join(" "),
-      }),
-    ]);
-    merged = {
-      total_count: main.total_count + yhonda.total_count,
-      incomplete: main.incomplete || yhonda.incomplete,
-      items: [...main.items, ...yhonda.items],
-    };
+    await reconcileIssues(env, { mainOrgs: ORGS, yhondaRepos: YHONDA_REPOS });
   } catch (err) {
     if (isAuthError(err)) {
       // 認証失効: GitHub 同意画面 → /oauth/callback → return_to で /issues に戻る
@@ -200,12 +184,33 @@ export async function handleIssuesPage(env: AuthClientWorkerEnv): Promise<Respon
         headers: { Location: "/oauth/login?return_to=/issues" },
       });
     }
-    const msg = err instanceof Error ? err.message : String(err);
-    return new Response(renderError(msg), {
+    reconcileError = err instanceof Error ? err.message : String(err);
+  }
+
+  const cached = await listCachedOpenIssues(env.CI_STATUS);
+  // KV には過去設定の repo が残っている可能性があるので allowlist で
+  // filter。mainOrgs 配下は全 repo 許可、yhonda-ohishi は YHONDA_REPOS のみ。
+  const mainOrgSet = new Set(ORGS);
+  const yhondaRepoSet = new Set(YHONDA_REPOS);
+  const filtered = cached.filter((i) => {
+    const owner = i.repo.split("/")[0] ?? "";
+    if (mainOrgSet.has(owner)) return true;
+    return yhondaRepoSet.has(i.repo);
+  });
+
+  // Cache が空かつ reconcile も fail → 完全に表示不能なので 502。
+  if (filtered.length === 0 && reconcileError) {
+    return new Response(renderError(reconcileError), {
       status: 502,
       headers: { "Content-Type": "text/html; charset=utf-8" },
     });
   }
+
+  const merged = {
+    total_count: filtered.length,
+    incomplete: false,
+    items: filtered,
+  };
 
   const [project, prs] = await Promise.all([
     loadProjectMap(env, PROJECT_ORGS),
@@ -242,7 +247,7 @@ export async function handleIssuesPage(env: AuthClientWorkerEnv): Promise<Respon
     ] as const);
 
   return new Response(
-    renderHtml(merged.total_count, merged.incomplete, projectTagged, repos, project, prs),
+    renderHtml(merged.total_count, merged.incomplete, projectTagged, repos, project, prs, reconcileError),
     { headers: { "Content-Type": "text/html; charset=utf-8" } },
   );
 }
@@ -254,6 +259,7 @@ function renderHtml(
   repos: ReadonlyArray<readonly [string, OrgIssue[]]>,
   project: ProjectMapResult,
   prs: PrMapResult,
+  issueStaleError: string | null,
 ): string {
   const repoSections = repos
     .map(([repo, items]) => renderRepoSection(repo, items, prs.map))
@@ -265,6 +271,11 @@ function renderHtml(
 
   const incompleteBanner = incomplete
     ? `<div class="banner">⚠️ Result was truncated by GitHub search. Showing ${total} issues but more may exist.</div>`
+    : "";
+  // KV cache の reconcile が fail した時の stale 注意。cache がある以上
+  // ページは出せるが、最新の close / open は反映されていない可能性がある。
+  const issueStaleBanner = issueStaleError
+    ? `<div class="banner banner-info">📋 Issue list shown is from KV cache — fresh reconcile failed (${escapeHtml(issueStaleError)})</div>`
     : "";
   const projectBanner = project.stale
     ? `<div class="banner banner-info">📋 Project tags shown are from the last successful sync — fresh fetch failed (${escapeHtml(project.error ?? "")})</div>`
@@ -468,6 +479,7 @@ function renderHtml(
     </div>
   </header>
   ${incompleteBanner}
+  ${issueStaleBanner}
   ${projectBanner}
   ${prBanner}
   ${projectSection}
