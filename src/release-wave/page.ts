@@ -30,6 +30,29 @@ function escapeHtml(s: string): string {
     .replace(/'/g, "&#039;");
 }
 
+/**
+ * URL を http(s) のみに絞って返す。`javascript:`, `data:`, `vbscript:` 等の
+ * scheme を持つ値は null を返して link 化させない (= XSS 防止)。
+ *
+ * `escapeHtml` は content escape のみで scheme injection を防げない:
+ * `javascript:alert(1)` には HTML 特殊文字が無いため escape 後も生のまま
+ * `<a href="...">` に乗り、クリックすると script 実行される。
+ *
+ * preview_url は repo 側 release-wave handler が `release_wave_stage`
+ * MCP tool で報告する値 = handler が compromise されれば任意値を入れられる
+ * = trust boundary を越える input なので必ず scheme check を入れる。
+ */
+function safeHttpUrl(u: string | null | undefined): string | null {
+  if (!u) return null;
+  try {
+    const parsed = new URL(u);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
 /** state name → 表示色 (CSS hex)。 */
 function stateColor(state: WaveStateName): string {
   switch (state) {
@@ -53,7 +76,21 @@ function stateColor(state: WaveStateName): string {
 function htmlResponse(body: string, status = 200): Response {
   return new Response(body, {
     status,
-    headers: { "Content-Type": "text/html; charset=utf-8" },
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      // Defense in depth against XSS:
+      // - `script-src 'none'` で <script> / event handler 経由の実行をブロック
+      // - `style-src 'self' 'unsafe-inline'` は本ページが inline <style> を
+      //   使うため許可 (= injected style での data exfil は別軸の懸念だが、
+      //   本ページの content は admin trusted DO state なのでバランス内)
+      // - `default-src 'none'` で他リソース読み込みを全 deny
+      // - `connect-src 'none'` で fetch / XHR 全 deny (本ページに JS 無し)
+      // - preview link は target=_blank で別タブに飛ばすため frame-src 不要
+      "Content-Security-Policy":
+        "default-src 'none'; style-src 'self' 'unsafe-inline'; connect-src 'none'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "X-Content-Type-Options": "nosniff",
+      "Referrer-Policy": "no-referrer",
+    },
   });
 }
 
@@ -228,8 +265,13 @@ export async function handleReleaseWaveDetailPage(
         : r.flip_status === "failed"
         ? `<span class="err">failed</span>`
         : `<span class="pending">pending</span>`;
-      const previewCell = r.preview_url
-        ? `<a href="${escapeHtml(r.preview_url)}" target="_blank" rel="noopener">${escapeHtml(r.preview_url)}</a>`
+      // preview_url は scheme を http/https に絞ってから link 化する。
+      // javascript: / data: 等の dangerous scheme は null 化して text-only 表示。
+      const safePreview = safeHttpUrl(r.preview_url);
+      const previewCell = safePreview
+        ? `<a href="${escapeHtml(safePreview)}" target="_blank" rel="noopener noreferrer">${escapeHtml(safePreview)}</a>`
+        : r.preview_url
+        ? `<span class="meta" title="non-http(s) scheme rejected">${escapeHtml(r.preview_url)}</span>`
         : `<span class="meta">—</span>`;
       const rollbackTargetCell = r.flip_from_revision
         ? escapeHtml(r.flip_from_revision)

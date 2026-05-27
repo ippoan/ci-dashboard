@@ -351,6 +351,100 @@ describe("handleReleaseWaveDetailPage", () => {
     expect(html.indexOf("third")).toBeLessThan(html.indexOf("first"));
   });
 
+  it("rejects javascript: scheme in preview_url (XSS regression)", async () => {
+    const wave = makeWave({
+      state: "flipped",
+      repos: [
+        {
+          repo: "ippoan/evil",
+          target_tag: "v1",
+          head_sha: "x",
+          stage_status: "done",
+          // attacker-controlled preview_url (= release_wave_stage MCP callback
+          // from a compromised handler). safeHttpUrl で reject 必須。
+          preview_url: "javascript:alert(1)",
+          stage_error: null,
+          flip_status: "done",
+          flip_error: null,
+          flip_from_revision: null,
+          rolled_back_to_revision: null,
+        },
+      ],
+    });
+    const env = fakeEnv({ getReturn: { ok: true, data: wave } });
+    const resp = await handleReleaseWaveDetailPage(env, "w1");
+    const html = await resp.text();
+    // クリック可能な <a href="javascript:..."> が生えないこと
+    expect(html).not.toMatch(/href="javascript:/i);
+    // 値自体は (escape された text として) 残って operator が気づける
+    expect(html).toContain("javascript:alert(1)");
+    // non-http(s) scheme は span (=non-link) 化されていること
+    expect(html).toMatch(/<span[^>]*title="non-http\(s\) scheme rejected"/);
+  });
+
+  it("rejects data: scheme in preview_url", async () => {
+    const wave = makeWave({
+      state: "flipped",
+      repos: [
+        {
+          repo: "ippoan/a",
+          target_tag: "v1",
+          head_sha: "x",
+          stage_status: "done",
+          preview_url: "data:text/html,<script>alert(1)</script>",
+          stage_error: null,
+          flip_status: "done",
+          flip_error: null,
+          flip_from_revision: null,
+          rolled_back_to_revision: null,
+        },
+      ],
+    });
+    const env = fakeEnv({ getReturn: { ok: true, data: wave } });
+    const resp = await handleReleaseWaveDetailPage(env, "w1");
+    const html = await resp.text();
+    expect(html).not.toMatch(/href="data:/i);
+    expect(html).not.toContain("<script>alert");
+  });
+
+  it("accepts https: preview_url and renders as link with noreferrer", async () => {
+    const wave = makeWave({
+      state: "flipped",
+      repos: [
+        {
+          repo: "ippoan/a",
+          target_tag: "v1",
+          head_sha: "x",
+          stage_status: "done",
+          preview_url: "https://preview-rust-alc-api.ippoan.org/",
+          stage_error: null,
+          flip_status: "done",
+          flip_error: null,
+          flip_from_revision: null,
+          rolled_back_to_revision: null,
+        },
+      ],
+    });
+    const env = fakeEnv({ getReturn: { ok: true, data: wave } });
+    const resp = await handleReleaseWaveDetailPage(env, "w1");
+    const html = await resp.text();
+    expect(html).toMatch(
+      /<a href="https:\/\/preview-rust-alc-api\.ippoan\.org[^"]*"[^>]*rel="noopener noreferrer"/,
+    );
+  });
+
+  it("sets Content-Security-Policy + nosniff + no-referrer headers", async () => {
+    const env = fakeEnv({ listReturn: [] });
+    const resp = await handleReleaseWaveListPage(env);
+    const csp = resp.headers.get("Content-Security-Policy") ?? "";
+    // default-src 'none' で script を含む全 unspecified resource を deny
+    expect(csp).toContain("default-src 'none'");
+    expect(csp).toContain("form-action 'self'");
+    expect(csp).toContain("frame-ancestors 'none'");
+    expect(resp.headers.get("X-Content-Type-Options")).toBe("nosniff");
+    expect(resp.headers.get("Referrer-Policy")).toBe("no-referrer");
+  });
+
   it("escapes HTML in repo names / wave_id / event summaries", async () => {
     const wave = makeWave({
       wave_id: "evil<wave>",
