@@ -13,6 +13,28 @@ import {
   type ProjectsV2WebhookPayload,
   type ProjectsV2ItemWebhookPayload,
 } from "./project-cache";
+import {
+  invalidateIssue as invalidateReleaseCacheIssue,
+  invalidateRepoTags,
+  invalidateRepoCommits,
+} from "./release-cache";
+
+interface ReleaseWebhookPayload {
+  action: string;
+  release: {
+    tag_name: string;
+    id: number;
+  };
+  repository: { full_name: string };
+}
+
+interface PushWebhookPayload {
+  ref: string;
+  repository: {
+    full_name: string;
+    default_branch: string;
+  };
+}
 
 interface WorkflowRunPayload {
   action: string;
@@ -202,10 +224,18 @@ export async function handleWebhook(
   // /issues SSR page の KV cache (issue-cache.ts) 更新経路。Webhook で来た
   // 個別 issue を upsert する。watermark は意図的に touch しない (配信ミス
   // 時に list-since reconcile が必ず拾うための担保)。Refs #129。
+  //
+  // Phase 3 (Refs #133): /releases page も release-cache.cachedIssue (60s TTL)
+  // で同 issue を別 cache に保持しているため、外部から close された時に
+  // release-cache 側も invalidate して /releases の close-status を即時反映する。
   if (event === "issues") {
     const payload: IssueWebhookPayload = JSON.parse(body);
     const issue = webhookIssueToOrgIssue(payload);
     await upsertIssue(env.CI_STATUS, issue);
+    const [owner, name] = payload.repository.full_name.split("/");
+    if (owner && name) {
+      await invalidateReleaseCacheIssue(env.CI_STATUS, owner, name, payload.issue.number);
+    }
     return new Response("OK", { status: 200 });
   }
 
@@ -232,6 +262,40 @@ export async function handleWebhook(
   if (event === "projects_v2_item") {
     const payload: ProjectsV2ItemWebhookPayload = JSON.parse(body);
     await applyProjectsV2ItemEvent(env.CI_STATUS, payload);
+    return new Response("OK", { status: 200 });
+  }
+
+  // /releases SSR の release-cache.ts (TTL 300s tags) を webhook で flush。
+  // 新規 release が publish/edit/delete された時に該当 repo の tag list cache
+  // を delete → 次の /releases ロードで refetch。Refs #133。
+  if (event === "release") {
+    const payload: ReleaseWebhookPayload = JSON.parse(body);
+    const [owner, name] = payload.repository.full_name.split("/");
+    if (owner && name) {
+      await invalidateRepoTags(env.CI_STATUS, owner, name);
+    }
+    return new Response("OK", { status: 200 });
+  }
+
+  // `push` event は tag push (refs/tags/*) なら tags cache、default branch
+  // への push なら commits cache (synthetic-block の HEAD listing 用) を
+  // flush する。それ以外の branch push は noop。malformed payload (test fixture
+  // 等) も noop して 200 を返す。Refs #133。
+  if (event === "push") {
+    const payload = JSON.parse(body) as Partial<PushWebhookPayload>;
+    const fullName = payload.repository?.full_name;
+    const defaultBranch = payload.repository?.default_branch;
+    const ref = payload.ref;
+    if (fullName && ref) {
+      const [owner, name] = fullName.split("/");
+      if (owner && name) {
+        if (ref.startsWith("refs/tags/")) {
+          await invalidateRepoTags(env.CI_STATUS, owner, name);
+        } else if (defaultBranch && ref === `refs/heads/${defaultBranch}`) {
+          await invalidateRepoCommits(env.CI_STATUS, owner, name);
+        }
+      }
+    }
     return new Response("OK", { status: 200 });
   }
 

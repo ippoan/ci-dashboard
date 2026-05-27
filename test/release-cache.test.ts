@@ -2,9 +2,13 @@ import { env } from "cloudflare:test";
 import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   cachedTags,
+  cachedCommits,
   cachedIssue,
   cachedCompare,
   invalidateIssue,
+  invalidateRepoTags,
+  invalidateRepoCommits,
+  invalidateRepoMeta,
   clearReleaseCache,
 } from "../src/release-cache";
 
@@ -79,5 +83,62 @@ describe("release-cache", () => {
     await expect(
       invalidateIssue(undefined, "ippoan", "ci-dashboard", 1),
     ).resolves.toBeUndefined();
+  });
+
+  // Phase 3 (Refs #133): webhook 駆動 invalidation helpers。
+  it("invalidateRepoTags: 該当 repo の tags cache を全 per_page 分 flush する", async () => {
+    let calls = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      calls++;
+      return Response.json([{ name: "v1.0.0", commit: { sha: "a" } }]);
+    });
+    // 2 different per_page values populate 2 different KV keys
+    await cachedTags("tok", env.CI_STATUS, "ippoan", "ci-dashboard", 10);
+    await cachedTags("tok", env.CI_STATUS, "ippoan", "ci-dashboard", 30);
+    // 別 repo は触らないことの確認用
+    await cachedTags("tok", env.CI_STATUS, "ippoan", "other", 10);
+    expect(calls).toBe(3);
+
+    await invalidateRepoTags(env.CI_STATUS, "ippoan", "ci-dashboard");
+
+    // 該当 repo は cache miss → 再 fetch (calls 増える)
+    await cachedTags("tok", env.CI_STATUS, "ippoan", "ci-dashboard", 10);
+    await cachedTags("tok", env.CI_STATUS, "ippoan", "ci-dashboard", 30);
+    expect(calls).toBe(5);
+    // 別 repo は cache hit のまま
+    await cachedTags("tok", env.CI_STATUS, "ippoan", "other", 10);
+    expect(calls).toBe(5);
+  });
+
+  it("invalidateRepoCommits: 該当 repo の commits cache を flush する", async () => {
+    let calls = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      calls++;
+      return Response.json([{ sha: "a", commit: { message: "m" } }]);
+    });
+    await cachedCommits("tok", env.CI_STATUS, "ippoan", "ci-dashboard", "main", 50);
+    await cachedCommits("tok", env.CI_STATUS, "ippoan", "other", "main", 50);
+    expect(calls).toBe(2);
+
+    await invalidateRepoCommits(env.CI_STATUS, "ippoan", "ci-dashboard");
+
+    await cachedCommits("tok", env.CI_STATUS, "ippoan", "ci-dashboard", "main", 50);
+    expect(calls).toBe(3); // 該当 repo 再 fetch
+    await cachedCommits("tok", env.CI_STATUS, "ippoan", "other", "main", 50);
+    expect(calls).toBe(3); // 別 repo は hit
+  });
+
+  it("invalidateRepoMeta: 該当 repo の repo-meta key だけ消す", async () => {
+    await env.CI_STATUS.put("rcache:v1:repo:ippoan/ci-dashboard", '{"default_branch":"main"}');
+    await env.CI_STATUS.put("rcache:v1:repo:ippoan/other", '{"default_branch":"main"}');
+    await invalidateRepoMeta(env.CI_STATUS, "ippoan", "ci-dashboard");
+    expect(await env.CI_STATUS.get("rcache:v1:repo:ippoan/ci-dashboard")).toBeNull();
+    expect(await env.CI_STATUS.get("rcache:v1:repo:ippoan/other")).toBeTruthy();
+  });
+
+  it("invalidateRepoTags / invalidateRepoCommits / invalidateRepoMeta は kv=undefined で no-op", async () => {
+    await expect(invalidateRepoTags(undefined, "x", "y")).resolves.toBeUndefined();
+    await expect(invalidateRepoCommits(undefined, "x", "y")).resolves.toBeUndefined();
+    await expect(invalidateRepoMeta(undefined, "x", "y")).resolves.toBeUndefined();
   });
 });
