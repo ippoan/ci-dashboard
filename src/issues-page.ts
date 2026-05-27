@@ -193,7 +193,7 @@ export async function handleIssuesPage(env: AuthClientWorkerEnv): Promise<Respon
   const mainOrgSet = new Set(ORGS);
   const yhondaRepoSet = new Set(YHONDA_REPOS);
   const filtered = cached.filter((i) => {
-    const owner = i.repo.split("/")[0];
+    const owner = i.repo.split("/")[0] ?? "";
     if (mainOrgSet.has(owner)) return true;
     return yhondaRepoSet.has(i.repo);
   });
