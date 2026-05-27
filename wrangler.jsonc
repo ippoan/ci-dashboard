@@ -68,6 +68,17 @@
       "binding": "WEBHOOK_SECRET",
       "store_id": "bd7bc91a3e5f4111add4acf6cb4b8733",
       "secret_name": "webhook-secret-ci-dashboard"
+    },
+    // Release Wave webhook (`/webhooks/release-wave/contract-applied`) の
+    // shared secret。GitHub Actions step が `X-Release-Wave-Webhook-Secret`
+    // header に同値を入れて叩く。各 caller repo は GitHub org secret として
+    // 同値を持つ。値は GCP Secret Manager `release-wave-webhook-secret` を
+    // single source of truth とし、両所に投入する (= secrets-rotate-pipe 経路
+    // で同期)。Refs #137 Phase 3d。
+    {
+      "binding": "RELEASE_WAVE_WEBHOOK_SECRET",
+      "store_id": "bd7bc91a3e5f4111add4acf6cb4b8733",
+      "secret_name": "release-wave-webhook-secret"
     }
   ],
   // ci-workflows/secret-verify-gcp.yml が読む宣言。GCP Secret Manager 上に
@@ -78,7 +89,8 @@
   "secrets": {
     "required": [
       "JWT_FOR_CI_DASHBOARD",
-      "webhook-secret-ci-dashboard"
+      "webhook-secret-ci-dashboard",
+      "release-wave-webhook-secret"
     ]
   },
   // staging を実運用 env として扱う (secrets-inventory と同じパターン)。
@@ -134,6 +146,11 @@
         }
       ],
       "secrets_store_secrets": [
+        {
+          "binding": "RELEASE_WAVE_WEBHOOK_SECRET",
+          "store_id": "bd7bc91a3e5f4111add4acf6cb4b8733",
+          "secret_name": "release-wave-webhook-secret"
+        },
         {
           "binding": "INTERNAL_SHARED_SECRET",
           "store_id": "bd7bc91a3e5f4111add4acf6cb4b8733",

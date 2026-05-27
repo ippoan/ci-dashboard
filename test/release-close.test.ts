@@ -13,6 +13,7 @@ function testEnv(): Env {
       get: () => ({ fetch: async () => new Response("OK") }),
     } as unknown as DurableObjectNamespace,
     RELEASE_WAVE_HUB: { idFromName: () => ({}), get: () => ({ fetch: async () => new Response("OK") }) } as unknown as DurableObjectNamespace,
+    RELEASE_WAVE_WEBHOOK_SECRET: { get: async () => "test-webhook-secret" } as unknown as SecretsStoreSecret,
   };
 }
 
