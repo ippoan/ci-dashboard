@@ -185,7 +185,9 @@ describe("POST /webhook", () => {
     expect(await res.text()).toBe("Invalid signature");
   });
 
-  it("ignores non-workflow_run events", async () => {
+  // Phase 3 (Refs #133) で push event 自体は handler 持つようになったため、
+  // テストの対象 event を fall-through 確実な watch に切替。
+  it("ignores unrecognized events (fall-through 200)", async () => {
     const body = "{}";
     const signature = await sign(body, WEBHOOK_SECRET);
     const req = new Request("http://localhost/webhook", {
@@ -193,14 +195,14 @@ describe("POST /webhook", () => {
       body,
       headers: {
         "X-Hub-Signature-256": signature,
-        "X-GitHub-Event": "push",
+        "X-GitHub-Event": "watch",
       },
     });
     const ctx = createExecutionContext();
     const res = await worker.fetch(req, testEnv(), ctx);
     await waitOnExecutionContext(ctx);
     expect(res.status).toBe(200);
-    expect(await res.text()).toBe("Ignored event: push");
+    expect(await res.text()).toBe("Ignored event: watch");
   });
 
   it("stores workflow_run status in KV", async () => {
@@ -625,5 +627,135 @@ describe("POST /webhook", () => {
     );
     await waitOnExecutionContext(ctx);
     expect(hubCalls.filter((c) => c.path === "/release-alert-detect")).toHaveLength(0);
+  });
+
+  // ───── Phase 3 (Refs #133): release / push / issues → release-cache invalidation ─────
+
+  it("release event flushes tags cache for the repo", async () => {
+    // Seed the tags cache for ippoan/foo
+    await env.CI_STATUS.put(
+      "rcache:v1:tags:ippoan/foo:10",
+      JSON.stringify([{ name: "v0.0.1", commit: { sha: "a" } }]),
+      { expirationTtl: 300 },
+    );
+    const body = JSON.stringify({
+      action: "published",
+      release: { tag_name: "v0.0.2", id: 1 },
+      repository: { full_name: "ippoan/foo" },
+    });
+    const sig = await sign(body, WEBHOOK_SECRET);
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(
+      new Request("http://localhost/webhook", {
+        method: "POST",
+        body,
+        headers: { "X-Hub-Signature-256": sig, "X-GitHub-Event": "release" },
+      }),
+      testEnv(),
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+    expect(res.status).toBe(200);
+    expect(await env.CI_STATUS.get("rcache:v1:tags:ippoan/foo:10")).toBeNull();
+  });
+
+  it("push to refs/tags/* flushes tags cache", async () => {
+    await env.CI_STATUS.put("rcache:v1:tags:ippoan/foo:10", "[]", { expirationTtl: 300 });
+    const body = JSON.stringify({
+      ref: "refs/tags/v0.0.3",
+      repository: { full_name: "ippoan/foo", default_branch: "main" },
+    });
+    const sig = await sign(body, WEBHOOK_SECRET);
+    const ctx = createExecutionContext();
+    await worker.fetch(
+      new Request("http://localhost/webhook", {
+        method: "POST",
+        body,
+        headers: { "X-Hub-Signature-256": sig, "X-GitHub-Event": "push" },
+      }),
+      testEnv(),
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+    expect(await env.CI_STATUS.get("rcache:v1:tags:ippoan/foo:10")).toBeNull();
+  });
+
+  it("push to default branch flushes commits cache (not tags)", async () => {
+    await env.CI_STATUS.put("rcache:v1:tags:ippoan/foo:10", "[]", { expirationTtl: 300 });
+    await env.CI_STATUS.put("rcache:v1:commits:ippoan/foo:main:50", "[]", { expirationTtl: 60 });
+    const body = JSON.stringify({
+      ref: "refs/heads/main",
+      repository: { full_name: "ippoan/foo", default_branch: "main" },
+    });
+    const sig = await sign(body, WEBHOOK_SECRET);
+    const ctx = createExecutionContext();
+    await worker.fetch(
+      new Request("http://localhost/webhook", {
+        method: "POST",
+        body,
+        headers: { "X-Hub-Signature-256": sig, "X-GitHub-Event": "push" },
+      }),
+      testEnv(),
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+    expect(await env.CI_STATUS.get("rcache:v1:commits:ippoan/foo:main:50")).toBeNull();
+    // tags cache は触らない (push が tag じゃないので)
+    expect(await env.CI_STATUS.get("rcache:v1:tags:ippoan/foo:10")).toBe("[]");
+  });
+
+  it("push to feature branch is noop for release-cache", async () => {
+    await env.CI_STATUS.put("rcache:v1:commits:ippoan/foo:main:50", "[]", { expirationTtl: 60 });
+    const body = JSON.stringify({
+      ref: "refs/heads/feature-x",
+      repository: { full_name: "ippoan/foo", default_branch: "main" },
+    });
+    const sig = await sign(body, WEBHOOK_SECRET);
+    const ctx = createExecutionContext();
+    await worker.fetch(
+      new Request("http://localhost/webhook", {
+        method: "POST",
+        body,
+        headers: { "X-Hub-Signature-256": sig, "X-GitHub-Event": "push" },
+      }),
+      testEnv(),
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+    // 触らない
+    expect(await env.CI_STATUS.get("rcache:v1:commits:ippoan/foo:main:50")).toBe("[]");
+  });
+
+  it("issues event also invalidates release-cache issue key (close immediately reflects on /releases)", async () => {
+    await env.CI_STATUS.put(
+      "rcache:v1:issue:ippoan/foo:42",
+      JSON.stringify({ number: 42, state: "open" }),
+      { expirationTtl: 60 },
+    );
+    const body = JSON.stringify({
+      action: "closed",
+      issue: {
+        number: 42, title: "x", state: "closed", user: { login: "y" },
+        labels: [], assignees: [], comments: 0,
+        created_at: "2026-05-27T00:00:00Z",
+        updated_at: "2026-05-27T01:00:00Z",
+        html_url: "https://github.com/ippoan/foo/issues/42",
+      },
+      repository: { full_name: "ippoan/foo" },
+    });
+    const sig = await sign(body, WEBHOOK_SECRET);
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(
+      new Request("http://localhost/webhook", {
+        method: "POST",
+        body,
+        headers: { "X-Hub-Signature-256": sig, "X-GitHub-Event": "issues" },
+      }),
+      testEnv(),
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+    expect(res.status).toBe(200);
+    expect(await env.CI_STATUS.get("rcache:v1:issue:ippoan/foo:42")).toBeNull();
   });
 });

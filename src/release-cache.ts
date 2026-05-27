@@ -188,6 +188,55 @@ export async function invalidateIssue(
   await kv.delete(`${PREFIX}issue:${owner}/${name}:${n}`);
 }
 
+// Phase 3 (Refs #133): webhook 駆動 invalidation の helper 群。`release` /
+// `push` (tag) / `push` (default branch) event を受け取った時に該当 repo の
+// 関連 cache を一括 flush する。TTL (300s / 60s) は据え置き、これら helper
+// は freshness 向上のための追加レイヤー。
+
+async function invalidateRepoPrefix(
+  kv: KVNamespace | undefined,
+  prefix: string,
+): Promise<void> {
+  if (!kv) return;
+  let cursor: string | undefined;
+  do {
+    const list = await kv.list({ prefix, cursor });
+    await Promise.all(list.keys.map((k) => kv.delete(k.name)));
+    cursor = list.list_complete ? undefined : list.cursor;
+  } while (cursor);
+}
+
+/** 該当 repo の tag list cache を flush。`release` event / tag push 時に呼ぶ。 */
+export async function invalidateRepoTags(
+  kv: KVNamespace | undefined,
+  owner: string,
+  name: string,
+): Promise<void> {
+  await invalidateRepoPrefix(kv, `${PREFIX}tags:${owner}/${name}:`);
+}
+
+/** 該当 repo の commits cache (synthetic-block 用 HEAD listing) を flush。
+ *  default branch への push 時に呼ぶ。 */
+export async function invalidateRepoCommits(
+  kv: KVNamespace | undefined,
+  owner: string,
+  name: string,
+): Promise<void> {
+  await invalidateRepoPrefix(kv, `${PREFIX}commits:${owner}/${name}:`);
+}
+
+/** 該当 repo の repo-meta (default_branch 等) cache を flush。
+ *  `repository` event (rename / default_branch 変更) で呼ぶ想定。
+ *  現状の webhook handler では未使用だが API 表面として用意しておく。 */
+export async function invalidateRepoMeta(
+  kv: KVNamespace | undefined,
+  owner: string,
+  name: string,
+): Promise<void> {
+  if (!kv) return;
+  await kv.delete(`${PREFIX}repo:${owner}/${name}`);
+}
+
 // Exposed for tests so afterEach can wipe inter-fixture pollution; production
 // callers never need this (TTL handles eviction).
 export async function clearReleaseCache(kv: KVNamespace): Promise<void> {
