@@ -24,6 +24,7 @@ import {
 } from "./pwa";
 
 export { CIDashboardHub } from "./hub";
+export { ReleaseWaveHub } from "./release-wave/do";
 
 // auth-worker MCP OAuth Provider delegation via `@ippoan/auth-client-worker`.
 // `INTERNAL_SHARED_SECRET` (Secrets Store) is shared with auth-worker for
@@ -33,6 +34,8 @@ export { CIDashboardHub } from "./hub";
 export interface Env extends AuthClientWorkerEnv {
   WEBHOOK_SECRET: SecretsStoreSecret;
   CI_HUB: DurableObjectNamespace;
+  /** Release Wave 機構の hub DO。Refs #137。 */
+  RELEASE_WAVE_HUB: DurableObjectNamespace;
   // Comma-separated `owner/name` list of repos that don't cut tags. PR merges
   // into the default branch are treated as releases for these. See
   // wrangler.jsonc and src/tagless-repos.ts.

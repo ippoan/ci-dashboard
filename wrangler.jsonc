@@ -26,6 +26,12 @@
       {
         "name": "CI_HUB",
         "class_name": "CIDashboardHub"
+      },
+      {
+        // Release Wave 機構 (issue #137)。1 hub DO に全 wave を records として
+        // 持つ。詳細は src/release-wave/do.ts。
+        "name": "RELEASE_WAVE_HUB",
+        "class_name": "ReleaseWaveHub"
       }
     ]
   },
@@ -33,6 +39,10 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["CIDashboardHub"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["ReleaseWaveHub"]
     }
   ],
   // GitHub auth は @ippoan/auth-client-worker 経由で auth-worker に delegate
@@ -106,6 +116,10 @@
           {
             "name": "CI_HUB",
             "class_name": "CIDashboardHub"
+          },
+          {
+            "name": "RELEASE_WAVE_HUB",
+            "class_name": "ReleaseWaveHub"
           }
         ]
       },
@@ -113,6 +127,10 @@
         {
           "tag": "v1",
           "new_sqlite_classes": ["CIDashboardHub"]
+        },
+        {
+          "tag": "v2",
+          "new_sqlite_classes": ["ReleaseWaveHub"]
         }
       ],
       "secrets_store_secrets": [

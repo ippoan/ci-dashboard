@@ -12,6 +12,7 @@ function testEnv(): Env {
       idFromName: () => ({}),
       get: () => ({ fetch: async () => new Response("OK") }),
     } as unknown as DurableObjectNamespace,
+    RELEASE_WAVE_HUB: { idFromName: () => ({}), get: () => ({ fetch: async () => new Response("OK") }) } as unknown as DurableObjectNamespace,
   };
 }
 
