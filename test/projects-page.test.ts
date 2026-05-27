@@ -1,5 +1,5 @@
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import worker from "../src/index";
 import type { Env } from "../src/index";
 
@@ -112,6 +112,18 @@ function stubGraphQL(opts: { failItemsFor?: string } = {}) {
 }
 
 describe("GET /projects", () => {
+  // Phase 2 (#131) で導入された KV cache を毎テスト前にクリア。残ると
+  // 次の it で stubGraphQL を当てても cache hit して fetch が走らない。
+  beforeEach(async () => {
+    for (const prefix of ["project:", "issues-page:project-map"]) {
+      let cursor: string | undefined;
+      do {
+        const page = await env.CI_STATUS.list({ prefix, cursor });
+        await Promise.all(page.keys.map((k) => env.CI_STATUS.delete(k.name)));
+        cursor = page.list_complete ? undefined : page.cursor;
+      } while (cursor);
+    }
+  });
   afterEach(() => { vi.restoreAllMocks(); });
 
   it("renders an HTML page with the Projects tab active and 🗂️ Projects header", async () => {

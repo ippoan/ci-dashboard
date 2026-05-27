@@ -1,6 +1,4 @@
 import {
-  fetchOrgProjects,
-  fetchProjectItems,
   type OrgProject,
   type ProjectItemSummary,
 } from "./mcp/tools/projects";
@@ -8,6 +6,7 @@ import type { AuthClientWorkerEnv } from "@ippoan/auth-client-worker";
 import { renderTabs, TAB_STYLES } from "./nav-tabs";
 import { PWA_HEAD_TAGS, PWA_REGISTER_SCRIPT } from "./pwa";
 import { escapeHtml } from "./issues-page";
+import { getOrFetchOrgProjects, getOrFetchProjectItems } from "./project-cache";
 
 // Same set of orgs as the `/issues` Projects-aggregate section. Three orgs ×
 // ~10 open projects each is well under the GraphQL rate-limit budget for one
@@ -26,9 +25,11 @@ interface OrgSection {
 }
 
 export async function handleProjectsPage(env: AuthClientWorkerEnv): Promise<Response> {
+  // KV cache (Refs #131) 経由で per-org の board list を取る。miss なら
+  // GraphQL fan-out、hit なら API 0 call。TTL 30min + webhook invalidation。
   let perOrg;
   try {
-    perOrg = await fetchOrgProjects(env, { orgs: PROJECT_ORGS });
+    perOrg = await getOrFetchOrgProjects(env, PROJECT_ORGS);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return new Response(renderError(msg), {
@@ -37,16 +38,16 @@ export async function handleProjectsPage(env: AuthClientWorkerEnv): Promise<Resp
     });
   }
 
-  // Fan-out: one items() GraphQL call per (org, project). `allSettled` so a
-  // single project that errors out (e.g. permission, deleted between list and
-  // fetch) doesn't blank the whole page — that project surfaces an inline
-  // error in its <details> block instead.
+  // Fan-out: one items() GraphQL call per (org, project) — but each call is
+  // KV cache-first. `allSettled` so a single project that errors out (e.g.
+  // permission, deleted between list and fetch) doesn't blank the whole page
+  // — that project surfaces an inline error in its <details> block instead.
   const flat = perOrg.flatMap(({ org, projects }) =>
     projects.map((p) => ({ org, project: p })),
   );
   const itemResults = await Promise.allSettled(
     flat.map(({ org, project }) =>
-      fetchProjectItems(env, org, project.number),
+      getOrFetchProjectItems(env, org, project.number),
     ),
   );
 
