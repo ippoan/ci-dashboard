@@ -7,6 +7,12 @@ import {
   type IssueWebhookPayload,
   type IssueCommentWebhookPayload,
 } from "./issue-cache";
+import {
+  applyProjectsV2Event,
+  applyProjectsV2ItemEvent,
+  type ProjectsV2WebhookPayload,
+  type ProjectsV2ItemWebhookPayload,
+} from "./project-cache";
 
 interface WorkflowRunPayload {
   action: string;
@@ -209,6 +215,23 @@ export async function handleWebhook(
   if (event === "issue_comment") {
     const payload: IssueCommentWebhookPayload = JSON.parse(body);
     await applyIssueCommentEvent(env.CI_STATUS, payload);
+    return new Response("OK", { status: 200 });
+  }
+
+  // /projects SSR の KV cache (project-cache.ts) invalidation 経路。
+  // `projects_v2` event = board level (create/close/delete/edit) なので
+  //   org list + items 両方 flush。Refs #131。
+  if (event === "projects_v2") {
+    const payload: ProjectsV2WebhookPayload = JSON.parse(body);
+    await applyProjectsV2Event(env.CI_STATUS, payload);
+    return new Response("OK", { status: 200 });
+  }
+
+  // `projects_v2_item` event = 個別 card の add/edit/delete/archive/reorder。
+  //   list は不変、該当 org の items cache + issues-page project map を flush。
+  if (event === "projects_v2_item") {
+    const payload: ProjectsV2ItemWebhookPayload = JSON.parse(body);
+    await applyProjectsV2ItemEvent(env.CI_STATUS, payload);
     return new Response("OK", { status: 200 });
   }
 
