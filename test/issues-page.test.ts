@@ -509,8 +509,22 @@ describe("GET /issues — Project section", () => {
             data: { repositoryOwner: { projectsV2: { nodes: [] } } },
           });
         }
-        // Both projects claim the same issue #7. Map both project IDs to
-        // the same item list so the issue ends up with two refs.
+        // Both projects claim the same issue #7. Refs #135: /issues は
+        // fetchProjectItems (projectV2(number:) query) 経由なので新 shape で
+        // 返す。両 project の items query で同じ #7 を出して 2 refs にする。
+        if (body.includes("projectV2(number:")) {
+          return Response.json({
+            data: { repositoryOwner: { projectV2: { items: { nodes: [
+              { id: "PVTI_1", type: "ISSUE", content: {
+                __typename: "Issue",
+                number: 7, title: "x", url: "u", state: "OPEN",
+                repository: { nameWithOwner: "ippoan/rust-alc-api" },
+              }, fieldValues: { nodes: [] } },
+            ] } } } },
+          });
+        }
+        // Legacy node(id:) shape — kept for fetchProjectIssueMap callers
+        // (現状 unreachable).
         return Response.json({
           data: { node: { items: { nodes: [
             { content: {
