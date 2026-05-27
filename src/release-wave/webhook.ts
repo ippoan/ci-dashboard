@@ -1,24 +1,21 @@
 /**
- * GitHub Actions step からの contract migration 適用通知を受ける webhook。
+ * GitHub Actions step が叩く HTTP webhook 群。MCP 経路と機能等価だが、
+ * OAuth 不要の shared secret 認証で Actions 側を curl 1 行で済むようにする。
  *
- * MCP 経路 (`release_wave_contract_applied` tool) は OAuth (auth-worker
- * 経由) を必要とし、Actions 側で実装が重い。本 webhook は shared secret
- * 認証のシンプルな HTTP endpoint で、Actions step が curl で叩く想定。
+ * 全 endpoint 共通:
+ *   POST 必須、`X-Release-Wave-Webhook-Secret` header の constant-time 比較、
+ *   Secrets Store binding `RELEASE_WAVE_WEBHOOK_SECRET` から expected 値取得、
+ *   body は JSON、エラーは JSON `{ code, error }` で返す。
  *
- * 認証:
- *   X-Release-Wave-Webhook-Secret header の constant-time 比較。
- *   Secrets Store binding `RELEASE_WAVE_WEBHOOK_SECRET` から値取得。
+ * 提供する 3 endpoint:
+ *   POST /webhooks/release-wave/stage-report       — release-wave-handler が
+ *      stage deploy 完了後に呼ぶ (= release_wave_stage MCP tool 等価)
+ *   POST /webhooks/release-wave/flip-report        — flip 完了後に呼ぶ
+ *      (= release_wave_flip MCP tool 等価)
+ *   POST /webhooks/release-wave/contract-applied   — migration deploy 後に呼ぶ
+ *      (= release_wave_contract_applied MCP tool 等価)
  *
- * Body:
- *   {
- *     "wave_id": "wave_2026_05_27_01",
- *     "repo": "ippoan/rust-alc-api",
- *     "migration_id": "20260601_001_drop_legacy_token"
- *   }
- *
- * 成功時 200 + wave 現状 JSON、失敗時 4xx + { code, error }。
- *
- * 設計の親 issue: ippoan/ci-dashboard#137 "release_wave_contract_applied MCP tool 仕様"
+ * 設計の親 issue: ippoan/ci-dashboard#137 Phase 3d + Phase 4
  */
 
 import { z } from "zod";
@@ -26,17 +23,13 @@ import type { Env } from "../index";
 import type { ReleaseWaveHub, RpcResult } from "./do";
 import type { WaveState } from "./types";
 
-const requestSchema = z.object({
-  wave_id: z.string().min(1),
-  repo: z.string().min(1),
-  migration_id: z.string().min(1),
-});
+// ----------------------------------------------------------------------------
+// Common helpers
+// ----------------------------------------------------------------------------
 
 /** constant-time string compare (= timing attack 防止)。 */
 function constantTimeEqual(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
-  // Web Crypto に直接 ConstantTimeCompare は無いので XOR sum で代替。
-  // 長さ check を分けたうえで 1 文字ずつ XOR 累算するので timing は均一。
   let diff = 0;
   for (let i = 0; i < a.length; i++) {
     diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
@@ -51,73 +44,191 @@ function jsonResponse(status: number, body: unknown): Response {
   });
 }
 
+/** RpcError code → HTTP status の共通 map。 */
+function rpcErrorToHttpStatus(code: string): number {
+  if (code === "NOT_FOUND" || code === "REPO_NOT_IN_WAVE") return 404;
+  return 409;
+}
+
+/** ReleaseWaveHub stub 取得。 */
+function hubStub(env: Env): DurableObjectStub<ReleaseWaveHub> {
+  const id = env.RELEASE_WAVE_HUB.idFromName("singleton");
+  return env.RELEASE_WAVE_HUB.get(id) as DurableObjectStub<ReleaseWaveHub>;
+}
+
 /**
- * POST /webhooks/release-wave/contract-applied を処理する。
- * 全エラーは JSON body で返す (Actions step が parse できるよう)。
+ * 共通 prologue: method check + secret check + body parse + zod validate。
+ * 成功時に validated body を返し、失敗時に Response を返す (caller は早期 return)。
  */
-export async function handleContractAppliedWebhook(
+async function validateAndAuth<S extends z.ZodTypeAny>(
   request: Request,
   env: Env,
-): Promise<Response> {
+  schema: S,
+): Promise<{ ok: true; data: z.infer<S> } | { ok: false; response: Response }> {
   if (request.method !== "POST") {
-    return jsonResponse(405, { code: "METHOD_NOT_ALLOWED", error: "use POST" });
+    return {
+      ok: false,
+      response: jsonResponse(405, { code: "METHOD_NOT_ALLOWED", error: "use POST" }),
+    };
   }
 
-  // 1) Secret check
   const provided = request.headers.get("X-Release-Wave-Webhook-Secret") ?? "";
   const expected = await env.RELEASE_WAVE_WEBHOOK_SECRET.get();
   if (!expected) {
-    return jsonResponse(500, {
-      code: "SECRET_NOT_CONFIGURED",
-      error: "RELEASE_WAVE_WEBHOOK_SECRET is not bound",
-    });
+    return {
+      ok: false,
+      response: jsonResponse(500, {
+        code: "SECRET_NOT_CONFIGURED",
+        error: "RELEASE_WAVE_WEBHOOK_SECRET is not bound",
+      }),
+    };
   }
   if (!constantTimeEqual(provided, expected)) {
-    return jsonResponse(401, { code: "UNAUTHORIZED", error: "invalid webhook secret" });
+    return {
+      ok: false,
+      response: jsonResponse(401, {
+        code: "UNAUTHORIZED",
+        error: "invalid webhook secret",
+      }),
+    };
   }
 
-  // 2) Body parse + validate
   let rawBody: unknown;
   try {
     rawBody = await request.json();
   } catch {
-    return jsonResponse(400, { code: "BAD_JSON", error: "request body is not valid JSON" });
+    return {
+      ok: false,
+      response: jsonResponse(400, {
+        code: "BAD_JSON",
+        error: "request body is not valid JSON",
+      }),
+    };
   }
-  const parsed = requestSchema.safeParse(rawBody);
+  const parsed = schema.safeParse(rawBody);
   if (!parsed.success) {
-    // zod 4 の `error.issues` を読みつつ、フォーマット差異で fail しないよう
-    // `error.message` も含めて返す (= テスト assertion でも path 名でも文言
-    // でも match できる)。
     const issuesText = parsed.error.issues
       .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
       .join("; ");
-    return jsonResponse(400, {
-      code: "BAD_REQUEST",
-      error: issuesText || parsed.error.message || "validation failed",
-    });
+    return {
+      ok: false,
+      response: jsonResponse(400, {
+        code: "BAD_REQUEST",
+        error: issuesText || parsed.error.message || "validation failed",
+      }),
+    };
   }
+  return { ok: true, data: parsed.data };
+}
 
-  // 3) Call DO。Workers RPC は戻り値を Disposable で intersect するため、
-  //    TS の discriminated-union narrowing が崩れる。as cast で復元する。
-  const id = env.RELEASE_WAVE_HUB.idFromName("singleton");
-  const stub = env.RELEASE_WAVE_HUB.get(id) as DurableObjectStub<ReleaseWaveHub>;
-  const result = (await stub.contractApplied({
-    wave_id: parsed.data.wave_id,
-    repo: parsed.data.repo,
-    migration_id: parsed.data.migration_id,
-  })) as RpcResult<WaveState>;
-
+/** DO RpcResult → HTTP Response の共通 map。 */
+function rpcResultToResponse(result: RpcResult<WaveState>): Response {
   if (result.ok) {
     return jsonResponse(200, { ok: true, state: result.data });
   }
-  // DO の RpcError code を HTTP status に map
-  const httpStatus =
-    result.code === "NOT_FOUND" ? 404
-      : result.code === "REPO_NOT_IN_WAVE" ? 404
-      : 409; // INVALID_TRANSITION / TERMINAL_STATE / etc.
-  return jsonResponse(httpStatus, {
+  return jsonResponse(rpcErrorToHttpStatus(result.code), {
     ok: false,
     code: result.code,
     error: result.error,
   });
+}
+
+// ----------------------------------------------------------------------------
+// /webhooks/release-wave/contract-applied  (Phase 3d, 既存)
+// ----------------------------------------------------------------------------
+
+const contractAppliedSchema = z.object({
+  wave_id: z.string().min(1),
+  repo: z.string().min(1),
+  migration_id: z.string().min(1),
+});
+
+export async function handleContractAppliedWebhook(
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  const v = await validateAndAuth(request, env, contractAppliedSchema);
+  if (!v.ok) return v.response;
+  const result = (await hubStub(env).contractApplied({
+    wave_id: v.data.wave_id,
+    repo: v.data.repo,
+    migration_id: v.data.migration_id,
+  })) as RpcResult<WaveState>;
+  return rpcResultToResponse(result);
+}
+
+// ----------------------------------------------------------------------------
+// /webhooks/release-wave/stage-report  (Phase 4 NEW)
+// ----------------------------------------------------------------------------
+
+/**
+ * stage-report body:
+ *   {
+ *     "wave_id": "wave_...",
+ *     "repo": "ippoan/rust-alc-api",
+ *     "ok": true,
+ *     "preview_url": "https://preview-rust-alc-api.ippoan.org",      // ok=true 時のみ意味あり
+ *     "flip_from_revision": "rust-alc-api-00041-zzz",                // ok=true 時のみ
+ *     "error": "build failed"                                        // ok=false 時のみ
+ *   }
+ */
+const stageReportSchema = z.object({
+  wave_id: z.string().min(1),
+  repo: z.string().min(1),
+  ok: z.boolean(),
+  preview_url: z.string().url().optional(),
+  flip_from_revision: z.string().optional(),
+  error: z.string().optional(),
+});
+
+export async function handleStageReportWebhook(
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  const v = await validateAndAuth(request, env, stageReportSchema);
+  if (!v.ok) return v.response;
+  const result = (await hubStub(env).stageReport({
+    wave_id: v.data.wave_id,
+    repo: v.data.repo,
+    ok: v.data.ok,
+    preview_url: v.data.preview_url ?? null,
+    flip_from_revision: v.data.flip_from_revision ?? null,
+    error: v.data.error ?? null,
+  })) as RpcResult<WaveState>;
+  return rpcResultToResponse(result);
+}
+
+// ----------------------------------------------------------------------------
+// /webhooks/release-wave/flip-report  (Phase 4 NEW)
+// ----------------------------------------------------------------------------
+
+/**
+ * flip-report body:
+ *   {
+ *     "wave_id": "wave_...",
+ *     "repo": "ippoan/rust-alc-api",
+ *     "ok": true,
+ *     "error": "patch denied"   // ok=false 時のみ
+ *   }
+ */
+const flipReportSchema = z.object({
+  wave_id: z.string().min(1),
+  repo: z.string().min(1),
+  ok: z.boolean(),
+  error: z.string().optional(),
+});
+
+export async function handleFlipReportWebhook(
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  const v = await validateAndAuth(request, env, flipReportSchema);
+  if (!v.ok) return v.response;
+  const result = (await hubStub(env).flipReport({
+    wave_id: v.data.wave_id,
+    repo: v.data.repo,
+    ok: v.data.ok,
+    error: v.data.error ?? null,
+  })) as RpcResult<WaveState>;
+  return rpcResultToResponse(result);
 }

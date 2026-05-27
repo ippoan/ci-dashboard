@@ -17,7 +17,11 @@ import { handleRecheck } from "./recheck";
 import { handleSecretGenPage } from "./secret-gen-page";
 import { handleTagRelease } from "./tag-release";
 import { handleMcpRequest } from "./mcp/server";
-import { handleContractAppliedWebhook } from "./release-wave/webhook";
+import {
+  handleContractAppliedWebhook,
+  handleStageReportWebhook,
+  handleFlipReportWebhook,
+} from "./release-wave/webhook";
 import {
   handleReleaseWaveListPage,
   handleReleaseWaveDetailPage,
@@ -181,11 +185,18 @@ app.get("/oauth/callback", (c) => handleOAuthCallback(c.req.raw, c.env, OAUTH_OP
 // MCP endpoint (Streamable HTTP)
 app.all("/mcp", (c) => handleMcpRequest(c.req.raw, c.env));
 
-// Release Wave: contract migration 適用通知 webhook (Refs #137 Phase 3d)。
-// GitHub Actions step が curl で叩く。MCP 経路と機能等価だが、OAuth 不要の
-// shared secret (`RELEASE_WAVE_WEBHOOK_SECRET`) で済む。
+// Release Wave: GitHub Actions step が叩く HTTP webhook 3 本 (Refs #137
+// Phase 3d + Phase 4)。MCP 経路と機能等価だが OAuth 不要の shared secret
+// (`RELEASE_WAVE_WEBHOOK_SECRET`) で済むため、release-wave-handler reusable
+// から curl 1 行で呼べる。
 app.post("/webhooks/release-wave/contract-applied", (c) =>
   handleContractAppliedWebhook(c.req.raw, c.env),
+);
+app.post("/webhooks/release-wave/stage-report", (c) =>
+  handleStageReportWebhook(c.req.raw, c.env),
+);
+app.post("/webhooks/release-wave/flip-report", (c) =>
+  handleFlipReportWebhook(c.req.raw, c.env),
 );
 
 // Release Wave admin UI (Refs #137 Phase 3e)。
