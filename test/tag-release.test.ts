@@ -9,6 +9,7 @@ function testEnv(): Env {
     WEBHOOK_SECRET: { get: async () => "test-secret" } as unknown as SecretsStoreSecret,
     INTERNAL_SHARED_SECRET: { get: async () => "test-internal" } as unknown as SecretsStoreSecret,
     CI_HUB: {} as unknown as DurableObjectNamespace,
+    RELEASE_WAVE_HUB: { idFromName: () => ({}), get: () => ({ fetch: async () => new Response("OK") }) } as unknown as DurableObjectNamespace,
   };
 }
 
