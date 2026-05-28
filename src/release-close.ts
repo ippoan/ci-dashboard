@@ -1,6 +1,32 @@
-import { githubApi, parseRepo, tokenForOrg } from "./github-api";
+import { GitHubApiError, githubApi, parseRepo, tokenForOrg } from "./github-api";
 import type { AuthClientWorkerEnv } from "@ippoan/auth-client-worker";
 import { invalidateIssue } from "./release-cache";
+
+// failure 理由を URL flash param に safely 載せるための整形。
+// GitHubApiError は `GitHub API 403: {"message":"Repository was archived so
+// is read-only.",...}` のような長い文字列を持つので、典型的な状況だけ短い
+// human-readable string にマッピングし、それ以外は素の message を 100 字に
+// 切る。export しているのは test から検証するため。
+// Refs ippoan/ci-dashboard#152
+export function formatCloseFailureReason(err: unknown): string {
+  if (err instanceof GitHubApiError) {
+    const msg = err.message;
+    if (/Repository was archived/i.test(msg)) return "archived (read-only)";
+    if (err.status === 403) {
+      // 残りの 403 は token 権限不足 / SSO 未承認 / rate limit などが主。
+      // message から rate limit / SAML SSO を抜き出して短文化。
+      if (/rate limit/i.test(msg)) return "rate limit";
+      if (/SAML SSO/i.test(msg)) return "SAML SSO required";
+      return "forbidden (403)";
+    }
+    if (err.status === 404) return "not found (404)";
+    if (err.status === 410) return "issues disabled (410)";
+    if (err.status === 422) return "validation failed (422)";
+    return `${err.status} ${msg.slice(0, 80)}`;
+  }
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.slice(0, 100);
+}
 
 // POST /api/release-close
 // Receives the form submitted from /releases?repo=...&tag=... and closes the
@@ -69,9 +95,14 @@ export async function handleReleaseClose(
 
   const closed: number[] = [];
   const failed: number[] = [];
+  const failedReasons: Array<{ n: number; reason: string }> = [];
   settled.forEach((r, i) => {
     if (r.status === "fulfilled") closed.push(r.value);
-    else failed.push(issueNumbers[i]!);
+    else {
+      const n = issueNumbers[i]!;
+      failed.push(n);
+      failedReasons.push({ n, reason: formatCloseFailureReason(r.reason) });
+    }
   });
 
   // Drop the just-closed issues from the release cache so the next /releases
@@ -98,6 +129,15 @@ export async function handleReleaseClose(
   const params = new URLSearchParams({ repo: repoParam, tag });
   if (closed.length > 0) params.set("closed", closed.join(","));
   if (failed.length > 0) params.set("failed", failed.join(","));
+  if (failedReasons.length > 0) {
+    // `failed_reasons=N:reason,N:reason` 形式で flash 経路に乗せる。reason 側に
+    // `,` や `:` が出る可能性は低いが、URL safety のため reason は個別に
+    // encodeURIComponent し、最外側は URLSearchParams が encode する。
+    params.set(
+      "failed_reasons",
+      failedReasons.map((f) => `${f.n}:${encodeURIComponent(f.reason)}`).join(","),
+    );
+  }
   return redirect(`/releases?${params.toString()}`);
 }
 

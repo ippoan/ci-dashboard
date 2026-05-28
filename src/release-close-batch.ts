@@ -1,4 +1,5 @@
 import { githubApi, parseRepo, tokenForOrg } from "./github-api";
+import { formatCloseFailureReason } from "./release-close";
 import type { AuthClientWorkerEnv } from "@ippoan/auth-client-worker";
 import { invalidateIssue } from "./release-cache";
 
@@ -88,9 +89,14 @@ export async function handleReleaseCloseBatch(
 
   const closed: number[] = [];
   const failed: number[] = [];
+  const failedReasons: Array<{ n: number; reason: string }> = [];
   settled.forEach((r, i) => {
     if (r.status === "fulfilled") closed.push(r.value);
-    else failed.push(ops[i]!.issue);
+    else {
+      const n = ops[i]!.issue;
+      failed.push(n);
+      failedReasons.push({ n, reason: formatCloseFailureReason(r.reason) });
+    }
   });
 
   // Invalidate cached issue snapshots so the next /releases load reflects the
@@ -116,6 +122,12 @@ export async function handleReleaseCloseBatch(
   const params = new URLSearchParams({ repo: repoParam });
   if (closed.length > 0) params.set("closed", closed.join(","));
   if (failed.length > 0) params.set("failed", failed.join(","));
+  if (failedReasons.length > 0) {
+    params.set(
+      "failed_reasons",
+      failedReasons.map((f) => `${f.n}:${encodeURIComponent(f.reason)}`).join(","),
+    );
+  }
   return redirect(`/releases?${params.toString()}`);
 }
 

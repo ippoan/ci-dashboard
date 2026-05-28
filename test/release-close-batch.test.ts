@@ -114,6 +114,9 @@ describe("POST /api/release-close-batch", () => {
     const location = res.headers.get("Location") ?? "";
     expect(location).toContain("closed=1");
     expect(location).toContain("failed=5");
+    // batch handler も failed_reasons を flash 経路に乗せること。
+    // Refs ippoan/ci-dashboard#152
+    expect(location).toMatch(/failed_reasons=5%3A/);
     expect(calls.length).toBeGreaterThan(0);
   });
 

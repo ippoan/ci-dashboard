@@ -23,7 +23,17 @@ interface RecordedCall {
   body: unknown;
 }
 
-function stubCloseFlow(opts: { failIssue?: number } = {}) {
+function stubCloseFlow(
+  opts: {
+    failIssue?: number;
+    /**
+     * 失敗時 GitHub API が返す Response。default は status 500 "boom" (= generic
+     * fallback path)。archived 403 など特定の reason を test するときに上書き。
+     * Refs ippoan/ci-dashboard#152
+     */
+    failResponse?: () => Response;
+  } = {},
+) {
   const calls: RecordedCall[] = [];
   const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const url = typeof input === "string" ? input : (input as Request).url;
@@ -37,7 +47,9 @@ function stubCloseFlow(opts: { failIssue?: number } = {}) {
     // Per-issue failure injection: any GitHub API touching the failing issue
     // returns 500 so the issue ends up in the `failed` flash list.
     if (opts.failIssue && url.includes(`/issues/${opts.failIssue}`)) {
-      return new Response("boom", { status: 500 });
+      return opts.failResponse
+        ? opts.failResponse()
+        : new Response("boom", { status: 500 });
     }
     if (url.includes("/comments")) {
       return Response.json({ id: 1 });
@@ -113,8 +125,48 @@ describe("POST /api/release-close", () => {
     const location = res.headers.get("Location") ?? "";
     expect(location).toContain("closed=12");
     expect(location).toContain("failed=34");
+    // 失敗 issue には reason が同伴している (500 fallback path)。
+    expect(location).toMatch(/failed_reasons=34%3A/);
     // Some GitHub API traffic still happened, but the failed issue short-circuits its PATCH.
     expect(calls.length).toBeGreaterThan(0);
+  });
+
+  // ippoan/github-mcp-server-rs#59 (archived 状態) で実害発生したケース。
+  // GitHub API は 403 + "Repository was archived so is read-only." を返すが、
+  // 旧 UI は "Failed to close: #N (try again)" の汎用 message しか出さず、
+  // operator が原因に気付けなかった。Refs ippoan/ci-dashboard#152。
+  it("surfaces 'archived (read-only)' as failed_reasons for an archived-repo 403", async () => {
+    stubCloseFlow({
+      failIssue: 59,
+      failResponse: () => new Response(
+        JSON.stringify({
+          message: "Repository was archived so is read-only.",
+          documentation_url: "https://docs.github.com/v3/issues",
+        }),
+        { status: 403, headers: { "Content-Type": "application/json" } },
+      ),
+    });
+    const req = new Request("http://localhost/api/release-close", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: formBody([
+        ["repo", "ippoan/github-mcp-server-rs"],
+        ["tag", "v0.1.0"],
+        ["issue", "59"],
+      ]),
+    });
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(req, testEnv(), ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(303);
+    const location = res.headers.get("Location") ?? "";
+    const params = new URLSearchParams(location.split("?")[1] ?? "");
+    expect(params.get("failed")).toBe("59");
+    const reasons = params.get("failed_reasons") ?? "";
+    // 形式: `N:urlencoded-reason`。decode して reason 部分を検証。
+    expect(reasons.startsWith("59:")).toBe(true);
+    expect(decodeURIComponent(reasons.slice("59:".length))).toBe("archived (read-only)");
   });
 
   it("redirects without touching GitHub when no issues are selected", async () => {

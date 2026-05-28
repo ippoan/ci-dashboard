@@ -52,6 +52,9 @@ export async function handleReleasesPage(
   // Flash params populated by POST /api/release-close{,-batch} redirects.
   const closedFlash = numericList(url.searchParams.get("closed"));
   const failedFlash = numericList(url.searchParams.get("failed"));
+  // `failed_reasons=N:reason,N:reason` 形式。reason は URL-encoded。
+  // Refs ippoan/ci-dashboard#152 (close 失敗時の原因表示)
+  const failedReasons = parseFailedReasons(url.searchParams.get("failed_reasons"));
 
   // Only the fully-specified pair opens the detail page; every other shape
   // (no params / partial / post-close redirect) falls through to the index so
@@ -73,7 +76,7 @@ export async function handleReleasesPage(
       return html(renderError(msg), 502);
     }
     return html(
-      renderHtml(result, closedFlash, failedFlash),
+      renderHtml(result, closedFlash, failedFlash, failedReasons),
       200,
       cacheControlFor(hasFlash, /* detail */ true),
     );
@@ -81,7 +84,7 @@ export async function handleReleasesPage(
 
   // Index page; `repoParam` (when set without tag, e.g. from the batch-close
   // redirect) tags along so flash links can point at the right GitHub repo.
-  return await handleIndexPage(env, closedFlash, failedFlash, repoParam, hasFlash);
+  return await handleIndexPage(env, closedFlash, failedFlash, failedReasons, repoParam, hasFlash);
 }
 
 // Cache-Control policy:
@@ -132,6 +135,7 @@ async function handleIndexPage(
   },
   closedFlash: number[],
   failedFlash: number[],
+  failedReasons: Map<number, string>,
   flashRepo: string | null,
   hasFlash: boolean,
 ): Promise<Response> {
@@ -185,6 +189,7 @@ async function handleIndexPage(
       views.filter((v): v is RepoView => v !== null),
       closedFlash,
       failedFlash,
+      failedReasons,
       flashRepo,
     ),
     200,
@@ -488,6 +493,28 @@ function numericList(s: string | null): number[] {
   return s.split(",").map((p) => Number(p.trim())).filter(Number.isInteger);
 }
 
+// `failed_reasons=N:urlencoded-reason,N:urlencoded-reason` を Map に parse する。
+// release-close{,-batch}.ts が生成する flash param 経路と対 (= 同 file の
+// `formatCloseFailureReason` でフォーマットされた 1 行短縮文字列)。
+// 不正な entry は silently drop して残りを返す (= 旧 URL や手書き URL でも
+// crash させない conservative parse)。Refs ippoan/ci-dashboard#152。
+export function parseFailedReasons(s: string | null): Map<number, string> {
+  const out = new Map<number, string>();
+  if (!s) return out;
+  for (const raw of s.split(",")) {
+    const idx = raw.indexOf(":");
+    if (idx <= 0) continue;
+    const n = Number(raw.slice(0, idx).trim());
+    if (!Number.isInteger(n) || n <= 0) continue;
+    try {
+      out.set(n, decodeURIComponent(raw.slice(idx + 1)));
+    } catch {
+      // malformed urlencoded → skip
+    }
+  }
+  return out;
+}
+
 // --------------------------------------------------------------------------
 // HTML
 // --------------------------------------------------------------------------
@@ -504,6 +531,7 @@ function renderHtml(
   data: ReleasePayload,
   closedFlash: number[],
   failedFlash: number[],
+  failedReasons: Map<number, string>,
 ): string {
   // Two filters drop rows from the form's candidate set:
   //   1. flash: just-closed rows from a close-then-redirect must not be offered
@@ -543,7 +571,7 @@ function renderHtml(
       </table>
     </details>`;
 
-  const flash = renderFlash(closedFlash, failedFlash, data.repo);
+  const flash = renderFlash(closedFlash, failedFlash, failedReasons, data.repo);
 
   const summary =
     `${escapeHtml(data.repo)} · <code>${escapeHtml(data.tag)}</code>` +
@@ -657,6 +685,7 @@ function renderRow(r: IssueRow): string {
 function renderFlash(
   closed: number[],
   failed: number[],
+  failedReasons: Map<number, string>,
   repo: string | null,
 ): string {
   if (closed.length === 0 && failed.length === 0) return "";
@@ -668,9 +697,25 @@ function renderFlash(
   const closedList = closed.length > 0
     ? `<div class="flash ok">✅ Closed: ${closed.map(issueLink).join(" ")}</div>`
     : "";
-  const failedList = failed.length > 0
-    ? `<div class="flash err">❌ Failed to close: ${failed.map(issueLink).join(" ")} (try again)</div>`
-    : "";
+  // failed_reasons が同伴している場合は per-issue で「#N: 理由」を 1 行ずつ
+  // 表示する。理由不明 (= 古い URL や旧 deploy の handler 由来) は従来通り
+  // 「try again」フォールバックを並べる。reason 文字列は formatCloseFailureReason
+  // で短縮済だが、念のため escapeHtml を通す (XSS 防御)。
+  // Refs ippoan/ci-dashboard#152。
+  let failedList = "";
+  if (failed.length > 0) {
+    if (failedReasons.size > 0) {
+      const items = failed.map((n) => {
+        const reason = failedReasons.get(n);
+        return reason
+          ? `<li>${issueLink(n)}: ${escapeHtml(reason)}</li>`
+          : `<li>${issueLink(n)}: (try again)</li>`;
+      }).join("");
+      failedList = `<div class="flash err">❌ Failed to close:<ul style="margin:0.25rem 0 0 1.25rem;padding:0">${items}</ul></div>`;
+    } else {
+      failedList = `<div class="flash err">❌ Failed to close: ${failed.map(issueLink).join(" ")} (try again)</div>`;
+    }
+  }
   return closedList + failedList;
 }
 
@@ -678,6 +723,7 @@ function renderIndex(
   views: RepoView[],
   closedFlash: number[],
   failedFlash: number[],
+  failedReasons: Map<number, string>,
   flashRepo: string | null,
 ): string {
   // Show repos with at least one referenced issue in their displayed tag
@@ -692,7 +738,7 @@ function renderIndex(
 
   // Banner sits above the cards so a successful batch close redirect always
   // lands the operator on the list with confirmation of what got closed.
-  const flash = renderFlash(closedFlash, failedFlash, flashRepo);
+  const flash = renderFlash(closedFlash, failedFlash, failedReasons, flashRepo);
 
   return `<!DOCTYPE html>
 <html lang="en"><head>
