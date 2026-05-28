@@ -302,6 +302,7 @@ function entry(over: Partial<CompatMatrixEntry>): CompatMatrixEntry {
     tested_against_target: false,
     tested_against_at: null,
     last_tested_image: "stale",
+    history: [],
     ...over,
   };
 }

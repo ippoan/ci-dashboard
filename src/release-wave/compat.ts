@@ -210,6 +210,11 @@ export interface CompatMatrixEntry {
   tested_against_at: string | null;
   /** 赤のとき、同 backend_repo について直近に test した image (参考)。 */
   last_tested_image: string | null;
+  /**
+   * 当該 backend_repo に対する過去 test 履歴 (新しい順、window 済み)。
+   * admin UI の hover ツールチップ等で使う。
+   */
+  history: TestedAgainstEntry[];
 }
 
 export interface CompatibilityResult {
@@ -255,6 +260,7 @@ export async function computeCompatibility(
       tested_against_at: match ? match.tested_at : null,
       // relevant は元 record の新しい順を維持しているので [0] が直近。
       last_tested_image: match ? null : (relevant[0]?.backend_image ?? null),
+      history: relevant,
     });
   }
 
