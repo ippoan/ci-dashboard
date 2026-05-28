@@ -237,7 +237,7 @@ async function loadRepoView(
       const cmp = await cachedCompare(token, kv, owner, name, prevTag, tag);
       const refs = new Set<number>();
       for (const c of cmp.commits) {
-        for (const n of extractRefIssues(c.commit.message)) refs.add(n);
+        for (const n of extractRefIssues(c.commit.message, { owner, name })) refs.add(n);
       }
       return { tag, prevTag, refs: [...refs] };
     } catch {
@@ -328,7 +328,7 @@ async function loadSyntheticBlock(
 
   const refs = new Set<number>();
   for (const c of commits) {
-    for (const n of extractRefIssues(c.commit.message)) refs.add(n);
+    for (const n of extractRefIssues(c.commit.message, { owner, name })) refs.add(n);
   }
   if (refs.size === 0) {
     // No referenced issues in the recent window — nothing to confirm. Skipping
