@@ -21,7 +21,13 @@ import {
   handleContractAppliedWebhook,
   handleStageReportWebhook,
   handleFlipReportWebhook,
+  handleFrontendTestReportWebhook,
+  handleBackendDeployReportWebhook,
 } from "./release-wave/webhook";
+import {
+  handleCompatibility,
+  handleBackendCurrentImage,
+} from "./release-wave/compat-api";
 import {
   handleReleaseWaveListPage,
   handleReleaseWaveDetailPage,
@@ -59,6 +65,12 @@ export interface Env extends AuthClientWorkerEnv {
   // into the default branch are treated as releases for these. See
   // wrangler.jsonc and src/tagless-repos.ts.
   TAGLESS_REPOS?: string;
+  /**
+   * Release Wave compatibility 突合用 KV (`frontend::*` / `backend::*` records)。
+   * 既存 CI_STATUS namespace を別 binding で流用する (key prefix で衝突回避)。
+   * Refs #157 / #158、shape は docs/release-wave-compatibility-kv.md。
+   */
+  COMPAT_KV: KVNamespace;
 }
 
 // OAuth flow config — shared between /oauth/login, /oauth/callback, and the
@@ -197,6 +209,20 @@ app.post("/webhooks/release-wave/stage-report", (c) =>
 );
 app.post("/webhooks/release-wave/flip-report", (c) =>
   handleFlipReportWebhook(c.req.raw, c.env),
+);
+// Compatibility 突合 (frontend ↔ backend image)。frontend CI / backend deploy が
+// shared secret 付きで write する 2 endpoint。Refs #157 (Phase A) / #158。
+app.post("/webhooks/release-wave/frontend-test-report", (c) =>
+  handleFrontendTestReportWebhook(c.req.raw, c.env),
+);
+app.post("/webhooks/release-wave/backend-deploy-report", (c) =>
+  handleBackendDeployReportWebhook(c.req.raw, c.env),
+);
+
+// Compatibility read endpoints (CF Access edge gate に認証を委譲、read-only)。
+app.get("/compatibility", (c) => handleCompatibility(c.req.raw, c.env));
+app.get("/backend-current-image", (c) =>
+  handleBackendCurrentImage(c.req.raw, c.env),
 );
 
 // Release Wave admin UI (Refs #137 Phase 3e)。

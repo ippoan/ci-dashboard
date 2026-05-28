@@ -22,6 +22,7 @@ import { z } from "zod";
 import type { Env } from "../index";
 import type { ReleaseWaveHub, RpcResult } from "./do";
 import type { WaveState } from "./types";
+import { recordFrontendTest, recordBackendDeploy } from "./compat";
 
 // ----------------------------------------------------------------------------
 // Common helpers
@@ -231,4 +232,91 @@ export async function handleFlipReportWebhook(
     error: v.data.error ?? null,
   })) as RpcResult<WaveState>;
   return rpcResultToResponse(result);
+}
+
+// ----------------------------------------------------------------------------
+// /webhooks/release-wave/frontend-test-report  (compatibility, Refs #157/#158)
+// ----------------------------------------------------------------------------
+
+/**
+ * frontend CI が integration test green 時に打つ。ci-dashboard 側で
+ * `frontend::<repo>` を read-modify-write し `tested_against` に append する。
+ *
+ * body:
+ *   {
+ *     "repo": "ippoan/auth-worker",
+ *     "prod_version": "v0.5.32",
+ *     "tested": {
+ *       "backend_repo": "ippoan/rust-alc-api",
+ *       "backend_image": "rust-alc-api-00042-abc",
+ *       "ci_run_url": "https://github.com/.../runs/123"   // optional
+ *     }
+ *   }
+ */
+const frontendTestReportSchema = z.object({
+  repo: z.string().min(1),
+  prod_version: z.string().min(1),
+  tested: z.object({
+    backend_repo: z.string().min(1),
+    backend_image: z.string().min(1),
+    ci_run_url: z.string().url().optional(),
+  }),
+});
+
+export async function handleFrontendTestReportWebhook(
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  const v = await validateAndAuth(request, env, frontendTestReportSchema);
+  if (!v.ok) return v.response;
+  const record = await recordFrontendTest(env.COMPAT_KV, {
+    repo: v.data.repo,
+    prod_version: v.data.prod_version,
+    tested: {
+      backend_repo: v.data.tested.backend_repo,
+      backend_image: v.data.tested.backend_image,
+      ci_run_url: v.data.tested.ci_run_url,
+    },
+    now: new Date().toISOString(),
+  });
+  return jsonResponse(200, { ok: true, record });
+}
+
+// ----------------------------------------------------------------------------
+// /webhooks/release-wave/backend-deploy-report  (compatibility, Refs #157/#158)
+// ----------------------------------------------------------------------------
+
+/**
+ * backend deploy 成功時に release-wave-gcp / 各 backend deploy workflow が打つ。
+ * ci-dashboard 側で `backend::<repo>` を upsert する。
+ *
+ * body:
+ *   {
+ *     "repo": "ippoan/rust-alc-api",
+ *     "current_image": "rust-alc-api-00042-abc",
+ *     "deployed_by": "release-wave-gcp",
+ *     "wave_id": "wave_2026_05_27_01"   // optional (単独 deploy 時は省略)
+ *   }
+ */
+const backendDeployReportSchema = z.object({
+  repo: z.string().min(1),
+  current_image: z.string().min(1),
+  deployed_by: z.string().min(1),
+  wave_id: z.string().min(1).nullable().optional(),
+});
+
+export async function handleBackendDeployReportWebhook(
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  const v = await validateAndAuth(request, env, backendDeployReportSchema);
+  if (!v.ok) return v.response;
+  const record = await recordBackendDeploy(env.COMPAT_KV, {
+    repo: v.data.repo,
+    current_image: v.data.current_image,
+    deployed_by: v.data.deployed_by,
+    wave_id: v.data.wave_id ?? null,
+    now: new Date().toISOString(),
+  });
+  return jsonResponse(200, { ok: true, record });
 }

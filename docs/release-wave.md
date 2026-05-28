@@ -147,6 +147,14 @@ secret 認証 HTTP webhook で統一されている (= MCP OAuth を Actions で
 | `POST /webhooks/release-wave/stage-report` | release-wave-handler の stage 完了 callback | `stageReport` |
 | `POST /webhooks/release-wave/flip-report`  | flip 完了 callback                          | `flipReport` |
 | `POST /webhooks/release-wave/contract-applied` | contract migration deploy 後の通知       | `contractApplied` |
+| `POST /webhooks/release-wave/frontend-test-report` | frontend CI green 時の compatibility 記録 (KV write) | — (COMPAT_KV) |
+| `POST /webhooks/release-wave/backend-deploy-report` | backend deploy 成功時の compatibility 記録 (KV write) | — (COMPAT_KV) |
+
+compatibility 系 2 endpoint の body / KV shape は
+[`docs/release-wave-compatibility-kv.md`](release-wave-compatibility-kv.md) を参照。
+突合結果の read は CF Access edge gate 配下の read-only endpoint
+`GET /compatibility?backend_repo=&backend_target_image=` /
+`GET /backend-current-image?repo=` で取得する。
 
 ### stage-report body
 
