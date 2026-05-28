@@ -280,6 +280,18 @@ async function loadRepoView(
       .sort((a, c) => a.number - c.number),
   }));
 
+  // TAGLESS_REPOS に居る repo が tag を持つ場合、latest tag → HEAD で merge
+  // されたが未 release な PR 由来の open issue を「Unreleased」block として
+  // tag blocks の先頭に追加する。ci-dashboard / secrets-inventory のような
+  // 「PR merge = staging deploy だが release tag も cut する」混合運用の repo
+  // で、merge 済み未 release の issue を見落とさないようにするのが目的。
+  // Refs ippoan/ci-dashboard#147 (cross-repo Refs 修正) + #145 (TAGLESS 追加)。
+  if (useSynthetic) {
+    const latestTag = sorted[0]!;
+    const unreleased = await loadSyntheticBlock(token, owner, name, kv, latestTag);
+    if (unreleased) tagBlocks.unshift(unreleased);
+  }
+
   return {
     repo: `${owner}/${name}`,
     tagBlocks,
@@ -308,6 +320,13 @@ async function loadSyntheticBlock(
   owner: string,
   name: string,
   kv?: KVNamespace,
+  // `sinceTag` 指定時は latestTag..defaultBranch の compare で commits を取り、
+  // `<branch>@<sha7> (since <sinceTag>)` という "Unreleased" 風の block にする。
+  // 指定無しなら従来通り default branch の最近 SYNTHETIC_COMMIT_WINDOW commits。
+  // Refs ippoan/ci-dashboard#147 (cross-repo Refs 修正) と #145 の延長:
+  // TAGLESS_REPOS 指定の repo が tag を持つ場合に「latest tag → HEAD で merge
+  // されたが未 release な PR」を表示するための「unreleased zone」用途。
+  sinceTag?: string,
 ): Promise<TagBlock | null> {
   let defaultBranch: string;
   try {
@@ -320,7 +339,12 @@ async function loadSyntheticBlock(
 
   let commits: RawCommit[] = [];
   try {
-    commits = await cachedCommits(token, kv, owner, name, defaultBranch, SYNTHETIC_COMMIT_WINDOW);
+    if (sinceTag) {
+      const cmp = await cachedCompare(token, kv, owner, name, sinceTag, defaultBranch);
+      commits = cmp.commits;
+    } else {
+      commits = await cachedCommits(token, kv, owner, name, defaultBranch, SYNTHETIC_COMMIT_WINDOW);
+    }
   } catch {
     return null;
   }
@@ -357,10 +381,18 @@ async function loadSyntheticBlock(
 
   if (openRows.length === 0) return null;
 
-  const headSha7 = commits[0]!.sha.slice(0, 7);
+  // commits の並び順:
+  //   - 通常 (sinceTag 無し): cachedCommits は最新 first (GitHub /commits API 既定)
+  //   - sinceTag 有り:        cachedCompare は古い first (GitHub /compare API)
+  // どちらでも HEAD (= 最も新しい) sha を tag 名に含めたいので分岐させる。
+  const headCommit = sinceTag ? commits[commits.length - 1]! : commits[0]!;
+  const headSha7 = headCommit.sha.slice(0, 7);
+  const tagLabel = sinceTag
+    ? `Unreleased (${defaultBranch}@${headSha7})`
+    : `${defaultBranch}@${headSha7}`;
   return {
-    tag: `${defaultBranch}@${headSha7}`,
-    prevTag: null,
+    tag: tagLabel,
+    prevTag: sinceTag ?? null,
     issues: openRows,
     synthetic: true,
   };
