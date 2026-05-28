@@ -686,7 +686,7 @@ describe("handleReleaseWaveDetailPage compatibility section", () => {
     expect(html).toContain('name="force" value="true"');
   });
 
-  it("omits the SVG when there are no edges (backend record but no consumers)", async () => {
+  it("renders the backend node (with current image) even when there are no consumer edges", async () => {
     const env = fakeEnv({
       getReturn: { ok: true, data: makeWave() },
       compatKv: memKv({
@@ -703,6 +703,9 @@ describe("handleReleaseWaveDetailPage compatibility section", () => {
     const resp = await handleReleaseWaveDetailPage(env, "w1");
     const html = await resp.text();
     expect(html).toContain("Compatibility (frontend");
-    expect(html).not.toContain("<svg");
+    // backend record があれば consumer edge が 0 でも backend ノードを描画し、
+    // 現 image (SHA) を見せる。
+    expect(html).toContain("<svg");
+    expect(html).toContain("cur-img");
   });
 });

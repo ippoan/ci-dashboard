@@ -666,7 +666,9 @@ function renderCompatibilitySvg(compat: WaveCompatibility): string {
     }
   }
 
-  if (edges.length === 0) return ""; // edge が無ければグラフは出さない
+  // backend も frontend も無ければ描かない。backend record だけある (consumer
+  // edge 0) 場合は backend ノードだけ描画して現 image (SHA) を見せる。
+  if (backendOrder.length === 0 && frontendOrder.length === 0) return "";
 
   // ---- layout ----
   const boxW = 250;
