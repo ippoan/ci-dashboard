@@ -16,7 +16,11 @@ import type { Env } from "../index";
 import type { ReleaseWaveHub, RpcResult } from "./do";
 import type { WaveState, WaveStateName } from "./types";
 import { renderTabs, TAB_STYLES } from "../nav-tabs";
-import { computeWaveCompatibility, type WaveCompatibility } from "./compat";
+import {
+  computeWaveCompatibility,
+  computeGlobalCompatibility,
+  type WaveCompatibility,
+} from "./compat";
 
 // ----------------------------------------------------------------------------
 // Small HTML helpers
@@ -148,6 +152,19 @@ function hubStub(env: Env): DurableObjectStub<ReleaseWaveHub> {
 export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
   const waves = (await hubStub(env).list()) as WaveState[];
 
+  // 全 backend:: record に対する wave 非依存の compatibility 俯瞰グラフ。
+  // 個別 wave に入っていない既 deploy frontend (consumer) も含めて、現
+  // production backend image を test 済みか一目で見える (Refs #157)。
+  let globalCompat: WaveCompatibility | null = null;
+  if (env.COMPAT_KV) {
+    try {
+      globalCompat = await computeGlobalCompatibility(env.COMPAT_KV);
+    } catch {
+      globalCompat = null;
+    }
+  }
+  const compatSection = renderGlobalCompatibilitySection(globalCompat);
+
   const rows = waves.length === 0
     ? `<tr><td colspan="5" class="empty">No release waves yet.</td></tr>`
     : waves
@@ -179,6 +196,7 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
       Cross-repo coordinated release flows. Refs
       <a href="https://github.com/ippoan/ci-dashboard/issues/137">#137</a>.
     </p>
+    ${compatSection}
     <table>
       <thead>
         <tr>
@@ -415,6 +433,46 @@ export async function handleReleaseWaveDetailPage(
 // ----------------------------------------------------------------------------
 // Compatibility matrix section (Refs #157 Phase A)
 // ----------------------------------------------------------------------------
+
+/**
+ * Release Wave 一覧ページ用の wave 非依存 compatibility 俯瞰セクション。
+ * 全 `backend::` record とその consumer frontend の突合グラフ (SVG) を出す。
+ * backend record が無ければ案内文のみ。
+ */
+function renderGlobalCompatibilitySection(
+  compat: WaveCompatibility | null,
+): string {
+  if (!compat || compat.backends.length === 0) {
+    return `
+    <div class="section">
+      <h2>Compatibility (all consumers)</h2>
+      <p class="meta">No backend deploy records yet. backend deploy が
+        <code>backend-deploy-report</code> を打ち、consumer frontend が
+        integration test green で <code>frontend-test-report</code> を打つと、
+        ここに wave 横断の俯瞰グラフが出る。
+        Refs <a href="https://github.com/ippoan/ci-dashboard/issues/157">#157</a>.</p>
+    </div>`;
+  }
+  const verdict = !compat.checked
+    ? `<span class="meta">no consuming frontends recorded</span>`
+    : compat.verified
+    ? `<span class="ok"><strong>all consumers tested</strong></span>`
+    : `<span class="err"><strong>some consumers untested</strong></span>`;
+  const svg = renderCompatibilitySvg(compat);
+  const body = svg
+    ? svg
+    : `<p class="meta">backend record はあるが、まだどの frontend も test 履歴を
+        report していない (consumer edge 無し)。</p>`;
+  return `
+    <div class="section">
+      <h2>Compatibility (all consumers) — ${verdict}</h2>
+      <p class="meta">全 backend の<strong>現 production image</strong>を既 deploy
+        frontend が integration test 済みか (wave 横断)。緑 = tested / 赤 = untested。
+        個別 wave の retest 操作は各 wave 詳細ページで。
+        Refs <a href="https://github.com/ippoan/ci-dashboard/issues/157">#157</a>.</p>
+      ${body}
+    </div>`;
+}
 
 /**
  * wave 内 backend の現 image に対する既 deploy frontend の突合 matrix を描画する。

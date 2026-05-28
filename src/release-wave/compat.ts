@@ -328,6 +328,34 @@ export async function computeWaveCompatibility(
   return { verified, checked, backends };
 }
 
+/**
+ * 全 `backend::*` repo を list する (wave 非依存)。
+ */
+async function listBackendRepos(kv: KVNamespace): Promise<string[]> {
+  const out: string[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await kv.list({ prefix: BACKEND_PREFIX, cursor });
+    for (const key of page.keys) {
+      out.push(key.name.slice(BACKEND_PREFIX.length));
+    }
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor);
+  return out;
+}
+
+/**
+ * 全 `backend::` record に対する compatibility を構築する wave 非依存の
+ * グローバルビュー。Release Wave 一覧ページの俯瞰グラフ用。
+ * backend record が 1 つも無ければ空の WaveCompatibility を返す。
+ */
+export async function computeGlobalCompatibility(
+  kv: KVNamespace,
+): Promise<WaveCompatibility> {
+  const repos = await listBackendRepos(kv);
+  return computeWaveCompatibility(kv, repos);
+}
+
 /** `frontend::*` を全件 list して parse する。schema 不一致は除外。 */
 async function listFrontendRecords(
   kv: KVNamespace,
