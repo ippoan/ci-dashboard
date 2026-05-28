@@ -122,7 +122,12 @@ app.post("/api/release-close-batch",
 app.get("/ws", (c) => getHub(c.env).fetch(c.req.raw));
 
 // Webhook
+// `/webhooks` (複数) は CF Access の bypass 対象 prefix (Access app は
+// `/webhooks` で始まるパスを edge auth から除外) に合わせたエイリアス。
+// 単数 `/webhook` は CF Access 配下のため GitHub 配信が 302 で到達できない。
+// handleWebhook は X-Hub-Signature-256 を自前検証するので edge auth 不要。
 app.post("/webhook", (c) => handleWebhook(c.req.raw, c.env, getHub(c.env)));
+app.post("/webhooks", (c) => handleWebhook(c.req.raw, c.env, getHub(c.env)));
 
 // Status
 app.get("/status", async (c) => {

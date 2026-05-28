@@ -239,6 +239,29 @@ describe("POST /webhook", () => {
     expect(res.status).toBe(404); // Hono: no GET route defined for /webhook
   });
 
+  // `/webhooks` (複数) は CF Access bypass prefix に合わせたエイリアス。
+  // 単数 `/webhook` と同一 handler に届くことを保証する。
+  it("accepts the same payload on /webhooks (plural alias)", async () => {
+    const body = makePayload();
+    const signature = await sign(body, WEBHOOK_SECRET);
+    const req = new Request("http://localhost/webhooks", {
+      method: "POST",
+      body,
+      headers: {
+        "X-Hub-Signature-256": signature,
+        "X-GitHub-Event": "workflow_run",
+      },
+    });
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(req, testEnv(), ctx);
+    await waitOnExecutionContext(ctx);
+    expect(res.status).toBe(200);
+
+    const stored = await env.CI_STATUS.get("run:12345");
+    expect(stored).not.toBeNull();
+    expect(JSON.parse(stored!).repo).toBe("ippoan/rust-alc-api");
+  });
+
   it("stores workflow_job and attaches to existing run", async () => {
     const te = testEnv();
     // First, create a workflow_run
