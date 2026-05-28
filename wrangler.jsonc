@@ -19,6 +19,13 @@
     {
       "binding": "CI_STATUS",
       "id": "ffb983ee8324499f915b11a0b8cf787b"
+    },
+    {
+      // Release Wave compatibility 突合用 (`frontend::*` / `backend::*` records)。
+      // 新規 namespace を切らず CI_STATUS と同じ namespace を別 binding で流用する
+      // (key prefix で衝突回避、frontend:: は 90d TTL)。Refs #157 / #158。
+      "binding": "COMPAT_KV",
+      "id": "ffb983ee8324499f915b11a0b8cf787b"
     }
   ],
   "durable_objects": {
@@ -120,6 +127,10 @@
       "kv_namespaces": [
         {
           "binding": "CI_STATUS",
+          "id": "ffb983ee8324499f915b11a0b8cf787b"
+        },
+        {
+          "binding": "COMPAT_KV",
           "id": "ffb983ee8324499f915b11a0b8cf787b"
         }
       ],
