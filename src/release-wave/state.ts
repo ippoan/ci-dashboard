@@ -34,13 +34,19 @@ export function createWave(input: {
   wave_id: string;
   flip_policy: FlipPolicy;
   note: string;
-  repos: Array<{ repo: string; target_tag: string; head_sha: string }>;
+  repos: Array<{
+    repo: string;
+    target_tag: string;
+    head_sha: string;
+    require_compatibility?: boolean;
+  }>;
   now: string;
 }): WaveState {
   const repos: RepoState[] = input.repos.map((r) => ({
     repo: r.repo,
     target_tag: r.target_tag,
     head_sha: r.head_sha,
+    require_compatibility: r.require_compatibility ?? false,
     stage_status: "pending",
     preview_url: null,
     stage_error: null,

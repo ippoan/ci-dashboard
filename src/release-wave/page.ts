@@ -215,6 +215,21 @@ export async function handleReleaseWaveDetailPage(
   }
   const w = result.data;
 
+  // ---- Compatibility (matrix section + gate 判定で共有) ----
+  let compat: WaveCompatibility | null = null;
+  if (env.COMPAT_KV) {
+    try {
+      compat = await computeWaveCompatibility(
+        env.COMPAT_KV,
+        w.repos.map((r) => r.repo),
+      );
+    } catch {
+      compat = null;
+    }
+  }
+  const gateBlockers = computeGateBlockers(w, compat);
+  const gateBlocked = gateBlockers.length > 0;
+
   // ---- Actions (state-dependent) ----
   const canApprove = w.state === "pending-approval";
   const canRollback = w.state === "flipped";
@@ -228,12 +243,24 @@ export async function handleReleaseWaveDetailPage(
        </div>`
     : "";
 
+  // compatibility gate (Refs #157 Phase C): blocked 時は approve に force を
+  // 付けて override 可にし、警告を出す。
+  const gateNote = gateBlocked
+    ? `<div class="unsafe">
+         Compatibility gate <strong>blocks approve</strong>:
+         ${escapeHtml(gateBlockers.join("; "))}.
+         The button below passes <code>force=true</code> to override —
+         flipping with untested frontends is your call.
+       </div>`
+    : "";
+
   const actionsBlock = `
     <div class="actions">
       <form method="post" action="/api/release-wave/${encodeURIComponent(w.wave_id)}/approve">
+        ${gateBlocked ? `<input type="hidden" name="force" value="true">` : ""}
         <button type="submit" ${canApprove ? "" : "disabled"}
           title="Approve a pending-approval wave to proceed to flipping">
-          Approve &amp; Flip
+          Approve &amp; Flip${gateBlocked ? " (override compat gate)" : ""}
         </button>
       </form>
       <form method="post" action="/api/release-wave/${encodeURIComponent(w.wave_id)}/rollback">
@@ -250,6 +277,7 @@ export async function handleReleaseWaveDetailPage(
         </button>
       </form>
     </div>
+    ${gateNote}
     ${rollbackDisabledNote}
   `;
 
@@ -303,19 +331,10 @@ export async function handleReleaseWaveDetailPage(
     .join("");
 
   // ---- Compatibility matrix (Refs #157 Phase A) ----
-  // COMPAT_KV 未 bind / 算出失敗時は section を出さない。
-  let compatHtml = "";
-  if (env.COMPAT_KV) {
-    try {
-      const compat = await computeWaveCompatibility(
-        env.COMPAT_KV,
-        w.repos.map((r) => r.repo),
-      );
-      compatHtml = renderCompatibilitySection(compat, w.wave_id);
-    } catch {
-      compatHtml = "";
-    }
-  }
+  // 上で算出した compat を再利用。null (未 bind / 失敗) 時は section を出さない。
+  const compatHtml = compat
+    ? renderCompatibilitySection(compat, w.wave_id)
+    : "";
 
   const rollbackSafetyHtml = w.rollback.safe
     ? `<p class="ok">rollback.safe = <strong>true</strong> (no contract migration applied yet)</p>`
@@ -500,6 +519,33 @@ function renderCompatibilitySection(
       ${retestAllBlock}
       ${blocks}
     </div>`;
+}
+
+/**
+ * compatibility gate (Refs #157 Phase C) の blocker 説明配列を返す。
+ * `require_compatibility=true` な backend のうち未 test frontend を持つもの。
+ * compat が無い (COMPAT_KV 未 bind) 場合は gate を素通り ([])。
+ */
+function computeGateBlockers(
+  w: WaveState,
+  compat: WaveCompatibility | null,
+): string[] {
+  if (!compat) return [];
+  const required = w.repos
+    .filter((r) => r.require_compatibility)
+    .map((r) => r.repo);
+  if (required.length === 0) return [];
+  const blockers: string[] = [];
+  for (const b of compat.backends) {
+    if (!required.includes(b.backend_repo)) continue;
+    const reds = b.matrix
+      .filter((m) => !m.tested_against_target)
+      .map((m) => m.frontend);
+    if (reds.length > 0) {
+      blockers.push(`${b.backend_repo}: ${reds.join(", ")}`);
+    }
+  }
+  return blockers;
 }
 
 /** 長い識別子を省略表示 (full 値は <title> 等に別途載せる)。 */

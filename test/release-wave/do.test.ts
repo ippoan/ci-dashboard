@@ -448,3 +448,101 @@ describe("ReleaseWaveHub.start compatibility precheck", () => {
     }
   });
 });
+
+// ----------------------------------------------------------------------------
+// compatibility gate on approve (Refs #157 Phase C)
+// ----------------------------------------------------------------------------
+
+describe("ReleaseWaveHub.approve compatibility gate", () => {
+  beforeEach(clearCompatKeys);
+  const now = () => new Date().toISOString();
+
+  async function stageToPendingApproval(
+    i: { start: Function; stageReport: Function },
+    wave_id: string,
+    require_compatibility: boolean,
+  ) {
+    await i.start({
+      wave_id,
+      flip_policy: "manual-approval",
+      repos: [
+        {
+          repo: "ippoan/rust-alc-api",
+          target_tag: "v2",
+          head_sha: "s",
+          require_compatibility,
+        },
+      ],
+    });
+    await i.stageReport({ wave_id, repo: "ippoan/rust-alc-api", ok: true });
+  }
+
+  async function seedRed() {
+    await recordBackendDeploy(env.COMPAT_KV, {
+      repo: "ippoan/rust-alc-api",
+      current_image: "cur-img",
+      deployed_by: "x",
+      now: now(),
+    });
+    await recordFrontendTest(env.COMPAT_KV, {
+      repo: "ippoan/alc-app",
+      prod_version: "v1",
+      tested: { backend_repo: "ippoan/rust-alc-api", backend_image: "stale-img" },
+      now: now(),
+    });
+  }
+
+  it("rejects approve with COMPATIBILITY_GATE when a required backend has reds", async () => {
+    await seedRed();
+    const hub = freshHub();
+    const res = await runInDurableObject(hub, async (i) => {
+      await stageToPendingApproval(i as never, "w-gate-red", true);
+      return i.approve({ wave_id: "w-gate-red", approved_by: "ops" });
+    });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.code).toBe("COMPATIBILITY_GATE");
+  });
+
+  it("force=true overrides the gate and approves", async () => {
+    await seedRed();
+    const hub = freshHub();
+    const res = await runInDurableObject(hub, async (i) => {
+      await stageToPendingApproval(i as never, "w-gate-force", true);
+      return i.approve({ wave_id: "w-gate-force", approved_by: "ops", force: true });
+    });
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.data.state).toBe("flipping");
+  });
+
+  it("does not gate when require_compatibility is false (default)", async () => {
+    await seedRed();
+    const hub = freshHub();
+    const res = await runInDurableObject(hub, async (i) => {
+      await stageToPendingApproval(i as never, "w-gate-off", false);
+      return i.approve({ wave_id: "w-gate-off", approved_by: "ops" });
+    });
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.data.state).toBe("flipping");
+  });
+
+  it("does not gate a required backend that is all-green", async () => {
+    await recordBackendDeploy(env.COMPAT_KV, {
+      repo: "ippoan/rust-alc-api",
+      current_image: "cur-img",
+      deployed_by: "x",
+      now: now(),
+    });
+    await recordFrontendTest(env.COMPAT_KV, {
+      repo: "ippoan/alc-app",
+      prod_version: "v1",
+      tested: { backend_repo: "ippoan/rust-alc-api", backend_image: "cur-img" },
+      now: now(),
+    });
+    const hub = freshHub();
+    const res = await runInDurableObject(hub, async (i) => {
+      await stageToPendingApproval(i as never, "w-gate-green", true);
+      return i.approve({ wave_id: "w-gate-green", approved_by: "ops" });
+    });
+    expect(res.ok).toBe(true);
+  });
+});

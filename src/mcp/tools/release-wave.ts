@@ -89,6 +89,12 @@ export function registerReleaseWaveTools(server: McpServer, env: Env): void {
                 .string()
                 .describe("Tag to be cut for this wave (e.g. 'v1.42.0')"),
               head_sha: z.string().describe("HEAD SHA at wave start"),
+              require_compatibility: z
+                .boolean()
+                .optional()
+                .describe(
+                  "When true (backend repos), approve is rejected while any consuming frontend is untested against this backend's current image. Default false. Refs #157 Phase C.",
+                ),
             }),
           )
           .min(1)
@@ -195,7 +201,7 @@ export function registerReleaseWaveTools(server: McpServer, env: Env): void {
     "release_wave_approve",
     {
       description:
-        "Admin approves a pending-approval wave to proceed to flipping. Required for manual-approval policy.",
+        "Admin approves a pending-approval wave to proceed to flipping. Required for manual-approval policy. Rejected with COMPATIBILITY_GATE if a require_compatibility backend has untested frontends — pass force=true to override.",
       inputSchema: {
         wave_id: z.string().min(1),
         approved_by: z
@@ -204,11 +210,21 @@ export function registerReleaseWaveTools(server: McpServer, env: Env): void {
           .describe(
             "Email or identifier of the admin approving (recorded in audit trail)",
           ),
+        force: z
+          .boolean()
+          .optional()
+          .describe(
+            "Override the compatibility gate (Refs #157 Phase C). Default false (gate enforced).",
+          ),
       },
       annotations: { readOnlyHint: false },
     },
-    async ({ wave_id, approved_by }) => {
-      const result = await hubStub(env).approve({ wave_id, approved_by });
+    async ({ wave_id, approved_by, force }) => {
+      const result = await hubStub(env).approve({
+        wave_id,
+        approved_by,
+        force: force === true,
+      });
       return formatRpcResult(result);
     },
   );
