@@ -74,6 +74,14 @@ export interface RepoState {
    */
   flip_from_revision: string | null;
 
+  /**
+   * stage で no-traffic upload した「preview 済み version」の id (CF Workers のみ)。
+   * flip 時にこの version を狙って `wrangler versions deploy <id>@100%` する
+   * = preview で検証したまさにその version を 100% traffic に昇格させる。
+   * Cloud Run path では使わない (= null のまま)。Refs ippoan/ci-dashboard#174。
+   */
+  previewed_version_id: string | null;
+
   /** rollback 実行時、戻した先 revision。 */
   rolled_back_to_revision: string | null;
 }
@@ -150,6 +158,7 @@ export type WaveEvent =
       ok: boolean;
       preview_url?: string | null;
       flip_from_revision?: string | null;
+      previewed_version_id?: string | null;
       error?: string | null;
     }
   | { kind: "approve"; now: string; approved_by: string }

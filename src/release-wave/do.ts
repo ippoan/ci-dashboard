@@ -64,6 +64,7 @@ export interface StageReportInput {
   ok: boolean;
   preview_url?: string | null;
   flip_from_revision?: string | null;
+  previewed_version_id?: string | null;
   error?: string | null;
 }
 
@@ -196,6 +197,7 @@ export class ReleaseWaveHub extends DurableObject<Env> {
       ok: input.ok,
       preview_url: input.preview_url ?? null,
       flip_from_revision: input.flip_from_revision ?? null,
+      previewed_version_id: input.previewed_version_id ?? null,
       error: input.error ?? null,
     });
   }

@@ -87,6 +87,11 @@ export function decideDispatches(
         wave_id: next.wave_id,
         target_tag: r.target_tag,
         head_sha: r.head_sha,
+        // CF Workers: stage で no-traffic upload した preview 済み version の id。
+        // flip handler はこれを `wrangler versions deploy <id>@100%` の対象にする
+        // = preview したまさにその version を 100% traffic へ昇格させる。
+        // cloudrun path では null (= handler 側は使わない)。Refs #174。
+        previewed_version_id: r.previewed_version_id,
       },
     }));
   }
