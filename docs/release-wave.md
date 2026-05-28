@@ -6,6 +6,9 @@ ci-dashboard 内に実装した Release Wave 機構の **operator 向け運用�
 コード設計は issue #137 の本文を参照。本ドキュメントは Phase 3a〜3e 完了後の
 日常運用 + ワンタイム setup (CF Access wildcard 等) をカバーする。
 
+frontend ↔ backend image 互換性突合 (#157) の KV write shape 仕様は
+[`docs/release-wave-compatibility-kv.md`](release-wave-compatibility-kv.md) を参照。
+
 ---
 
 ## アーキテクチャ全体図
