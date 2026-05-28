@@ -73,13 +73,24 @@ function fakeHub(): {
   return { hub: spies as unknown as ReleaseWaveHub, spies };
 }
 
-function fakeEnv(hub: ReleaseWaveHub): Env {
+/** 空の COMPAT_KV stub (frontend:: / backend:: いずれも空)。 */
+function emptyCompatKv(): KVNamespace {
+  return {
+    list: async () => ({ keys: [], list_complete: true, cacheStatus: null }),
+    get: async () => null,
+    put: async () => undefined,
+    delete: async () => undefined,
+  } as unknown as KVNamespace;
+}
+
+function fakeEnv(hub: ReleaseWaveHub, compatKv?: KVNamespace): Env {
   const namespace = {
     idFromName: () => ({}),
     get: () => hub,
   } as unknown as DurableObjectNamespace;
   return {
     RELEASE_WAVE_HUB: namespace,
+    COMPAT_KV: compatKv ?? emptyCompatKv(),
   } as unknown as Env;
 }
 
@@ -250,6 +261,30 @@ describe("release_wave_status", () => {
     });
     expect(r.isError).toBe(true);
     expect(JSON.parse(r.content[0]!.text).code).toBe("NOT_FOUND");
+  });
+
+  it("includes a compatibility field for an ok result", async () => {
+    const { hub, spies } = fakeHub();
+    spies.get.mockResolvedValue({
+      ok: true,
+      data: {
+        wave_id: "w1",
+        state: "staging",
+        repos: [{ repo: "ippoan/rust-alc-api" }],
+      },
+    });
+    const server = fakeMcpServer();
+    registerReleaseWaveTools(
+      server as unknown as Parameters<typeof registerReleaseWaveTools>[0],
+      fakeEnv(hub),
+    );
+    const r = await server.tools
+      .get("release_wave_status")!
+      .handler({ wave_id: "w1" });
+    const payload = JSON.parse(r.content[0]!.text);
+    expect(payload.compatibility).toBeDefined();
+    expect(payload.compatibility.backends).toEqual([]);
+    expect(payload.compatibility.checked).toBe(false);
   });
 });
 

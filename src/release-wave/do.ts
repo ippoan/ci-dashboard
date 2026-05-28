@@ -25,9 +25,11 @@ import type {
   FlipPolicy,
   TransitionErrorCode,
   WaveEvent,
+  WaveEventRecord,
   WaveState,
 } from "./types";
 import { decideDispatches, dispatchAll } from "./dispatch";
+import { computeWaveCompatibility } from "./compat";
 
 // ----------------------------------------------------------------------------
 // Storage keys
@@ -166,6 +168,10 @@ export class ReleaseWaveHub extends DurableObject<Env> {
       now,
     });
     await this.saveWave(state);
+    // compatibility precheck (Refs #157 Phase A): 既 deploy frontend が wave 内
+    // backend の現 image と整合しているかを突合し、赤があれば warning event を
+    // 記録する。**block はしない** (= state はそのまま staging)。
+    await this.maybeRecordCompatWarning(state);
     // 各 caller repo に release-wave-stage dispatch を fan-out。
     // 失敗は best-effort で log/result に残す (dispatchAll は throw しない)。
     await this.maybeDispatch(null, state);
@@ -306,6 +312,42 @@ export class ReleaseWaveHub extends DurableObject<Env> {
         );
       }
     }
+  }
+
+  /**
+   * wave 内 backend の現 image に対し既 deploy frontend が test 済みかを突合し、
+   * 赤があれば `compatibility_warning` event を append + save する。
+   *
+   * read-only な precheck (block しない)。COMPAT_KV 未 bind / KV エラー時は
+   * best-effort で skip する (= wave start を失敗させない)。
+   */
+  private async maybeRecordCompatWarning(state: WaveState): Promise<void> {
+    if (!this.env.COMPAT_KV) return;
+    let compat;
+    try {
+      compat = await computeWaveCompatibility(
+        this.env.COMPAT_KV,
+        state.repos.map((r) => r.repo),
+      );
+    } catch (e) {
+      console.warn(`[release-wave] compat precheck failed: ${String(e)}`);
+      return;
+    }
+    if (!compat.checked || compat.verified) return;
+
+    const reds = compat.backends.flatMap((b) =>
+      b.matrix
+        .filter((m) => !m.tested_against_target)
+        .map((m) => `${m.frontend} (vs ${b.backend_repo}@${b.current_image})`),
+    );
+    const record: WaveEventRecord = {
+      at: new Date().toISOString(),
+      kind: "compatibility_warning",
+      summary: `compatibility precheck: ${reds.length} frontend(s) not tested against current backend image`,
+      detail: { reds },
+    };
+    state.events = [...state.events, record];
+    await this.saveWave(state);
   }
 
   private async loadWave(wave_id: string): Promise<WaveState | null> {

@@ -5,6 +5,7 @@ import {
   recordBackendDeploy,
   getBackendCurrent,
   computeCompatibility,
+  computeWaveCompatibility,
   TESTED_AGAINST_MAX,
   WINDOW_DAYS,
   SCHEMA_VERSION,
@@ -339,5 +340,76 @@ describe("computeCompatibility", () => {
     const res = await computeCompatibility(kv(), "ippoan/rust-alc-api", "target");
     expect(res.verified).toBe(true);
     expect(res.matrix).toHaveLength(2);
+  });
+});
+
+describe("computeWaveCompatibility", () => {
+  it("ignores repos without a backend deploy record", async () => {
+    const res = await computeWaveCompatibility(kv(), [
+      "ippoan/auth-worker",
+      "ippoan/rust-alc-api",
+    ]);
+    expect(res.backends).toHaveLength(0);
+    expect(res.checked).toBe(false);
+    expect(res.verified).toBe(true); // vacuously true
+  });
+
+  it("checks against the backend's current recorded image", async () => {
+    await recordBackendDeploy(kv(), {
+      repo: "ippoan/rust-alc-api",
+      current_image: "cur",
+      deployed_by: "x",
+      now: daysAgo(1),
+    });
+    await recordFrontendTest(kv(), {
+      repo: "ippoan/auth-worker",
+      prod_version: "v1",
+      tested: { backend_repo: "ippoan/rust-alc-api", backend_image: "cur" },
+      now: daysAgo(1),
+    });
+    const res = await computeWaveCompatibility(kv(), [
+      "ippoan/rust-alc-api",
+      "ippoan/auth-worker",
+    ]);
+    expect(res.backends).toHaveLength(1);
+    expect(res.backends[0]).toMatchObject({
+      backend_repo: "ippoan/rust-alc-api",
+      current_image: "cur",
+    });
+    expect(res.checked).toBe(true);
+    expect(res.verified).toBe(true);
+  });
+
+  it("verified=false when a consuming frontend has not tested the current image", async () => {
+    await recordBackendDeploy(kv(), {
+      repo: "ippoan/rust-alc-api",
+      current_image: "cur",
+      deployed_by: "x",
+      now: daysAgo(1),
+    });
+    await recordFrontendTest(kv(), {
+      repo: "ippoan/alc-app",
+      prod_version: "v1",
+      tested: { backend_repo: "ippoan/rust-alc-api", backend_image: "stale" },
+      now: daysAgo(1),
+    });
+    const res = await computeWaveCompatibility(kv(), ["ippoan/rust-alc-api"]);
+    expect(res.checked).toBe(true);
+    expect(res.verified).toBe(false);
+    expect(res.backends[0]!.matrix[0]!.tested_against_target).toBe(false);
+  });
+
+  it("checked=false / verified=true when backend has a record but no consumers", async () => {
+    await recordBackendDeploy(kv(), {
+      repo: "ippoan/rust-alc-api",
+      current_image: "cur",
+      deployed_by: "x",
+      now: daysAgo(1),
+    });
+    const res = await computeWaveCompatibility(kv(), ["ippoan/rust-alc-api"]);
+    expect(res.backends).toHaveLength(1);
+    expect(res.backends[0]!.matrix).toHaveLength(0);
+    expect(res.checked).toBe(false);
+    expect(res.verified).toBe(true);
   });
 });

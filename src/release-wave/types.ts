@@ -172,8 +172,11 @@ export type WaveEvent =
 export interface WaveEventRecord {
   /** UTC ISO。 */
   readonly at: string;
-  /** kind は WaveEvent の kind を踏襲。 */
-  readonly kind: WaveEvent["kind"];
+  /**
+   * kind は WaveEvent の kind を踏襲。加えて、状態遷移を伴わない監査専用の
+   * `compatibility_warning` (Refs #157 Phase A) を許容する。
+   */
+  readonly kind: WaveEvent["kind"] | "compatibility_warning";
   /** transition で変わった結果の 1 行 summary。 */
   readonly summary: string;
   /** 自由 detail (e.g. repo 名 / actor)。 */

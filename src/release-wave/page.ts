@@ -16,6 +16,7 @@ import type { Env } from "../index";
 import type { ReleaseWaveHub, RpcResult } from "./do";
 import type { WaveState, WaveStateName } from "./types";
 import { renderTabs, TAB_STYLES } from "../nav-tabs";
+import { computeWaveCompatibility, type WaveCompatibility } from "./compat";
 
 // ----------------------------------------------------------------------------
 // Small HTML helpers
@@ -301,6 +302,21 @@ export async function handleReleaseWaveDetailPage(
     })
     .join("");
 
+  // ---- Compatibility matrix (Refs #157 Phase A) ----
+  // COMPAT_KV 未 bind / 算出失敗時は section を出さない。
+  let compatHtml = "";
+  if (env.COMPAT_KV) {
+    try {
+      const compat = await computeWaveCompatibility(
+        env.COMPAT_KV,
+        w.repos.map((r) => r.repo),
+      );
+      compatHtml = renderCompatibilitySection(compat);
+    } catch {
+      compatHtml = "";
+    }
+  }
+
   const rollbackSafetyHtml = w.rollback.safe
     ? `<p class="ok">rollback.safe = <strong>true</strong> (no contract migration applied yet)</p>`
     : `<p class="err">rollback.safe = <strong>false</strong></p>
@@ -359,6 +375,8 @@ export async function handleReleaseWaveDetailPage(
       </table>
     </div>
 
+    ${compatHtml}
+
     <div class="section">
       <h2>Events</h2>
       <ul>${eventsHtml}</ul>
@@ -373,6 +391,84 @@ export async function handleReleaseWaveDetailPage(
 </html>`;
 
   return htmlResponse(html);
+}
+
+// ----------------------------------------------------------------------------
+// Compatibility matrix section (Refs #157 Phase A)
+// ----------------------------------------------------------------------------
+
+/**
+ * wave 内 backend の現 image に対する既 deploy frontend の突合 matrix を描画する。
+ * 緑 (tested) / 赤 (untested) を highlight する。read-only / 非 block。
+ */
+function renderCompatibilitySection(compat: WaveCompatibility): string {
+  if (compat.backends.length === 0) {
+    return `
+    <div class="section">
+      <h2>Compatibility (frontend ↔ backend)</h2>
+      <p class="meta">No backend deploy records for this wave's repos yet
+        (nothing to check against).</p>
+    </div>`;
+  }
+
+  const verdict = !compat.checked
+    ? `<span class="meta">no consuming frontends recorded</span>`
+    : compat.verified
+    ? `<span class="ok"><strong>verified</strong></span>`
+    : `<span class="err"><strong>not verified</strong> — some frontends untested</span>`;
+
+  const blocks = compat.backends
+    .map((b) => {
+      const rows =
+        b.matrix.length === 0
+          ? `<tr><td colspan="4" class="empty">No frontend has tested against this backend.</td></tr>`
+          : b.matrix
+              .map((m) => {
+                const statusCell = m.tested_against_target
+                  ? `<span class="ok">tested</span>`
+                  : `<span class="err">untested</span>`;
+                const at = m.tested_against_at
+                  ? `<span class="meta">${escapeHtml(m.tested_against_at)}</span>`
+                  : `<span class="meta">—</span>`;
+                const last = m.tested_against_target
+                  ? `<span class="meta">—</span>`
+                  : `<span class="meta">${escapeHtml(m.last_tested_image ?? "—")}</span>`;
+                return `
+                <tr>
+                  <td>${escapeHtml(m.frontend)}</td>
+                  <td class="meta">${escapeHtml(m.prod_version ?? "—")}</td>
+                  <td>${statusCell} ${at}</td>
+                  <td>${last}</td>
+                </tr>`;
+              })
+              .join("");
+      return `
+      <h3>${escapeHtml(b.backend_repo)}
+        <span class="meta">@ ${escapeHtml(b.current_image ?? "—")}</span>
+      </h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Frontend</th>
+            <th>Prod Version</th>
+            <th>Tested vs current image</th>
+            <th>Last tested image</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+    })
+    .join("");
+
+  return `
+    <div class="section">
+      <h2>Compatibility (frontend ↔ backend) — ${verdict}</h2>
+      <p class="meta">既 deploy frontend が wave 内 backend の<strong>現 production
+        image</strong>を integration test 済みか。赤は未検証 (Phase B の re-test で
+        緑化予定)。Refs
+        <a href="https://github.com/ippoan/ci-dashboard/issues/157">#157</a>.</p>
+      ${blocks}
+    </div>`;
 }
 
 // ----------------------------------------------------------------------------

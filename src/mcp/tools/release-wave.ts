@@ -12,8 +12,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { Env } from "../../index";
-import type { ReleaseWaveHub } from "../../release-wave/do";
+import type { ReleaseWaveHub, RpcResult } from "../../release-wave/do";
 import type { WaveState } from "../../release-wave/types";
+import { computeWaveCompatibility } from "../../release-wave/compat";
 
 // ----------------------------------------------------------------------------
 // Hub helper
@@ -153,15 +154,37 @@ export function registerReleaseWaveTools(server: McpServer, env: Env): void {
     "release_wave_status",
     {
       description:
-        "Get the current state of a wave (state machine status, repo progress, rollback safety flag, audit events).",
+        "Get the current state of a wave (state machine status, repo progress, rollback safety flag, audit events) plus a compatibility matrix of already-deployed frontends vs each backend's current image. Refs ippoan/ci-dashboard#157.",
       inputSchema: {
         wave_id: z.string().min(1),
       },
       annotations: { readOnlyHint: true },
     },
     async ({ wave_id }) => {
-      const result = await hubStub(env).get(wave_id);
-      return formatRpcResult(result);
+      const result = (await hubStub(env).get(wave_id)) as RpcResult<WaveState>;
+      if (!result.ok) return formatRpcResult(result);
+
+      // compatibility field を付与 (Refs #157 Phase A)。COMPAT_KV 未 bind 時は
+      // 省略する。算出失敗時も state は返す。
+      let compatibility: unknown;
+      if (env.COMPAT_KV) {
+        try {
+          compatibility = await computeWaveCompatibility(
+            env.COMPAT_KV,
+            result.data.repos.map((r) => r.repo),
+          );
+        } catch {
+          compatibility = undefined;
+        }
+      }
+
+      const payload =
+        compatibility === undefined
+          ? result.data
+          : { ...result.data, compatibility };
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }],
+      };
     },
   );
 

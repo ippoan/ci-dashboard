@@ -266,6 +266,62 @@ export async function computeCompatibility(
   return { backend_repo, backend_target_image, verified, matrix };
 }
 
+// ----------------------------------------------------------------------------
+// Read: wave 単位の compatibility (status / precheck / admin UI 用)
+// ----------------------------------------------------------------------------
+
+/** wave 内の 1 backend repo についての突合結果。 */
+export interface WaveBackendCompat {
+  backend_repo: string;
+  /** `backend::<repo>` に記録された現 production image (record 無しなら null)。 */
+  current_image: string | null;
+  /** 当該 backend を test 済みの frontend の matrix (consumer 無しなら空)。 */
+  matrix: CompatMatrixEntry[];
+}
+
+export interface WaveCompatibility {
+  /**
+   * 認識された backend (= `backend::` record を持つ wave repo) の中に赤が
+   * 1 つも無ければ true。consumer matrix が全て空でも (= 何も検証できなくても)
+   * vacuously true になる点に注意 (`checked` で区別する)。
+   */
+  verified: boolean;
+  /** 1 つ以上の backend が非空 consumer matrix を持っていれば true。 */
+  checked: boolean;
+  backends: WaveBackendCompat[];
+}
+
+/**
+ * wave に含まれる repo 群について compatibility を構築する。
+ *
+ * Phase A では wave の flip 先 image (= 新 image) を WaveState が持たないため、
+ * 各 backend repo の **現 production image** (`backend::<repo>.current_image`)
+ * を突合対象にする。これは「wave 起動時点で既 deploy frontend が現 backend と
+ * 整合しているか」の precheck として機能する。`backend::` record を持たない
+ * repo (= frontend / 未 deploy backend) は対象外。
+ */
+export async function computeWaveCompatibility(
+  kv: KVNamespace,
+  repos: string[],
+): Promise<WaveCompatibility> {
+  const backends: WaveBackendCompat[] = [];
+  for (const repo of repos) {
+    const rec = await getBackendCurrent(kv, repo);
+    if (!rec) continue; // backend deploy record の無い repo は対象外
+    const compat = await computeCompatibility(kv, repo, rec.current_image);
+    backends.push({
+      backend_repo: repo,
+      current_image: rec.current_image,
+      matrix: compat.matrix,
+    });
+  }
+  const checked = backends.some((b) => b.matrix.length > 0);
+  const verified = backends.every((b) =>
+    b.matrix.every((m) => m.tested_against_target),
+  );
+  return { verified, checked, backends };
+}
+
 /** `frontend::*` を全件 list して parse する。schema 不一致は除外。 */
 async function listFrontendRecords(
   kv: KVNamespace,

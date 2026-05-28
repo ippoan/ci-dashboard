@@ -7,11 +7,38 @@ import type { Env } from "../../src/index";
 import type { ReleaseWaveHub } from "../../src/release-wave/do";
 import type { WaveState } from "../../src/release-wave/types";
 
+/** 簡易 in-memory KV。compat section 描画テスト用。 */
+function memKv(seed: Record<string, unknown> = {}): KVNamespace {
+  const store = new Map<string, string>(
+    Object.entries(seed).map(([k, v]) => [k, JSON.stringify(v)]),
+  );
+  return {
+    async get(key: string, type?: string) {
+      const raw = store.get(key);
+      if (raw === undefined) return null;
+      return type === "json" ? JSON.parse(raw) : raw;
+    },
+    async put(key: string, value: string) {
+      store.set(key, value);
+    },
+    async delete(key: string) {
+      store.delete(key);
+    },
+    async list({ prefix = "" }: { prefix?: string } = {}) {
+      const keys = [...store.keys()]
+        .filter((k) => k.startsWith(prefix))
+        .map((name) => ({ name }));
+      return { keys, list_complete: true, cacheStatus: null };
+    },
+  } as unknown as KVNamespace;
+}
+
 function fakeEnv(opts: {
   listReturn?: WaveState[];
   getReturn?:
     | { ok: true; data: WaveState }
     | { ok: false; code: string; error: string };
+  compatKv?: KVNamespace;
 }): Env {
   const hub = {
     list: vi.fn().mockResolvedValue(opts.listReturn ?? []),
@@ -28,6 +55,7 @@ function fakeEnv(opts: {
       idFromName: () => ({}),
       get: () => hub,
     },
+    COMPAT_KV: opts.compatKv,
   } as unknown as Env;
 }
 
@@ -471,5 +499,98 @@ describe("handleReleaseWaveDetailPage", () => {
     const html = await resp.text();
     expect(html).not.toContain("<script>alert");
     expect(html).toContain("&lt;script&gt;");
+  });
+});
+
+// ============================================================================
+// compatibility matrix section (Refs #157 Phase A)
+// ============================================================================
+
+describe("handleReleaseWaveDetailPage compatibility section", () => {
+  it("omits the section entirely when COMPAT_KV is unbound", async () => {
+    const env = fakeEnv({ getReturn: { ok: true, data: makeWave() } });
+    const resp = await handleReleaseWaveDetailPage(env, "w1");
+    const html = await resp.text();
+    expect(html).not.toContain("Compatibility (frontend");
+  });
+
+  it("shows 'no backend deploy records' when KV has none", async () => {
+    const env = fakeEnv({
+      getReturn: { ok: true, data: makeWave() },
+      compatKv: memKv(),
+    });
+    const resp = await handleReleaseWaveDetailPage(env, "w1");
+    const html = await resp.text();
+    expect(html).toContain("Compatibility (frontend");
+    expect(html).toContain("No backend deploy records");
+  });
+
+  it("renders a red row for an untested frontend", async () => {
+    const env = fakeEnv({
+      getReturn: { ok: true, data: makeWave() },
+      compatKv: memKv({
+        "backend::ippoan/rust-alc-api": {
+          schema_version: 1,
+          repo: "ippoan/rust-alc-api",
+          current_image: "cur-img",
+          deployed_at: "2026-05-27T00:00:00Z",
+          deployed_by: "x",
+          wave_id: null,
+        },
+        "frontend::ippoan/alc-app": {
+          schema_version: 1,
+          repo: "ippoan/alc-app",
+          prod_version: "v1.2.10",
+          prod_deployed_at: "2026-05-27T00:00:00Z",
+          tested_against: [
+            {
+              backend_repo: "ippoan/rust-alc-api",
+              backend_image: "stale-img",
+              tested_at: "2026-05-27T00:00:00Z",
+            },
+          ],
+        },
+      }),
+    });
+    const resp = await handleReleaseWaveDetailPage(env, "w1");
+    const html = await resp.text();
+    expect(html).toContain("Compatibility (frontend");
+    expect(html).toContain("not verified");
+    expect(html).toContain("ippoan/alc-app");
+    expect(html).toContain("untested");
+    expect(html).toContain("stale-img");
+  });
+
+  it("renders verified when the frontend tested the current image", async () => {
+    const env = fakeEnv({
+      getReturn: { ok: true, data: makeWave() },
+      compatKv: memKv({
+        "backend::ippoan/rust-alc-api": {
+          schema_version: 1,
+          repo: "ippoan/rust-alc-api",
+          current_image: "cur-img",
+          deployed_at: "2026-05-27T00:00:00Z",
+          deployed_by: "x",
+          wave_id: null,
+        },
+        "frontend::ippoan/auth-worker": {
+          schema_version: 1,
+          repo: "ippoan/auth-worker",
+          prod_version: "v0.5.32",
+          prod_deployed_at: "2026-05-27T00:00:00Z",
+          tested_against: [
+            {
+              backend_repo: "ippoan/rust-alc-api",
+              backend_image: "cur-img",
+              tested_at: "2026-05-27T00:00:00Z",
+            },
+          ],
+        },
+      }),
+    });
+    const resp = await handleReleaseWaveDetailPage(env, "w1");
+    const html = await resp.text();
+    expect(html).toContain(">verified<");
+    expect(html).toContain("tested");
   });
 });

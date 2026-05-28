@@ -1,6 +1,10 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { ReleaseWaveHub } from "../../src/release-wave/do";
+import {
+  recordBackendDeploy,
+  recordFrontendTest,
+} from "../../src/release-wave/compat";
 
 // 各テストで新しい DO ID を使って独立性を確保する。
 // (同一 ID を使い回すと前テストの storage が残り flaky になる。)
@@ -337,4 +341,110 @@ describe("ReleaseWaveHub.persistence", () => {
 // so test order is deterministic for debugging).
 beforeEach(() => {
   // no-op (idCounter は global、tests 間で increment 続行)
+});
+
+// ----------------------------------------------------------------------------
+// compatibility precheck warning (Refs #157 Phase A)
+// ----------------------------------------------------------------------------
+
+async function clearCompatKeys(): Promise<void> {
+  for (const prefix of ["frontend::", "backend::"]) {
+    const { keys } = await env.COMPAT_KV.list({ prefix });
+    await Promise.all(keys.map((k) => env.COMPAT_KV.delete(k.name)));
+  }
+}
+
+describe("ReleaseWaveHub.start compatibility precheck", () => {
+  beforeEach(clearCompatKeys);
+
+  const now = () => new Date().toISOString();
+
+  it("records a compatibility_warning when a frontend has not tested the current image", async () => {
+    await recordBackendDeploy(env.COMPAT_KV, {
+      repo: "ippoan/rust-alc-api",
+      current_image: "cur-img",
+      deployed_by: "x",
+      now: now(),
+    });
+    await recordFrontendTest(env.COMPAT_KV, {
+      repo: "ippoan/alc-app",
+      prod_version: "v1",
+      tested: { backend_repo: "ippoan/rust-alc-api", backend_image: "stale-img" },
+      now: now(),
+    });
+
+    const hub = freshHub();
+    const result = await runInDurableObject(hub, (i) =>
+      i.start({
+        wave_id: "w-compat-red",
+        flip_policy: "manual-approval",
+        repos: [
+          { repo: "ippoan/rust-alc-api", target_tag: "v2", head_sha: "s" },
+        ],
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const warn = result.data.events.find(
+        (e) => e.kind === "compatibility_warning",
+      );
+      expect(warn).toBeDefined();
+      expect((warn!.detail as { reds: string[] }).reds[0]).toContain(
+        "ippoan/alc-app",
+      );
+      // precheck は block しない: state は staging のまま。
+      expect(result.data.state).toBe("staging");
+    }
+  });
+
+  it("does NOT record a warning when the frontend has tested the current image", async () => {
+    await recordBackendDeploy(env.COMPAT_KV, {
+      repo: "ippoan/rust-alc-api",
+      current_image: "cur-img",
+      deployed_by: "x",
+      now: now(),
+    });
+    await recordFrontendTest(env.COMPAT_KV, {
+      repo: "ippoan/alc-app",
+      prod_version: "v1",
+      tested: { backend_repo: "ippoan/rust-alc-api", backend_image: "cur-img" },
+      now: now(),
+    });
+
+    const hub = freshHub();
+    const result = await runInDurableObject(hub, (i) =>
+      i.start({
+        wave_id: "w-compat-green",
+        flip_policy: "manual-approval",
+        repos: [
+          { repo: "ippoan/rust-alc-api", target_tag: "v2", head_sha: "s" },
+        ],
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(
+        result.data.events.some((e) => e.kind === "compatibility_warning"),
+      ).toBe(false);
+    }
+  });
+
+  it("does NOT record a warning when no backend deploy records exist", async () => {
+    const hub = freshHub();
+    const result = await runInDurableObject(hub, (i) =>
+      i.start({
+        wave_id: "w-compat-none",
+        flip_policy: "manual-approval",
+        repos: [
+          { repo: "ippoan/rust-alc-api", target_tag: "v2", head_sha: "s" },
+        ],
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(
+        result.data.events.some((e) => e.kind === "compatibility_warning"),
+      ).toBe(false);
+    }
+  });
 });
