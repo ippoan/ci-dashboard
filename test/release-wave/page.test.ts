@@ -944,17 +944,24 @@ describe("handleReleaseWaveListPage global compat overlay", () => {
     });
     const html = await (await handleReleaseWaveListPage(env)).text();
     expect(html).not.toContain("javascript:alert(1)");
-    // 危険 scheme の場合は preview link を出さない (Staged previews ブロック自体無し)
-    expect(html).not.toContain("Staged previews");
+    expect(html).not.toContain('href="javascript');
+    // heading は常設だが危険 scheme の preview link 自体は出さない
+    expect(html).toContain("Staged previews");
   });
 
-  it("omits previews + flip when no active waves (flipped only)", async () => {
+  it("always renders the overlay with placeholder + disabled flip when no active waves", async () => {
     const env = fakeEnv({
       listReturn: [makeWave({ wave_id: "w-done", state: "flipped" })],
       compatKv: memKv(compatSeed),
     });
     const html = await (await handleReleaseWaveListPage(env)).text();
-    expect(html).not.toContain("Staged previews");
-    expect(html).not.toContain("Approve &amp; Flip:");
+    // block 自体は常に出る
+    expect(html).toContain("Staged previews");
+    expect(html).toContain("active な wave");
+    // 具体的な flip 対象 (wave_id 付きボタン) は無く、disabled ボタンが出る
+    expect(html).not.toContain("Approve &amp; Flip: ");
+    const idx = html.indexOf("Approve &amp; Flip</button>");
+    expect(idx).toBeGreaterThan(-1);
+    expect(html.slice(Math.max(0, idx - 120), idx)).toContain("disabled");
   });
 });

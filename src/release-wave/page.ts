@@ -545,11 +545,15 @@ function renderGlobalCompatibilitySection(
  * 俯瞰グラフ直下に、進行中 wave の preview link と Approve & Flip ボタンを出す。
  * SVG node に直接埋めると anchor のネストや座標管理が破綻するため、HTML として
  * グラフの下にまとめて描画する (= preview を「ここ (compat section)」に出す)。
+ *
+ * active wave が無い時も block 自体は常に描画し、placeholder / disabled ボタンを
+ * 出す (= UI affordance を常設して「ここで flip できる」ことを見せる)。
  */
 function renderActiveWaveOverlay(active?: ActiveWaveInfo): string {
-  if (!active) return "";
+  const previewEntries = active ? [...active.preview.entries()] : [];
+  const pendingFlips = active ? active.pendingFlips : [];
 
-  const previews = [...active.preview.entries()]
+  const previews = previewEntries
     .map(
       ([repo, p]) =>
         `<li><code>${escapeHtml(repo)}</code> →
@@ -557,16 +561,18 @@ function renderActiveWaveOverlay(active?: ActiveWaveInfo): string {
           <span class="meta">(${escapeHtml(p.wave_id)})</span></li>`,
     )
     .join("");
-  const previewBlock = previews
-    ? `<div style="margin-top:10px">
-         <strong class="meta">Staged previews (active waves)</strong>
-         <ul style="margin:4px 0 0; padding-left:20px">${previews}</ul>
-       </div>`
-    : "";
+  const previewBlock = `
+    <div style="margin-top:10px">
+      <strong class="meta">Staged previews (active waves)</strong>
+      ${previews
+        ? `<ul style="margin:4px 0 0; padding-left:20px">${previews}</ul>`
+        : `<p class="meta" style="margin:4px 0 0">active な wave (staging / pending-approval) はありません。</p>`}
+    </div>`;
 
   // pending-approval の wave ごとに Approve & Flip ボタン。一覧 (list page) と
   // 同じく force は付けない (compat gate ブロック時は詳細ページで override)。
-  const flips = active.pendingFlips
+  // 対象 wave が無い時は disabled ボタンを 1 つ出して affordance を残す。
+  const flips = pendingFlips
     .map(
       (f) => `
         <form method="post" action="/api/release-wave/${encodeURIComponent(f.wave_id)}/approve" style="margin:0">
@@ -577,9 +583,13 @@ function renderActiveWaveOverlay(active?: ActiveWaveInfo): string {
         </form>`,
     )
     .join("");
-  const flipBlock = flips
-    ? `<div class="actions" style="margin-top:10px">${flips}</div>`
-    : "";
+  const flipBlock = `
+    <div class="actions" style="margin-top:10px">
+      ${flips
+        ? flips
+        : `<button type="button" disabled
+             title="pending-approval の wave がありません">Approve &amp; Flip</button>`}
+    </div>`;
 
   return previewBlock + flipBlock;
 }
