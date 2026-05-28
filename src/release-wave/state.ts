@@ -53,6 +53,7 @@ export function createWave(input: {
     flip_status: "pending",
     flip_error: null,
     flip_from_revision: null,
+    previewed_version_id: null,
     rolled_back_to_revision: null,
   }));
 
@@ -177,6 +178,7 @@ function applyStageReport(
     repoNext.stage_status = "done";
     repoNext.preview_url = event.preview_url ?? null;
     repoNext.flip_from_revision = event.flip_from_revision ?? null;
+    repoNext.previewed_version_id = event.previewed_version_id ?? null;
     repoNext.stage_error = null;
   } else {
     repoNext.stage_status = "failed";

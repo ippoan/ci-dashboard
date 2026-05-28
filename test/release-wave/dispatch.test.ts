@@ -153,6 +153,39 @@ describe("decideDispatches: approve", () => {
     expect(ds[0]!.event_type).toBe("release-wave-flip");
     expect(ds[0]!.client_payload.wave_id).toBe("w1");
   });
+
+  it("includes previewed_version_id per repo in flip payload (CF Workers staged flip)", () => {
+    let s = makeWave({ flip_policy: "manual-approval" });
+    s = ok(
+      transition(s, {
+        kind: "stage_report",
+        now: T1,
+        repo: "ippoan/rust-alc-api",
+        ok: true,
+        previewed_version_id: "11111111-2222-3333-4444-555555555555",
+      }),
+    ).state;
+    s = ok(
+      transition(s, {
+        kind: "stage_report",
+        now: T1,
+        repo: "ippoan/auth-worker",
+        ok: true,
+        previewed_version_id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+      }),
+    ).state;
+    const prev = s;
+    const next = ok(
+      transition(prev, { kind: "approve", now: T2, approved_by: "ops@example.com" }),
+    ).state;
+    const ds = decideDispatches(prev, next);
+    expect(ds[0]!.client_payload.previewed_version_id).toBe(
+      "11111111-2222-3333-4444-555555555555",
+    );
+    expect(ds[1]!.client_payload.previewed_version_id).toBe(
+      "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    );
+  });
 });
 
 // ============================================================================

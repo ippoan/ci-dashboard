@@ -51,6 +51,7 @@ describe("createWave", () => {
     expect(w.repos[0]!.flip_status).toBe("pending");
     expect(w.repos[0]!.preview_url).toBeNull();
     expect(w.repos[0]!.flip_from_revision).toBeNull();
+    expect(w.repos[0]!.previewed_version_id).toBeNull();
     expect(w.rollback.safe).toBe(true);
     expect(w.rollback.unsafe_reason).toBeNull();
     expect(w.started_at).toBe(T0);
@@ -108,6 +109,7 @@ describe("transition: stage_report", () => {
         ok: true,
         preview_url: "https://preview-rust-alc-api.ippoan.org",
         flip_from_revision: "rust-alc-api-00041-zzz",
+        previewed_version_id: "11111111-2222-3333-4444-555555555555",
       }),
     );
     expect(r.state.state).toBe("staging");
@@ -116,6 +118,9 @@ describe("transition: stage_report", () => {
       "https://preview-rust-alc-api.ippoan.org",
     );
     expect(r.state.repos[0]!.flip_from_revision).toBe("rust-alc-api-00041-zzz");
+    expect(r.state.repos[0]!.previewed_version_id).toBe(
+      "11111111-2222-3333-4444-555555555555",
+    );
     expect(r.state.repos[1]!.stage_status).toBe("pending");
     expect(r.state.staged_at).toBeNull();
   });

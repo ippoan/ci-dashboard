@@ -136,17 +136,24 @@ export function registerReleaseWaveTools(server: McpServer, env: Env): void {
           .describe(
             "Pre-flip latest revision (= rollback target). Set when ok=true.",
           ),
+        previewed_version_id: z
+          .string()
+          .optional()
+          .describe(
+            "CF Workers no-traffic version id that was previewed (= flip target). Set when ok=true.",
+          ),
         error: z.string().optional().describe("Error detail when ok=false."),
       },
       annotations: { readOnlyHint: false },
     },
-    async ({ wave_id, repo, ok, preview_url, flip_from_revision, error }) => {
+    async ({ wave_id, repo, ok, preview_url, flip_from_revision, previewed_version_id, error }) => {
       const result = await hubStub(env).stageReport({
         wave_id,
         repo,
         ok,
         preview_url: preview_url ?? null,
         flip_from_revision: flip_from_revision ?? null,
+        previewed_version_id: previewed_version_id ?? null,
         error: error ?? null,
       });
       return formatRpcResult(result);

@@ -169,7 +169,8 @@ export async function handleContractAppliedWebhook(
  *     "repo": "ippoan/rust-alc-api",
  *     "ok": true,
  *     "preview_url": "https://preview-rust-alc-api.ippoan.org",      // ok=true 時のみ意味あり
- *     "flip_from_revision": "rust-alc-api-00041-zzz",                // ok=true 時のみ
+ *     "flip_from_revision": "rust-alc-api-00041-zzz",                // ok=true 時のみ (rollback 戻し先)
+ *     "previewed_version_id": "1a2b3c4d-...",                        // CF Workers のみ (flip 対象 version)
  *     "error": "build failed"                                        // ok=false 時のみ
  *   }
  */
@@ -179,6 +180,7 @@ const stageReportSchema = z.object({
   ok: z.boolean(),
   preview_url: z.string().url().optional(),
   flip_from_revision: z.string().optional(),
+  previewed_version_id: z.string().optional(),
   error: z.string().optional(),
 });
 
@@ -194,6 +196,7 @@ export async function handleStageReportWebhook(
     ok: v.data.ok,
     preview_url: v.data.preview_url ?? null,
     flip_from_revision: v.data.flip_from_revision ?? null,
+    previewed_version_id: v.data.previewed_version_id ?? null,
     error: v.data.error ?? null,
   })) as RpcResult<WaveState>;
   return rpcResultToResponse(result);

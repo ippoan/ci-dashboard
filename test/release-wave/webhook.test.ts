@@ -315,6 +315,7 @@ describe("handleStageReportWebhook", () => {
           ok: true,
           preview_url: "https://preview-a.ippoan.org/",
           flip_from_revision: "a-old-rev",
+          previewed_version_id: "11111111-2222-3333-4444-555555555555",
         },
       }),
       env,
@@ -326,6 +327,7 @@ describe("handleStageReportWebhook", () => {
       ok: true,
       preview_url: "https://preview-a.ippoan.org/",
       flip_from_revision: "a-old-rev",
+      previewed_version_id: "11111111-2222-3333-4444-555555555555",
       error: null,
     });
   });
@@ -370,6 +372,7 @@ describe("handleStageReportWebhook", () => {
       expect.objectContaining({
         preview_url: null,
         flip_from_revision: null,
+        previewed_version_id: null,
         error: null,
       }),
     );
