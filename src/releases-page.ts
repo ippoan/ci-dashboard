@@ -206,6 +206,23 @@ async function loadRepoView(
   const { owner, repo: name } = parseRepo(repo);
   const token = await tokenForOrg(env, owner);
 
+  // 0. Drop archived repos early. GitHub API は archived repo の issue PATCH
+  //    で 403 "Repository was archived so is read-only." を返すため、
+  //    operator が release UI から close しようとして必ず失敗する。
+  //    そもそも archived repo は将来の release tag も cut されない前提なので
+  //    一覧から外す。Refs ippoan/ci-dashboard#155 (ippoan/github-mcp-server-rs
+  //    が monorepo 化で archive されたが /releases に残っていた問題)。
+  //
+  //    meta fetch 自体が失敗 (private / 削除 / token 権限喪失 / network) した
+  //    場合は best-effort で握り潰し、既存の tag fetch 失敗 → null 経路に
+  //    判断を委ねる (= 「archived と確認できた時だけ」drop)。
+  try {
+    const meta = await cachedRepoMeta(token, kv, owner, name);
+    if (meta.archived === true) return null;
+  } catch {
+    /* archived 判定不能 — 続行 */
+  }
+
   // 1. Recent semver tags. 10 gives us 5 inline + room for the predecessor
   //    pairing on the oldest of those 5 + a small "older" strip.
   const allTags = await cachedTags(token, kv, owner, name, 10);
@@ -318,7 +335,10 @@ async function loadRepoView(
 // supported for these tags — `renderTagBlock` skips the link.
 const SYNTHETIC_COMMIT_WINDOW = 100;
 
-interface RepoMeta { default_branch: string }
+interface RepoMeta {
+  default_branch: string;
+  archived?: boolean;
+}
 
 async function loadSyntheticBlock(
   token: string,
