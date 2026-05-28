@@ -7,8 +7,9 @@ import { clearReleaseCache } from "../src/release-cache";
 // `watched` populates the Hub `/statuses` response so the no-params index
 // page can enumerate repos. Defaults to empty so existing tests keep their
 // pre-#41 behavior (form-only).
-function testEnv(opts: { watched?: string[] } = {}): Env {
+function testEnv(opts: { watched?: string[]; tagless?: string[] } = {}): Env {
   const watched = opts.watched ?? [];
+  const tagless = opts.tagless;
   return {
     CI_STATUS: env.CI_STATUS,
     WEBHOOK_SECRET: { get: async () => "test-secret" } as unknown as SecretsStoreSecret,
@@ -26,6 +27,7 @@ function testEnv(opts: { watched?: string[] } = {}): Env {
     } as unknown as DurableObjectNamespace,
     RELEASE_WAVE_HUB: { idFromName: () => ({}), get: () => ({ fetch: async () => new Response("OK") }) } as unknown as DurableObjectNamespace,
     RELEASE_WAVE_WEBHOOK_SECRET: { get: async () => "test-webhook-secret" } as unknown as SecretsStoreSecret,
+    ...(tagless ? { TAGLESS_REPOS: tagless.join(",") } : {}),
   };
 }
 
@@ -716,6 +718,88 @@ describe("GET /releases", () => {
     // Second load should be served entirely from KV — no new GitHub calls.
     expect(fetchCount).toBe(firstLoadCalls);
     expect(res2.status).toBe(200);
+  });
+
+  // TAGLESS_REPOS にいる repo が tag を持つ場合、latest tag → HEAD の Unreleased
+  // 区間に対する synthetic block を tag blocks の先頭に追加する。
+  // ci-dashboard / secrets-inventory のように「PR merge = staging deploy だが
+  // release tag も cut する」混合運用の repo で、merge 済み未 release な PR
+  // の issue を `/releases` で目視できるようにするのが目的。
+  // Refs ippoan/ci-dashboard#147 (cross-repo Refs 修正) + #145 (TAGLESS 追加)。
+  it("prepends an Unreleased synthetic block for a TAGLESS_REPOS repo that has tags", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (req) => {
+      const url = typeof req === "string" ? req : (req as Request).url;
+
+      // direct-push allowlist は空 (= TAGLESS_REPOS だけで repo を拾う)
+      if (url.includes("/contents/wt-direct-push/config/direct-push-ok.txt")) {
+        return Response.json({ content: btoa(""), encoding: "base64" });
+      }
+
+      // 通常通り tag がある repo
+      if (url.includes("/repos/ippoan/mixed-repo/tags")) {
+        return Response.json([
+          { name: "v1.0.0", commit: { sha: "tag1aaaa" } },
+        ]);
+      }
+
+      // default_branch lookup (loadSyntheticBlock で必要)
+      if (url.match(/\/repos\/ippoan\/mixed-repo(\?|$)/)) {
+        return Response.json({ default_branch: "main" });
+      }
+
+      // latest_tag..HEAD の compare (Unreleased zone)
+      if (url.includes("/repos/ippoan/mixed-repo/compare/v1.0.0...main")) {
+        return Response.json({
+          commits: [
+            // 1 つ目: bare Refs (古い)
+            { sha: "abc1111111111111", commit: { message: "feat: foo\n\nRefs #200" } },
+            // 2 つ目: cross-repo style Refs (新しい = HEAD、PR #149 の修正で拾える形)
+            { sha: "def2222222222222", commit: { message: "fix: bar\n\nRefs ippoan/mixed-repo#201" } },
+          ],
+        });
+      }
+
+      // tag 内部の compare は空でも問題ない (loadRepoView が prevTag=null なら refs 空)
+      // ここでは TOP_TAGS_INLINE=5 中 1 tag のみ提供しているので呼ばれない。
+
+      // 上記 Unreleased zone で抽出される issue
+      if (url.endsWith("/repos/ippoan/mixed-repo/issues/200")) {
+        return Response.json({
+          number: 200, title: "merged-but-unreleased issue", state: "open",
+          labels: [], assignees: [],
+          html_url: "https://github.com/ippoan/mixed-repo/issues/200",
+          updated_at: "2026-05-27T00:00:00Z",
+        });
+      }
+      if (url.endsWith("/repos/ippoan/mixed-repo/issues/201")) {
+        return Response.json({
+          number: 201, title: "cross-repo-style ref", state: "open",
+          labels: [], assignees: [],
+          html_url: "https://github.com/ippoan/mixed-repo/issues/201",
+          updated_at: "2026-05-27T01:00:00Z",
+        });
+      }
+
+      return new Response(`not stubbed: ${url}`, { status: 500 });
+    });
+
+    const e = testEnv({ tagless: ["ippoan/mixed-repo"] });
+    const req = new Request("http://localhost/releases");
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(req, e, ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(200);
+    const html = await res.text();
+
+    // Unreleased synthetic block が出ている (label に "Unreleased" + HEAD sha7)
+    expect(html).toContain("Unreleased (main@def2222)");
+    // 両方の issue (bare + cross-repo style) が候補として表示される
+    expect(html).toContain("merged-but-unreleased issue");
+    expect(html).toContain("cross-repo-style ref");
+    // 既存 tag block (v1.0.0 / prev 無し) はそのまま — refs が無いので tag 自体は
+    // 表示されるが issue は付かない。HTML に tag 名は出てよい。
+    expect(html).toContain("ippoan/mixed-repo");
   });
 
   it("does not turn an unallowlisted tag-less repo into a synthetic block", async () => {
