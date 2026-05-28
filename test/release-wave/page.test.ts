@@ -834,3 +834,127 @@ describe("handleReleaseWaveDetailPage compatibility section", () => {
     expect(html).toContain("cur-img");
   });
 });
+
+// ============================================================================
+// global compat section overlay: staged previews + flip + node link (Refs #174)
+// ============================================================================
+
+describe("handleReleaseWaveListPage global compat overlay", () => {
+  const compatSeed = {
+    "backend::ippoan/rust-alc-api": {
+      schema_version: 1,
+      repo: "ippoan/rust-alc-api",
+      current_image: "cur-img",
+      deployed_at: "2026-05-27T00:00:00Z",
+      deployed_by: "x",
+      wave_id: null,
+    },
+    "frontend::ippoan/alc-app": {
+      schema_version: 1,
+      repo: "ippoan/alc-app",
+      prod_version: "v1.2.10",
+      prod_deployed_at: "2026-05-27T00:00:00Z",
+      tested_against: [
+        {
+          backend_repo: "ippoan/rust-alc-api",
+          backend_image: "cur-img",
+          tested_at: "2026-05-27T00:00:00Z",
+        },
+      ],
+    },
+  };
+
+  function activeWave(over: Partial<WaveState> = {}): WaveState {
+    return makeWave({
+      wave_id: "w-active",
+      state: "pending-approval",
+      repos: [
+        {
+          repo: "ippoan/alc-app",
+          target_tag: "v1.3.0",
+          head_sha: "abc",
+          require_compatibility: false,
+          stage_status: "done",
+          preview_url: "https://preview-alc.ippoan.org/",
+          stage_error: null,
+          flip_status: "pending",
+          flip_error: null,
+          flip_from_revision: null,
+          rolled_back_to_revision: null,
+        },
+      ],
+      ...over,
+    });
+  }
+
+  it("shows staged preview links + Approve & Flip for active waves", async () => {
+    const env = fakeEnv({
+      listReturn: [activeWave()],
+      compatKv: memKv(compatSeed),
+    });
+    const html = await (await handleReleaseWaveListPage(env)).text();
+    expect(html).toContain("Staged previews");
+    expect(html).toContain('href="https://preview-alc.ippoan.org/"');
+    expect(html).toContain("Approve &amp; Flip: w-active");
+    expect(html).toContain('action="/api/release-wave/w-active/approve"');
+  });
+
+  it("does not pass force=true from the compat-section flip button", async () => {
+    const env = fakeEnv({
+      listReturn: [activeWave()],
+      compatKv: memKv(compatSeed),
+    });
+    const html = await (await handleReleaseWaveListPage(env)).text();
+    const idx = html.indexOf('action="/api/release-wave/w-active/approve"');
+    expect(html.slice(idx, idx + 300)).not.toContain('name="force"');
+  });
+
+  it("links the frontend graph node to its active wave detail page", async () => {
+    const env = fakeEnv({
+      listReturn: [activeWave()],
+      compatKv: memKv(compatSeed),
+    });
+    const html = await (await handleReleaseWaveListPage(env)).text();
+    // SVG node が active wave の詳細ページへの anchor になっている
+    expect(html).toMatch(/<a href="\/release-wave\/w-active"[^>]*>\s*<g>/);
+  });
+
+  it("rejects javascript: preview_url in the overlay (XSS regression)", async () => {
+    const env = fakeEnv({
+      listReturn: [
+        activeWave({
+          repos: [
+            {
+              repo: "ippoan/alc-app",
+              target_tag: "v1.3.0",
+              head_sha: "abc",
+              require_compatibility: false,
+              stage_status: "done",
+              preview_url: "javascript:alert(1)",
+              stage_error: null,
+              flip_status: "pending",
+              flip_error: null,
+              flip_from_revision: null,
+              rolled_back_to_revision: null,
+            },
+          ],
+        }),
+      ],
+      compatKv: memKv(compatSeed),
+    });
+    const html = await (await handleReleaseWaveListPage(env)).text();
+    expect(html).not.toContain("javascript:alert(1)");
+    // 危険 scheme の場合は preview link を出さない (Staged previews ブロック自体無し)
+    expect(html).not.toContain("Staged previews");
+  });
+
+  it("omits previews + flip when no active waves (flipped only)", async () => {
+    const env = fakeEnv({
+      listReturn: [makeWave({ wave_id: "w-done", state: "flipped" })],
+      compatKv: memKv(compatSeed),
+    });
+    const html = await (await handleReleaseWaveListPage(env)).text();
+    expect(html).not.toContain("Staged previews");
+    expect(html).not.toContain("Approve &amp; Flip:");
+  });
+});
