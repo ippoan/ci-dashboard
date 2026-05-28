@@ -58,9 +58,19 @@ export async function handleReleaseWaveApprove(
   if (req.method !== "POST") {
     return jsonResponse(405, { code: "METHOD_NOT_ALLOWED", error: "use POST" });
   }
+  // form body 内 `force=true` で compatibility gate を override する経路
+  // (Refs #157 Phase C)。UI 側は gate blocked 時のみ force 付きボタンを出す。
+  let force = false;
+  try {
+    const form = await req.formData();
+    force = String(form.get("force") ?? "") === "true";
+  } catch {
+    // form-data 以外は force なし
+  }
   const result = (await hubStub(env).approve({
     wave_id,
     approved_by: actorEmail(req),
+    force,
   })) as RpcResult<WaveState>;
   if (!result.ok) {
     return jsonResponse(rpcErrorToHttpStatus(result.code), {

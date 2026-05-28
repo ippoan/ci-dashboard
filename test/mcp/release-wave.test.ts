@@ -299,6 +299,7 @@ describe("release_wave_approve", () => {
     expect(spies.approve).toHaveBeenCalledWith({
       wave_id: "w1",
       approved_by: "ops@example.com",
+      force: false,
     });
   });
 });

@@ -50,7 +50,12 @@ export interface StartInput {
   wave_id: string;
   flip_policy: FlipPolicy;
   note?: string;
-  repos: Array<{ repo: string; target_tag: string; head_sha: string }>;
+  repos: Array<{
+    repo: string;
+    target_tag: string;
+    head_sha: string;
+    require_compatibility?: boolean;
+  }>;
 }
 
 export interface StageReportInput {
@@ -65,6 +70,8 @@ export interface StageReportInput {
 export interface ApproveInput {
   wave_id: string;
   approved_by: string;
+  /** compatibility gate を override する (Refs #157 Phase C)。default false。 */
+  force?: boolean;
 }
 
 export interface FlipReportInput {
@@ -104,7 +111,8 @@ export type RpcErrorCode =
   | TransitionErrorCode
   | "NOT_FOUND"
   | "ALREADY_EXISTS"
-  | "WAVE_IN_PROGRESS";
+  | "WAVE_IN_PROGRESS"
+  | "COMPATIBILITY_GATE";
 
 export interface RpcError {
   code: RpcErrorCode;
@@ -193,11 +201,64 @@ export class ReleaseWaveHub extends DurableObject<Env> {
   }
 
   async approve(input: ApproveInput): Promise<RpcResult<WaveState>> {
+    // compatibility gate (Refs #157 Phase C): require_compatibility=true な
+    // backend に未 test frontend が居る場合、force でなければ approve を拒否。
+    if (input.force !== true) {
+      const wave = await this.loadWave(input.wave_id);
+      if (!wave) {
+        return { ok: false, code: "NOT_FOUND", error: `wave ${input.wave_id} not found` };
+      }
+      const blockers = await this.compatibilityGateBlockers(wave);
+      if (blockers.length > 0) {
+        return {
+          ok: false,
+          code: "COMPATIBILITY_GATE",
+          error: `compatibility gate blocked approve: ${blockers.join("; ")} (pass force=true to override)`,
+        };
+      }
+    }
     return this.applyEvent(input.wave_id, {
       kind: "approve",
       now: new Date().toISOString(),
       approved_by: input.approved_by,
     });
+  }
+
+  /**
+   * `require_compatibility=true` な backend のうち、未 test frontend を持つものの
+   * 説明文字列配列を返す (空 = gate 通過)。COMPAT_KV 未 bind / 算出失敗時は
+   * best-effort で空 (= gate を素通り) にする。
+   */
+  private async compatibilityGateBlockers(wave: WaveState): Promise<string[]> {
+    const required = wave.repos
+      .filter((r) => r.require_compatibility)
+      .map((r) => r.repo);
+    if (required.length === 0 || !this.env.COMPAT_KV) return [];
+
+    let compat;
+    try {
+      compat = await computeWaveCompatibility(
+        this.env.COMPAT_KV,
+        wave.repos.map((r) => r.repo),
+      );
+    } catch (e) {
+      console.warn(`[release-wave] compat gate eval failed: ${String(e)}`);
+      return [];
+    }
+
+    const blockers: string[] = [];
+    for (const b of compat.backends) {
+      if (!required.includes(b.backend_repo)) continue;
+      const reds = b.matrix
+        .filter((m) => !m.tested_against_target)
+        .map((m) => m.frontend);
+      if (reds.length > 0) {
+        blockers.push(
+          `${b.backend_repo}@${b.current_image ?? "?"}: untested frontend(s) ${reds.join(", ")}`,
+        );
+      }
+    }
+    return blockers;
   }
 
   async flipReport(input: FlipReportInput): Promise<RpcResult<WaveState>> {

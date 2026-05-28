@@ -71,6 +71,7 @@ function makeWave(over: Partial<WaveState> = {}): WaveState {
         repo: "ippoan/rust-alc-api",
         target_tag: "v1.1.0",
         head_sha: "abc",
+        require_compatibility: false,
         stage_status: "pending",
         preview_url: null,
         stage_error: null,
@@ -631,6 +632,58 @@ describe("handleReleaseWaveDetailPage compatibility section", () => {
     expect(html).toContain("stale-img");
     // 凡例
     expect(html).toContain("untested (red)");
+  });
+
+  it("shows compat gate override on approve button when a required backend has reds", async () => {
+    const wave = makeWave({
+      state: "pending-approval",
+      repos: [
+        {
+          repo: "ippoan/rust-alc-api",
+          target_tag: "v2",
+          head_sha: "s",
+          require_compatibility: true,
+          stage_status: "done",
+          preview_url: null,
+          stage_error: null,
+          flip_status: "pending",
+          flip_error: null,
+          flip_from_revision: null,
+          rolled_back_to_revision: null,
+        },
+      ],
+    });
+    const env = fakeEnv({
+      getReturn: { ok: true, data: wave },
+      compatKv: memKv({
+        "backend::ippoan/rust-alc-api": {
+          schema_version: 1,
+          repo: "ippoan/rust-alc-api",
+          current_image: "cur-img",
+          deployed_at: "2026-05-27T00:00:00Z",
+          deployed_by: "x",
+          wave_id: null,
+        },
+        "frontend::ippoan/alc-app": {
+          schema_version: 1,
+          repo: "ippoan/alc-app",
+          prod_version: "v1",
+          prod_deployed_at: "2026-05-27T00:00:00Z",
+          tested_against: [
+            {
+              backend_repo: "ippoan/rust-alc-api",
+              backend_image: "stale-img",
+              tested_at: "2026-05-20T00:00:00Z",
+            },
+          ],
+        },
+      }),
+    });
+    const resp = await handleReleaseWaveDetailPage(env, "w1");
+    const html = await resp.text();
+    expect(html).toContain("override compat gate");
+    expect(html).toContain("Compatibility gate");
+    expect(html).toContain('name="force" value="true"');
   });
 
   it("omits the SVG when there are no edges (backend record but no consumers)", async () => {

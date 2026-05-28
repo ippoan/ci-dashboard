@@ -49,6 +49,12 @@ export interface RepoState {
   readonly target_tag: string;
   /** 本 wave 開始時点の HEAD SHA。stage handler 起動先 commit。 */
   readonly head_sha: string;
+  /**
+   * compatibility gate 対象 backend か (Refs #157 Phase C)。true の場合、
+   * この repo (backend) に未 test の frontend が居る状態では `approve` が
+   * reject される (force override 可)。default false (= opt-in)。
+   */
+  readonly require_compatibility: boolean;
 
   /** stage handler 完了 callback の進捗。 */
   stage_status: RepoPhaseStatus;

@@ -68,6 +68,7 @@ describe("handleReleaseWaveApprove", () => {
     expect(spies.approve).toHaveBeenCalledWith({
       wave_id: "w1",
       approved_by: "ops@example.com",
+      force: false,
     });
   });
 
@@ -78,7 +79,20 @@ describe("handleReleaseWaveApprove", () => {
     expect(spies.approve).toHaveBeenCalledWith({
       wave_id: "w1",
       approved_by: "operator",
+      force: false,
     });
+  });
+
+  it("passes force=true when form sets it (compat gate override)", async () => {
+    const { env, spies } = fakeEnv();
+    const req = postRequest("/api/release-wave/w1/approve", {
+      actorEmail: "ops@x",
+      formBody: { force: "true" },
+    });
+    await handleReleaseWaveApprove(req, env, "w1");
+    expect(spies.approve).toHaveBeenCalledWith(
+      expect.objectContaining({ force: true }),
+    );
   });
 
   it("returns 405 on non-POST", async () => {

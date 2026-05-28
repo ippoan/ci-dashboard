@@ -304,6 +304,42 @@ Phase A で `frontend-test-report` が KV write を server 側で担うため、
 都度 read して算出するので、KV 更新後の次回表示で**自動 refresh** される
 (= 専用 `retest-report` endpoint や matrix push は不要)。
 
+## Phase C: gate 化 (opt-in / 安全 default)
+
+`approve` を compatibility gate にする。opt-in (= default off) なので既存運用は不変。
+
+### `require_compatibility` フラグ
+
+`release-wave-targets.yaml` の registry はまだ無いため、Phase C では **wave 開始時の
+per-repo フラグ**として持たせる (`release_wave_start` の `repos[].require_compatibility`、
+default false)。backend repo に対して立てる。
+
+```jsonc
+// release_wave_start の repos entry
+{ "repo": "ippoan/rust-alc-api", "target_tag": "v1.43.0", "head_sha": "...",
+  "require_compatibility": true }
+```
+
+### approve gate
+
+`release_wave_approve` (MCP) / admin UI の Approve ボタンは、`require_compatibility=true`
+な backend に**未 test frontend (= matrix の赤) が 1 つ以上**ある場合に
+`COMPATIBILITY_GATE` で reject される。
+
+- `force=true` (MCP) / admin UI の override ボタン (gate blocked 時のみ `force` 付き) で
+  人手 override 可。
+- gate は **赤がある時だけ** 発火する。consumer が 1 つも居ない backend
+  (matrix 空) は「検証対象なし」として通す (= 内部 API backend を誤って block しない)。
+- COMPAT_KV 未 bind / 算出失敗時は best-effort で gate を素通り (= approve を妨げない)。
+
+### frontend 単独 wave の gate (未実装 / 保留)
+
+issue #157 Phase C の「frontend 単独 wave も現 production backend image との整合を
+gate する」は、frontend → backend の依存マップ (consumed_by) が未整備のため**保留**。
+現状は tested_against の履歴から consumer を逆算しているが、frontend 単独 wave では
+「どの backend の現 image と照合すべきか」を一意に決められない。consumed_by を
+`release-wave-targets.yaml` registry として導入する際に対応する。
+
 ## 後続実装 issue
 
 本ドキュメントが approve された後、以下を別 issue / PR として進める:
