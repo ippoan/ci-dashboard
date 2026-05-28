@@ -6,6 +6,7 @@ import {
   getBackendCurrent,
   computeCompatibility,
   computeWaveCompatibility,
+  computeGlobalCompatibility,
   TESTED_AGAINST_MAX,
   WINDOW_DAYS,
   SCHEMA_VERSION,
@@ -411,5 +412,62 @@ describe("computeWaveCompatibility", () => {
     expect(res.backends[0]!.matrix).toHaveLength(0);
     expect(res.checked).toBe(false);
     expect(res.verified).toBe(true);
+  });
+});
+
+describe("computeGlobalCompatibility", () => {
+  it("returns empty (no backends) when no backend records exist", async () => {
+    await recordFrontendTest(kv(), {
+      repo: "ippoan/nuxt-notify",
+      prod_version: "v1",
+      tested: { backend_repo: "ippoan/rust-alc-api", backend_image: "img" },
+      now: daysAgo(1),
+    });
+    const res = await computeGlobalCompatibility(kv());
+    expect(res.backends).toHaveLength(0);
+    expect(res.checked).toBe(false);
+  });
+
+  it("aggregates all backend:: records and their consumers", async () => {
+    await recordBackendDeploy(kv(), {
+      repo: "ippoan/rust-alc-api",
+      current_image: "cur-rust",
+      deployed_by: "x",
+      now: daysAgo(1),
+    });
+    await recordBackendDeploy(kv(), {
+      repo: "ippoan/auth-worker",
+      current_image: "cur-auth",
+      deployed_by: "x",
+      now: daysAgo(1),
+    });
+    // nuxt-notify は rust-alc-api を現 image で test 済 (green)。
+    await recordFrontendTest(kv(), {
+      repo: "ippoan/nuxt-notify",
+      prod_version: "v1",
+      tested: { backend_repo: "ippoan/rust-alc-api", backend_image: "cur-rust" },
+      now: daysAgo(1),
+    });
+    // alc-app は rust-alc-api を旧 image でしか test していない (red)。
+    await recordFrontendTest(kv(), {
+      repo: "ippoan/alc-app",
+      prod_version: "v2",
+      tested: { backend_repo: "ippoan/rust-alc-api", backend_image: "old-rust" },
+      now: daysAgo(2),
+    });
+
+    const res = await computeGlobalCompatibility(kv());
+    const repos = res.backends.map((b) => b.backend_repo).sort();
+    expect(repos).toEqual(["ippoan/auth-worker", "ippoan/rust-alc-api"]);
+
+    const rust = res.backends.find((b) => b.backend_repo === "ippoan/rust-alc-api")!;
+    const notify = rust.matrix.find((m) => m.frontend === "ippoan/nuxt-notify")!;
+    const alc = rust.matrix.find((m) => m.frontend === "ippoan/alc-app")!;
+    expect(notify.tested_against_target).toBe(true);
+    expect(alc.tested_against_target).toBe(false);
+
+    // 1 つでも赤があれば verified=false、consumer がいるので checked=true。
+    expect(res.checked).toBe(true);
+    expect(res.verified).toBe(false);
   });
 });
