@@ -36,6 +36,7 @@ import {
   handleReleaseWaveApprove,
   handleReleaseWaveRollback,
   handleReleaseWaveAbort,
+  handleReleaseWaveRetest,
 } from "./release-wave/api";
 import {
   handlePwaManifest,
@@ -242,6 +243,11 @@ app.post("/api/release-wave/:wave_id/rollback", (c) =>
 );
 app.post("/api/release-wave/:wave_id/abort", (c) =>
   handleReleaseWaveAbort(c.req.raw, c.env, c.req.param("wave_id")),
+);
+// compatibility matrix の赤 frontend に release-wave-retest を fan-out
+// (Refs #157 Phase B)。form field `frontend` で 1 件指定可、無ければ全 red。
+app.post("/api/release-wave/:wave_id/retest", (c) =>
+  handleReleaseWaveRetest(c.req.raw, c.env, c.req.param("wave_id")),
 );
 
 export default app;

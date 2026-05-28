@@ -311,7 +311,7 @@ export async function handleReleaseWaveDetailPage(
         env.COMPAT_KV,
         w.repos.map((r) => r.repo),
       );
-      compatHtml = renderCompatibilitySection(compat);
+      compatHtml = renderCompatibilitySection(compat, w.wave_id);
     } catch {
       compatHtml = "";
     }
@@ -401,7 +401,10 @@ export async function handleReleaseWaveDetailPage(
  * wave 内 backend の現 image に対する既 deploy frontend の突合 matrix を描画する。
  * 緑 (tested) / 赤 (untested) を highlight する。read-only / 非 block。
  */
-function renderCompatibilitySection(compat: WaveCompatibility): string {
+function renderCompatibilitySection(
+  compat: WaveCompatibility,
+  wave_id: string,
+): string {
   if (compat.backends.length === 0) {
     return `
     <div class="section">
@@ -417,11 +420,27 @@ function renderCompatibilitySection(compat: WaveCompatibility): string {
     ? `<span class="ok"><strong>verified</strong></span>`
     : `<span class="err"><strong>not verified</strong> — some frontends untested</span>`;
 
+  const retestAction = encodeURIComponent(wave_id);
+  // 赤が 1 つでもあれば "Re-test all reds" ボタンを出す。
+  const hasReds = compat.backends.some((b) =>
+    b.matrix.some((m) => !m.tested_against_target),
+  );
+  const retestAllBlock = hasReds
+    ? `<div class="actions">
+         <form method="post" action="/api/release-wave/${retestAction}/retest">
+           <button type="submit" class="warn"
+             title="Dispatch release-wave-retest to every untested frontend">
+             Re-test all reds
+           </button>
+         </form>
+       </div>`
+    : "";
+
   const blocks = compat.backends
     .map((b) => {
       const rows =
         b.matrix.length === 0
-          ? `<tr><td colspan="4" class="empty">No frontend has tested against this backend.</td></tr>`
+          ? `<tr><td colspan="5" class="empty">No frontend has tested against this backend.</td></tr>`
           : b.matrix
               .map((m) => {
                 const statusCell = m.tested_against_target
@@ -433,12 +452,20 @@ function renderCompatibilitySection(compat: WaveCompatibility): string {
                 const last = m.tested_against_target
                   ? `<span class="meta">—</span>`
                   : `<span class="meta">${escapeHtml(m.last_tested_image ?? "—")}</span>`;
+                // 赤行のみ per-frontend の Re-test ボタンを出す。
+                const actionCell = m.tested_against_target
+                  ? `<span class="meta">—</span>`
+                  : `<form method="post" action="/api/release-wave/${retestAction}/retest" style="margin:0">
+                       <input type="hidden" name="frontend" value="${escapeHtml(m.frontend)}">
+                       <button type="submit" class="warn" title="Re-test this frontend against the current image">Re-test</button>
+                     </form>`;
                 return `
                 <tr>
                   <td>${escapeHtml(m.frontend)}</td>
                   <td class="meta">${escapeHtml(m.prod_version ?? "—")}</td>
                   <td>${statusCell} ${at}</td>
                   <td>${last}</td>
+                  <td>${actionCell}</td>
                 </tr>`;
               })
               .join("");
@@ -453,6 +480,7 @@ function renderCompatibilitySection(compat: WaveCompatibility): string {
             <th>Prod Version</th>
             <th>Tested vs current image</th>
             <th>Last tested image</th>
+            <th>Action</th>
           </tr>
         </thead>
         <tbody>${rows}</tbody>
@@ -464,9 +492,11 @@ function renderCompatibilitySection(compat: WaveCompatibility): string {
     <div class="section">
       <h2>Compatibility (frontend ↔ backend) — ${verdict}</h2>
       <p class="meta">既 deploy frontend が wave 内 backend の<strong>現 production
-        image</strong>を integration test 済みか。赤は未検証 (Phase B の re-test で
-        緑化予定)。Refs
+        image</strong>を integration test 済みか。赤は未検証 — "Re-test" で
+        <code>release-wave-retest</code> を frontend に dispatch し、green 化後に
+        matrix が自動更新される。Refs
         <a href="https://github.com/ippoan/ci-dashboard/issues/157">#157</a>.</p>
+      ${retestAllBlock}
       ${blocks}
     </div>`;
 }

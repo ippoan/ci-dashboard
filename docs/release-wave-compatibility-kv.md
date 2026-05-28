@@ -262,6 +262,48 @@ frontend CI の `report-frontend-compat` action が staging 現 image を取り�
 `frontend::<repo>` は write の度に TTL がリセットされる (= putable で
 `expirationTtl: 90 * 24 * 3600` を毎回指定する)。
 
+## Phase B: auto-retest (red → green の self-service)
+
+赤 (= 現 backend image を未 test の frontend) を admin UI / API から再 test に
+かけて緑化する経路。
+
+### `POST /api/release-wave/:wave_id/retest` (admin / CF Access gated)
+
+admin UI の "Re-test all reds" / per-frontend "Re-test" ボタンが叩く。
+ci-dashboard が wave の compatibility matrix を算出し、赤 frontend に対し
+`release-wave-retest` の `repository_dispatch` を fan-out する。
+
+- form field `frontend` (optional): 指定時はその "owner/name" 1 件だけ。無ければ全 red。
+- dispatch は best-effort (1 件失敗で他を止めない)。完了後は wave 詳細に 303 redirect。
+
+### `repository_dispatch` (event_type: `release-wave-retest`)
+
+ci-dashboard → frontend repo に送る client_payload:
+
+```json
+{
+  "wave_id": "wave_2026_05_27_01",
+  "backend_repo": "ippoan/rust-alc-api",
+  "backend_image": "rust-alc-api-00042-abc",
+  "prod_version": "v0.5.32"
+}
+```
+
+frontend 側 (consumer 契約、別 repo / ci-workflows reusable で実装):
+
+1. `test.yml` に `on: repository_dispatch: types: [release-wave-retest]` を追加
+2. `${{ github.event.client_payload.backend_image }}` 相手に integration test を回す
+   (= Phase A で計画した `workflow_dispatch.inputs.backend_image` と同経路)
+3. green なら **既存の `frontend-test-report` webhook** を打つ
+   (`tested.backend_image` に渡された image を入れる)
+
+### retest-report は新設しない (設計判断)
+
+Phase A で `frontend-test-report` が KV write を server 側で担うため、retest 完了
+通知も同 endpoint を再利用する。matrix は admin UI / `release_wave_status` が KV を
+都度 read して算出するので、KV 更新後の次回表示で**自動 refresh** される
+(= 専用 `retest-report` endpoint や matrix push は不要)。
+
 ## 後続実装 issue
 
 本ドキュメントが approve された後、以下を別 issue / PR として進める:
@@ -272,6 +314,8 @@ frontend CI の `report-frontend-compat` action が staging 現 image を取り�
 - [ ] release-wave-gcp: flip-traffic 成功時の `backend-deploy-report` 呼び出し
 - [ ] 各 frontend repo の `test.yml` に `report-compatibility` job 追加
 - [ ] 各 backend repo の deploy workflow に `backend-deploy-report` 呼び出し追加
+- [ ] 各 frontend repo の `test.yml` に `repository_dispatch: [release-wave-retest]`
+  トリガー + `backend_image` 相手の integration test 経路追加 (Phase B consumer)
 
 ## 関連
 

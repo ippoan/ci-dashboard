@@ -1,8 +1,9 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   handleReleaseWaveApprove,
   handleReleaseWaveRollback,
   handleReleaseWaveAbort,
+  handleReleaseWaveRetest,
 } from "../../src/release-wave/api";
 import type { Env } from "../../src/index";
 import type { ReleaseWaveHub } from "../../src/release-wave/do";
@@ -243,5 +244,189 @@ describe("handleReleaseWaveAbort", () => {
     });
     const resp = await handleReleaseWaveAbort(req, env, "w1");
     expect(resp.status).toBe(409);
+  });
+});
+
+// ============================================================================
+// /api/release-wave/:wave_id/retest  (Refs #157 Phase B)
+// ============================================================================
+
+/** 簡易 in-memory KV (compat 突合用)。 */
+function memKv(seed: Record<string, unknown> = {}): KVNamespace {
+  const store = new Map<string, string>(
+    Object.entries(seed).map(([k, v]) => [k, JSON.stringify(v)]),
+  );
+  return {
+    async get(key: string, type?: string) {
+      const raw = store.get(key);
+      if (raw === undefined) return null;
+      return type === "json" ? JSON.parse(raw) : raw;
+    },
+    async put(key: string, value: string) {
+      store.set(key, value);
+    },
+    async delete(key: string) {
+      store.delete(key);
+    },
+    async list({ prefix = "" }: { prefix?: string } = {}) {
+      const keys = [...store.keys()]
+        .filter((k) => k.startsWith(prefix))
+        .map((name) => ({ name }));
+      return { keys, list_complete: true, cacheStatus: null };
+    },
+  } as unknown as KVNamespace;
+}
+
+const FRESH_TOKEN = {
+  token: "ghs_retest_token",
+  expires_at_ms: Date.now() + 3600_000,
+};
+
+function retestEnv(opts: {
+  getReturn?: unknown;
+  compatKv?: KVNamespace;
+}): Env {
+  const hub = {
+    get: vi.fn().mockResolvedValue(
+      opts.getReturn ?? {
+        ok: true,
+        data: { wave_id: "w1", repos: [{ repo: "ippoan/rust-alc-api" }] },
+      },
+    ),
+  } as unknown as ReleaseWaveHub;
+  return {
+    RELEASE_WAVE_HUB: { idFromName: () => ({}), get: () => hub },
+    COMPAT_KV: opts.compatKv,
+    // getGitHubToken の KV cache hit 用 (introspect fetch を回避)。
+    CI_STATUS: memKv({ "auth-client-worker:gh-token": FRESH_TOKEN }),
+    INTERNAL_SHARED_SECRET: { get: async () => "secret" },
+  } as unknown as Env;
+}
+
+/** backend cur-img + frontend red を仕込んだ COMPAT_KV。 */
+function redCompatKv(): KVNamespace {
+  return memKv({
+    "backend::ippoan/rust-alc-api": {
+      schema_version: 1,
+      repo: "ippoan/rust-alc-api",
+      current_image: "cur-img",
+      deployed_at: "2026-05-27T00:00:00Z",
+      deployed_by: "x",
+      wave_id: null,
+    },
+    "frontend::ippoan/alc-app": {
+      schema_version: 1,
+      repo: "ippoan/alc-app",
+      prod_version: "v1.2.10",
+      prod_deployed_at: "2026-05-27T00:00:00Z",
+      tested_against: [
+        {
+          backend_repo: "ippoan/rust-alc-api",
+          backend_image: "stale-img",
+          tested_at: "2026-05-27T00:00:00Z",
+        },
+      ],
+    },
+  });
+}
+
+describe("handleReleaseWaveRetest", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("returns 405 on GET", async () => {
+    const env = retestEnv({});
+    const req = new Request("https://ci-dashboard.ippoan.org/api/release-wave/w1/retest", {
+      method: "GET",
+    });
+    const resp = await handleReleaseWaveRetest(req, env, "w1");
+    expect(resp.status).toBe(405);
+  });
+
+  it("maps NOT_FOUND to 404", async () => {
+    const env = retestEnv({
+      getReturn: { ok: false, code: "NOT_FOUND", error: "no wave" },
+    });
+    const resp = await handleReleaseWaveRetest(
+      postRequest("/api/release-wave/ghost/retest"),
+      env,
+      "ghost",
+    );
+    expect(resp.status).toBe(404);
+  });
+
+  it("redirects without dispatch when COMPAT_KV unbound", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const env = retestEnv({ compatKv: undefined });
+    const resp = await handleReleaseWaveRetest(
+      postRequest("/api/release-wave/w1/retest"),
+      env,
+      "w1",
+    );
+    expect(resp.status).toBe(303);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("redirects without dispatch when there are no reds", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    // backend record 無し → matrix 空 → 赤無し
+    const env = retestEnv({ compatKv: memKv() });
+    const resp = await handleReleaseWaveRetest(
+      postRequest("/api/release-wave/w1/retest"),
+      env,
+      "w1",
+    );
+    expect(resp.status).toBe(303);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("dispatches release-wave-retest to a red frontend and redirects", async () => {
+    const fetchSpy = vi
+      .fn()
+      .mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const env = retestEnv({ compatKv: redCompatKv() });
+    const resp = await handleReleaseWaveRetest(
+      postRequest("/api/release-wave/w1/retest"),
+      env,
+      "w1",
+    );
+    expect(resp.status).toBe(303);
+    const dispatchCall = fetchSpy.mock.calls.find((c) =>
+      String(c[0]).includes("/repos/ippoan/alc-app/dispatches"),
+    );
+    expect(dispatchCall).toBeDefined();
+    const body = JSON.parse(dispatchCall![1].body);
+    expect(body.event_type).toBe("release-wave-retest");
+    expect(body.client_payload).toMatchObject({
+      wave_id: "w1",
+      backend_repo: "ippoan/rust-alc-api",
+      backend_image: "cur-img",
+      prod_version: "v1.2.10",
+    });
+  });
+
+  it("honors the `frontend` form field to target one repo", async () => {
+    const fetchSpy = vi
+      .fn()
+      .mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const env = retestEnv({ compatKv: redCompatKv() });
+    const resp = await handleReleaseWaveRetest(
+      postRequest("/api/release-wave/w1/retest", {
+        formBody: { frontend: "ippoan/does-not-match" },
+      }),
+      env,
+      "w1",
+    );
+    expect(resp.status).toBe(303);
+    // frontend が一致しないので dispatch されない。
+    const dispatchCall = fetchSpy.mock.calls.find((c) =>
+      String(c[0]).includes("/dispatches"),
+    );
+    expect(dispatchCall).toBeUndefined();
   });
 });

@@ -1,7 +1,14 @@
 import { describe, it, expect } from "vitest";
-import { decideDispatches } from "../../src/release-wave/dispatch";
+import {
+  decideDispatches,
+  decideRetestDispatches,
+} from "../../src/release-wave/dispatch";
 import { createWave, transition } from "../../src/release-wave/state";
 import type { WaveState } from "../../src/release-wave/types";
+import type {
+  WaveCompatibility,
+  CompatMatrixEntry,
+} from "../../src/release-wave/compat";
 
 const T0 = "2026-05-28T00:00:00Z";
 const T1 = "2026-05-28T00:05:00Z";
@@ -281,5 +288,107 @@ describe("decideDispatches: silent transitions", () => {
       }),
     ).state;
     expect(decideDispatches(prev, next)).toEqual([]);
+  });
+});
+
+// ============================================================================
+// decideRetestDispatches (Refs #157 Phase B)
+// ============================================================================
+
+function entry(over: Partial<CompatMatrixEntry>): CompatMatrixEntry {
+  return {
+    frontend: "ippoan/alc-app",
+    prod_version: "v1",
+    tested_against_target: false,
+    tested_against_at: null,
+    last_tested_image: "stale",
+    ...over,
+  };
+}
+
+function compat(over: Partial<WaveCompatibility> = {}): WaveCompatibility {
+  return { verified: false, checked: true, backends: [], ...over };
+}
+
+describe("decideRetestDispatches", () => {
+  it("returns empty when there are no reds", () => {
+    const c = compat({
+      backends: [
+        {
+          backend_repo: "ippoan/rust-alc-api",
+          current_image: "cur",
+          matrix: [entry({ frontend: "ippoan/auth-worker", tested_against_target: true })],
+        },
+      ],
+    });
+    expect(decideRetestDispatches("w1", c)).toEqual([]);
+  });
+
+  it("dispatches release-wave-retest to each red frontend with payload", () => {
+    const c = compat({
+      backends: [
+        {
+          backend_repo: "ippoan/rust-alc-api",
+          current_image: "cur-img",
+          matrix: [
+            entry({ frontend: "ippoan/alc-app", prod_version: "v1.2.10" }),
+            entry({ frontend: "ippoan/auth-worker", tested_against_target: true }),
+          ],
+        },
+      ],
+    });
+    const ds = decideRetestDispatches("w1", c);
+    expect(ds).toHaveLength(1);
+    expect(ds[0]).toMatchObject({
+      repo: "ippoan/alc-app",
+      event_type: "release-wave-retest",
+      client_payload: {
+        wave_id: "w1",
+        backend_repo: "ippoan/rust-alc-api",
+        backend_image: "cur-img",
+        prod_version: "v1.2.10",
+      },
+    });
+  });
+
+  it("filters to a single frontend when onlyFrontend is given", () => {
+    const c = compat({
+      backends: [
+        {
+          backend_repo: "ippoan/rust-alc-api",
+          current_image: "cur",
+          matrix: [
+            entry({ frontend: "ippoan/alc-app" }),
+            entry({ frontend: "ippoan/nuxt-items" }),
+          ],
+        },
+      ],
+    });
+    const ds = decideRetestDispatches("w1", c, "ippoan/nuxt-items");
+    expect(ds).toHaveLength(1);
+    expect(ds[0]!.repo).toBe("ippoan/nuxt-items");
+  });
+
+  it("emits one dispatch per (frontend, backend) red across multiple backends", () => {
+    const c = compat({
+      backends: [
+        {
+          backend_repo: "ippoan/rust-alc-api",
+          current_image: "img-a",
+          matrix: [entry({ frontend: "ippoan/alc-app" })],
+        },
+        {
+          backend_repo: "ippoan/cc-relay",
+          current_image: "img-b",
+          matrix: [entry({ frontend: "ippoan/alc-app" })],
+        },
+      ],
+    });
+    const ds = decideRetestDispatches("w1", c);
+    expect(ds).toHaveLength(2);
+    expect(ds.map((d) => d.client_payload.backend_repo)).toEqual([
+      "ippoan/rust-alc-api",
+      "ippoan/cc-relay",
+    ]);
   });
 });

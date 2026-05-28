@@ -12,6 +12,8 @@
 import type { Env } from "../index";
 import type { ReleaseWaveHub, RpcResult } from "./do";
 import type { WaveState } from "./types";
+import { computeWaveCompatibility } from "./compat";
+import { decideRetestDispatches, dispatchAll } from "./dispatch";
 
 function hubStub(env: Env): DurableObjectStub<ReleaseWaveHub> {
   const id = env.RELEASE_WAVE_HUB.idFromName("singleton");
@@ -135,6 +137,57 @@ export async function handleReleaseWaveAbort(
       code: result.code,
       error: result.error,
     });
+  }
+  return redirectToDetail(wave_id);
+}
+
+// ----------------------------------------------------------------------------
+// POST /api/release-wave/:wave_id/retest  (Refs #157 Phase B)
+// ----------------------------------------------------------------------------
+
+/**
+ * compatibility matrix の赤 frontend に `release-wave-retest` を fan-out する。
+ * form field `frontend` を渡せばその 1 件だけ ("Re-test against this image")、
+ * 無ければ全 red ("Re-test all reds")。
+ *
+ * dispatch は best-effort (dispatchAll は throw しない)。完了後は詳細ページに
+ * redirect する。matrix は SSR で KV を都度読むため、frontend CI が
+ * `frontend-test-report` を打ち KV が更新されれば次回表示で自動 refresh される。
+ */
+export async function handleReleaseWaveRetest(
+  req: Request,
+  env: Env,
+  wave_id: string,
+): Promise<Response> {
+  if (req.method !== "POST") {
+    return jsonResponse(405, { code: "METHOD_NOT_ALLOWED", error: "use POST" });
+  }
+  let onlyFrontend: string | undefined;
+  try {
+    const form = await req.formData();
+    const f = String(form.get("frontend") ?? "").trim();
+    if (f) onlyFrontend = f;
+  } catch {
+    // form-data 以外は全 red 対象
+  }
+
+  const result = (await hubStub(env).get(wave_id)) as RpcResult<WaveState>;
+  if (!result.ok) {
+    return jsonResponse(rpcErrorToHttpStatus(result.code), {
+      code: result.code,
+      error: result.error,
+    });
+  }
+
+  if (env.COMPAT_KV) {
+    const compat = await computeWaveCompatibility(
+      env.COMPAT_KV,
+      result.data.repos.map((r) => r.repo),
+    );
+    const dispatches = decideRetestDispatches(wave_id, compat, onlyFrontend);
+    if (dispatches.length > 0) {
+      await dispatchAll(env, dispatches);
+    }
   }
   return redirectToDetail(wave_id);
 }
