@@ -593,4 +593,63 @@ describe("handleReleaseWaveDetailPage compatibility section", () => {
     expect(html).toContain(">verified<");
     expect(html).toContain("tested");
   });
+
+  it("renders an inline SVG graph with edge + history tooltip", async () => {
+    const env = fakeEnv({
+      getReturn: { ok: true, data: makeWave() },
+      compatKv: memKv({
+        "backend::ippoan/rust-alc-api": {
+          schema_version: 1,
+          repo: "ippoan/rust-alc-api",
+          current_image: "cur-img",
+          deployed_at: "2026-05-27T00:00:00Z",
+          deployed_by: "x",
+          wave_id: null,
+        },
+        "frontend::ippoan/alc-app": {
+          schema_version: 1,
+          repo: "ippoan/alc-app",
+          prod_version: "v1.2.10",
+          prod_deployed_at: "2026-05-27T00:00:00Z",
+          tested_against: [
+            {
+              backend_repo: "ippoan/rust-alc-api",
+              backend_image: "stale-img",
+              tested_at: "2026-05-20T00:00:00Z",
+            },
+          ],
+        },
+      }),
+    });
+    const resp = await handleReleaseWaveDetailPage(env, "w1");
+    const html = await resp.text();
+    // inline SVG が出る (img タグではなく <svg>)
+    expect(html).toContain("<svg");
+    expect(html).toContain("<path");
+    // hover 履歴の <title> に過去 image が載る
+    expect(html).toContain("<title>");
+    expect(html).toContain("stale-img");
+    // 凡例
+    expect(html).toContain("untested (red)");
+  });
+
+  it("omits the SVG when there are no edges (backend record but no consumers)", async () => {
+    const env = fakeEnv({
+      getReturn: { ok: true, data: makeWave() },
+      compatKv: memKv({
+        "backend::ippoan/rust-alc-api": {
+          schema_version: 1,
+          repo: "ippoan/rust-alc-api",
+          current_image: "cur-img",
+          deployed_at: "2026-05-27T00:00:00Z",
+          deployed_by: "x",
+          wave_id: null,
+        },
+      }),
+    });
+    const resp = await handleReleaseWaveDetailPage(env, "w1");
+    const html = await resp.text();
+    expect(html).toContain("Compatibility (frontend");
+    expect(html).not.toContain("<svg");
+  });
 });

@@ -494,10 +494,189 @@ function renderCompatibilitySection(
       <p class="meta">既 deploy frontend が wave 内 backend の<strong>現 production
         image</strong>を integration test 済みか。赤は未検証 — "Re-test" で
         <code>release-wave-retest</code> を frontend に dispatch し、green 化後に
-        matrix が自動更新される。Refs
-        <a href="https://github.com/ippoan/ci-dashboard/issues/157">#157</a>.</p>
+        matrix が自動更新される。edge / node に hover すると過去 test 履歴が出る。
+        Refs <a href="https://github.com/ippoan/ci-dashboard/issues/157">#157</a>.</p>
+      ${renderCompatibilitySvg(compat)}
       ${retestAllBlock}
       ${blocks}
+    </div>`;
+}
+
+/** 長い識別子を省略表示 (full 値は <title> 等に別途載せる)。 */
+function truncLabel(s: string, max = 30): string {
+  return s.length > max ? s.slice(0, max - 1) + "…" : s;
+}
+
+/**
+ * backend ↔ frontend 結合を二部グラフの inline SVG で描く (Refs #157)。
+ *
+ * - 左列 = backend (現 image)、右列 = frontend (prod version)
+ * - edge: 緑 = 現 image を test 済み / 赤 = 未 test
+ * - hover: edge / node の `<title>` に過去 test 履歴 (OS ネイティブ tooltip)
+ *
+ * JS を使わず SVG + inline style のみ (= ページの strict CSP `default-src 'none'`
+ * のまま動く)。
+ */
+function renderCompatibilitySvg(compat: WaveCompatibility): string {
+  type Edge = {
+    backend: string;
+    frontend: string;
+    tested: boolean;
+    title: string;
+  };
+  const edges: Edge[] = [];
+  const backendOrder: string[] = [];
+  const frontendOrder: string[] = [];
+  const backendImage = new Map<string, string | null>();
+  const frontendVersion = new Map<string, string | null>();
+  // frontend が 1 つでも赤 edge を持てば赤扱い (node 枠色)。
+  const frontendHasRed = new Map<string, boolean>();
+
+  for (const b of compat.backends) {
+    if (!backendOrder.includes(b.backend_repo)) {
+      backendOrder.push(b.backend_repo);
+      backendImage.set(b.backend_repo, b.current_image);
+    }
+    for (const m of b.matrix) {
+      if (!frontendOrder.includes(m.frontend)) {
+        frontendOrder.push(m.frontend);
+        frontendVersion.set(m.frontend, m.prod_version);
+        frontendHasRed.set(m.frontend, false);
+      }
+      if (!m.tested_against_target) frontendHasRed.set(m.frontend, true);
+
+      const histLines = m.history.length
+        ? m.history
+            .map((h) => `  ${h.tested_at}  ${h.backend_image}`)
+            .join("\n")
+        : "  (no prior test recorded)";
+      const head = m.tested_against_target
+        ? `TESTED ${m.frontend} ✓ ${b.backend_repo}@${b.current_image ?? "?"}`
+        : `UNTESTED ${m.frontend} ✗ ${b.backend_repo}@${b.current_image ?? "?"}`;
+      edges.push({
+        backend: b.backend_repo,
+        frontend: m.frontend,
+        tested: m.tested_against_target,
+        title: `${head}\n— history (newest first) —\n${histLines}`,
+      });
+    }
+  }
+
+  if (edges.length === 0) return ""; // edge が無ければグラフは出さない
+
+  // ---- layout ----
+  const boxW = 250;
+  const boxH = 38;
+  const vGap = 22;
+  const topPad = 28; // legend 用
+  const sidePad = 16;
+  const width = 760;
+  const leftX = sidePad;
+  const rightX = width - boxW - sidePad;
+  const nMax = Math.max(backendOrder.length, frontendOrder.length);
+  const innerH = nMax * boxH + Math.max(0, nMax - 1) * vGap;
+  const height = topPad + innerH + sidePad;
+
+  const colY = (i: number, count: number): number => {
+    const colH = count * boxH + Math.max(0, count - 1) * vGap;
+    const start = topPad + (innerH - colH) / 2;
+    return start + i * (boxH + vGap);
+  };
+  const bY = (repo: string) =>
+    colY(backendOrder.indexOf(repo), backendOrder.length);
+  const fY = (repo: string) =>
+    colY(frontendOrder.indexOf(repo), frontendOrder.length);
+
+  const GREEN = "#188038";
+  const RED = "#d93025";
+  const BLUE = "#1a73e8";
+  const GRAY = "#5f6368";
+
+  // ---- edges (node の下に描く) ----
+  const edgeSvg = edges
+    .map((e) => {
+      const x1 = leftX + boxW;
+      const y1 = bY(e.backend) + boxH / 2;
+      const x2 = rightX;
+      const y2 = fY(e.frontend) + boxH / 2;
+      const mx = (x1 + x2) / 2;
+      const color = e.tested ? GREEN : RED;
+      const dash = e.tested ? "" : ` stroke-dasharray="5 4"`;
+      return `<path d="M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}" fill="none" stroke="${color}" stroke-width="2"${dash} opacity="0.85"><title>${escapeHtml(e.title)}</title></path>`;
+    })
+    .join("");
+
+  // ---- node box helper ----
+  const node = (
+    x: number,
+    y: number,
+    line1: string,
+    line2: string,
+    border: string,
+    fullTitle: string,
+  ): string => {
+    return `<g><title>${escapeHtml(fullTitle)}</title>
+      <rect x="${x}" y="${y}" width="${boxW}" height="${boxH}" rx="6"
+        fill="#ffffff" stroke="${border}" stroke-width="1.5"/>
+      <text x="${x + 10}" y="${y + 15}" font-family="monospace" font-size="12"
+        fill="#202124">${escapeHtml(truncLabel(line1, 32))}</text>
+      <text x="${x + 10}" y="${y + 29}" font-family="monospace" font-size="10.5"
+        fill="${GRAY}">${escapeHtml(truncLabel(line2, 36))}</text>
+    </g>`;
+  };
+
+  const backendSvg = backendOrder
+    .map((repo) => {
+      const img = backendImage.get(repo) ?? "—";
+      return node(
+        leftX,
+        bY(repo),
+        repo,
+        `@ ${img}`,
+        BLUE,
+        `${repo}\ncurrent image: ${img}`,
+      );
+    })
+    .join("");
+
+  const frontendSvg = frontendOrder
+    .map((repo) => {
+      const ver = frontendVersion.get(repo) ?? "—";
+      const border = frontendHasRed.get(repo) ? RED : GREEN;
+      const verdictTxt = frontendHasRed.get(repo)
+        ? "has untested edge(s)"
+        : "all tested";
+      return node(
+        rightX,
+        fY(repo),
+        repo,
+        `prod ${ver}`,
+        border,
+        `${repo}\nprod version: ${ver}\n${verdictTxt}`,
+      );
+    })
+    .join("");
+
+  // ---- legend ----
+  const legend = `
+    <g font-family="-apple-system, sans-serif" font-size="11" fill="${GRAY}">
+      <line x1="${leftX}" y1="14" x2="${leftX + 22}" y2="14" stroke="${GREEN}" stroke-width="2"/>
+      <text x="${leftX + 28}" y="17">tested (green)</text>
+      <line x1="${leftX + 130}" y1="14" x2="${leftX + 152}" y2="14" stroke="${RED}" stroke-width="2" stroke-dasharray="5 4"/>
+      <text x="${leftX + 158}" y="17">untested (red)</text>
+      <text x="${rightX}" y="17">hover an edge/box for history</text>
+    </g>`;
+
+  return `
+    <div style="overflow-x:auto; margin:8px 0;">
+      <svg viewBox="0 0 ${width} ${height}" width="100%"
+        style="max-width:${width}px; height:auto; background:#fafafa; border:1px solid #e8eaed; border-radius:8px;"
+        role="img" aria-label="frontend backend compatibility graph">
+        ${legend}
+        ${edgeSvg}
+        ${backendSvg}
+        ${frontendSvg}
+      </svg>
     </div>`;
 }
 
