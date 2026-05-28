@@ -166,10 +166,36 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
   const compatSection = renderGlobalCompatibilitySection(globalCompat);
 
   const rows = waves.length === 0
-    ? `<tr><td colspan="5" class="empty">No release waves yet.</td></tr>`
+    ? `<tr><td colspan="7" class="empty">No release waves yet.</td></tr>`
     : waves
         .map((w) => {
           const repos = w.repos.map((r) => escapeHtml(r.repo)).join(", ");
+
+          // preview URL は repo ごとに stage callback で報告される。set 済みの
+          // ものだけ http/https に絞って link 化し、repo 名付きで列挙する。
+          const previewLines = w.repos
+            .map((r) => {
+              const safe = safeHttpUrl(r.preview_url);
+              if (!safe) return null;
+              return `<a href="${escapeHtml(safe)}" target="_blank" rel="noopener noreferrer">${escapeHtml(r.repo)}</a>`;
+            })
+            .filter((x): x is string => x !== null);
+          const previewCell = previewLines.length > 0
+            ? previewLines.join("<br>")
+            : `<span class="meta">—</span>`;
+
+          // 一括 flip = Approve & Flip。pending-approval の時だけ有効。
+          // 一覧では force を付けない (compat gate ブロック時は失敗 → 詳細ページで
+          // override する運用)。CSP 上 JS 無しで POST form として動かす。
+          const canApprove = w.state === "pending-approval";
+          const flipButton = `
+            <form method="post" action="/api/release-wave/${encodeURIComponent(w.wave_id)}/approve" style="margin:0">
+              <button type="submit" ${canApprove ? "" : "disabled"}
+                title="Approve & flip this wave (enabled only in pending-approval; no compat-gate override here)">
+                Approve &amp; Flip
+              </button>
+            </form>`;
+
           return `
             <tr>
               <td><a href="/release-wave/${encodeURIComponent(w.wave_id)}">${escapeHtml(w.wave_id)}</a></td>
@@ -177,6 +203,8 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
               <td class="meta">${escapeHtml(w.started_at)}</td>
               <td class="meta">${escapeHtml(w.flip_policy)}</td>
               <td class="meta">${repos}</td>
+              <td>${previewCell}</td>
+              <td class="actions">${flipButton}</td>
             </tr>`;
         })
         .join("");
@@ -205,6 +233,8 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
           <th>Started At</th>
           <th>Flip Policy</th>
           <th>Repos</th>
+          <th>Preview</th>
+          <th>Actions</th>
         </tr>
       </thead>
       <tbody>${rows}</tbody>
