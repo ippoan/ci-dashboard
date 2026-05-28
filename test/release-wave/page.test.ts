@@ -123,6 +123,38 @@ describe("handleReleaseWaveListPage", () => {
     expect(html).toContain("No release waves yet");
   });
 
+  it("shows the Pending releases section placeholder when none (Refs #181)", async () => {
+    const env = fakeEnv({ listReturn: [], compatKv: memKv() });
+    const html = await (await handleReleaseWaveListPage(env)).text();
+    expect(html).toContain("Pending releases (no-traffic)");
+    expect(html).toContain("単独");
+    expect(html).not.toContain("Flip to 100%");
+  });
+
+  it("lists a pending release with Flip button + preview link (Refs #181)", async () => {
+    const env = fakeEnv({
+      listReturn: [],
+      compatKv: memKv({
+        "pending-release::ippoan/auth-worker": {
+          schema_version: 1,
+          repo: "ippoan/auth-worker",
+          version_id: "530b908c-5385-451c-b163-747caaedafd3",
+          tag: "v0.2.38",
+          preview_url: "https://abc-auth-worker.example.workers.dev",
+          uploaded_at: "2026-05-28T12:00:00Z",
+        },
+      }),
+    });
+    const html = await (await handleReleaseWaveListPage(env)).text();
+    expect(html).toContain("ippoan/auth-worker");
+    expect(html).toContain("v0.2.38");
+    expect(html).toContain("Flip to 100%");
+    expect(html).toContain('action="/api/release-wave/pending-release/flip"');
+    expect(html).toContain('name="repo" value="ippoan/auth-worker"');
+    // safeHttpUrl は new URL().toString() で末尾スラッシュを正規化する
+    expect(html).toContain('href="https://abc-auth-worker.example.workers.dev/"');
+  });
+
   it("lists each wave with state badge + detail link", async () => {
     const env = fakeEnv({
       listReturn: [

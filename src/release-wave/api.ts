@@ -13,7 +13,8 @@ import type { Env } from "../index";
 import type { ReleaseWaveHub, RpcResult } from "./do";
 import type { WaveState } from "./types";
 import { computeWaveCompatibility } from "./compat";
-import { decideRetestDispatches, dispatchAll } from "./dispatch";
+import { decideRetestDispatches, dispatchAll, type Dispatch } from "./dispatch";
+import { getPendingRelease, clearPendingRelease } from "./pending-release";
 
 function hubStub(env: Env): DurableObjectStub<ReleaseWaveHub> {
   const id = env.RELEASE_WAVE_HUB.idFromName("singleton");
@@ -31,6 +32,14 @@ function redirectToDetail(wave_id: string): Response {
   return new Response(null, {
     status: 303,
     headers: { Location: `/release-wave/${encodeURIComponent(wave_id)}` },
+  });
+}
+
+/** action 完了後、一覧ページに 303 redirect。 */
+function redirectToList(): Response {
+  return new Response(null, {
+    status: 303,
+    headers: { Location: `/release-wave` },
   });
 }
 
@@ -200,4 +209,91 @@ export async function handleReleaseWaveRetest(
     }
   }
   return redirectToDetail(wave_id);
+}
+
+// ----------------------------------------------------------------------------
+// POST /api/release-wave/pending-release/flip  (Refs #181 / #174)
+// ----------------------------------------------------------------------------
+
+/**
+ * 単独 v* リリースの no-traffic version を 100% へ flip する。release-wave
+ * (stage→approve→flip) を起こさずに、frontend-ci が report した pending release
+ * を `release-wave-flip` dispatch で promote する。
+ *
+ * - form field `repo` ("owner/name") を受け、KV の pending-release record を引く。
+ *   record が無い repo は 404 (= flip 対象が存在しない)。
+ * - dispatch の client_payload に `previewed_version_id` (= upload した version) と
+ *   `pending_release: true` マーカーを載せる。handler は marker を見て wave
+ *   flip-report callback を skip する (対応する wave が無いため)。
+ * - dispatch 成功なら record を clear (= 一覧から消える)。dispatch 自体が失敗
+ *   したら record を残す (operator が再試行できる)。
+ *
+ * 実 flip の成否は GitHub Actions 側で確認する (callback は来ない)。
+ */
+export async function handleReleaseWavePendingReleaseFlip(
+  req: Request,
+  env: Env,
+): Promise<Response> {
+  if (req.method !== "POST") {
+    return jsonResponse(405, { code: "METHOD_NOT_ALLOWED", error: "use POST" });
+  }
+  if (!env.COMPAT_KV) {
+    return jsonResponse(500, {
+      code: "KV_NOT_CONFIGURED",
+      error: "COMPAT_KV is not bound",
+    });
+  }
+
+  let repo = "";
+  try {
+    const form = await req.formData();
+    repo = String(form.get("repo") ?? "").trim();
+  } catch {
+    // form-data 以外は repo 無し → 下で 400
+  }
+  if (!repo) {
+    return jsonResponse(400, {
+      code: "BAD_REQUEST",
+      error: "form field 'repo' is required",
+    });
+  }
+
+  const record = await getPendingRelease(env.COMPAT_KV, repo);
+  if (!record) {
+    return jsonResponse(404, {
+      code: "NOT_FOUND",
+      error: `no pending release for ${repo}`,
+    });
+  }
+
+  // synthetic wave_id: handler の dispatch job の wave_id 形式検証
+  // (^[a-zA-Z0-9._-]{1,128}$) を満たすよう `/` を `-` に潰す。
+  const wave_id = `pending-${repo.replace(/[^a-zA-Z0-9._-]/g, "-")}-${Date.now()}`;
+  const dispatch: Dispatch = {
+    repo,
+    event_type: "release-wave-flip",
+    client_payload: {
+      wave_id,
+      target_tag: record.tag,
+      head_sha: "",
+      previewed_version_id: record.version_id,
+      // handler が wave flip-report を skip するためのマーカー。
+      pending_release: true,
+    },
+  };
+
+  const results = await dispatchAll(env, [dispatch]);
+  const ok = results.length > 0 && results[0]!.ok;
+  if (ok) {
+    // dispatch が着火できたら record を消す (optimistic)。実 flip の成否は
+    // GitHub Actions 側で確認する。着火失敗時は record を残し再試行可能にする。
+    await clearPendingRelease(env.COMPAT_KV, repo);
+  } else {
+    const err = results.length > 0 && !results[0]!.ok ? results[0]!.error : "dispatch failed";
+    return jsonResponse(502, {
+      code: "DISPATCH_FAILED",
+      error: `failed to dispatch flip for ${repo}: ${err}`,
+    });
+  }
+  return redirectToList();
 }

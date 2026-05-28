@@ -21,6 +21,10 @@ import {
   computeGlobalCompatibility,
   type WaveCompatibility,
 } from "./compat";
+import {
+  listPendingReleases,
+  type PendingReleaseRecord,
+} from "./pending-release";
 
 // ----------------------------------------------------------------------------
 // Small HTML helpers
@@ -168,6 +172,17 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
     buildActiveWaveInfo(waves),
   );
 
+  // 単独 v* リリースで upload された no-traffic version の一覧 (Refs #181)。
+  let pendingReleases: PendingReleaseRecord[] = [];
+  if (env.COMPAT_KV) {
+    try {
+      pendingReleases = await listPendingReleases(env.COMPAT_KV);
+    } catch {
+      pendingReleases = [];
+    }
+  }
+  const pendingReleaseSection = renderPendingReleaseSection(pendingReleases);
+
   const rows = waves.length === 0
     ? `<tr><td colspan="7" class="empty">No release waves yet.</td></tr>`
     : waves
@@ -228,6 +243,7 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
       <a href="https://github.com/ippoan/ci-dashboard/issues/137">#137</a>.
     </p>
     ${compatSection}
+    ${pendingReleaseSection}
     <table>
       <thead>
         <tr>
@@ -461,6 +477,73 @@ export async function handleReleaseWaveDetailPage(
 </html>`;
 
   return htmlResponse(html);
+}
+
+// ----------------------------------------------------------------------------
+// Pending releases section (Refs #181 / #174)
+// ----------------------------------------------------------------------------
+
+/**
+ * 単独 v* リリースで upload された no-traffic version の一覧 + Flip ボタン。
+ *
+ * frontend-ci の release deploy が `wrangler versions upload` した version を
+ * `pending-release::<repo>` として KV に持つ。各行の Flip ボタンは
+ * `/api/release-wave/pending-release/flip` に repo を POST し、handler 経由で
+ * `wrangler versions deploy <version_id>@100%` を発火する。
+ *
+ * record が無ければセクション自体は出すが「pending release はありません」を表示
+ * (= 「ここで単独リリースを flip できる」affordance を常設)。
+ */
+function renderPendingReleaseSection(records: PendingReleaseRecord[]): string {
+  const rows = records
+    .map((r) => {
+      const safe = safeHttpUrl(r.preview_url);
+      const previewCell = safe
+        ? `<a href="${escapeHtml(safe)}" target="_blank" rel="noopener noreferrer">preview</a>`
+        : `<span class="meta">—</span>`;
+      const shortVid =
+        r.version_id.length > 8 ? r.version_id.slice(0, 8) : r.version_id;
+      return `
+        <tr>
+          <td>${escapeHtml(r.repo)}</td>
+          <td class="meta">${escapeHtml(r.tag)}</td>
+          <td class="meta" title="${escapeHtml(r.version_id)}">${escapeHtml(shortVid)}…</td>
+          <td>${previewCell}</td>
+          <td class="meta">${escapeHtml(r.uploaded_at)}</td>
+          <td class="actions">
+            <form method="post" action="/api/release-wave/pending-release/flip" style="margin:0">
+              <input type="hidden" name="repo" value="${escapeHtml(r.repo)}">
+              <button type="submit"
+                title="Promote this no-traffic version to 100% (wrangler versions deploy ${escapeHtml(r.version_id)}@100%)">
+                Flip to 100%
+              </button>
+            </form>
+          </td>
+        </tr>`;
+    })
+    .join("");
+
+  const body = records.length > 0
+    ? `<table>
+        <thead>
+          <tr>
+            <th>Repo</th><th>Tag</th><th>Version</th><th>Preview</th>
+            <th>Uploaded</th><th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>`
+    : `<p class="meta">no-traffic でアップロード済みの単独リリースはありません。
+        v* tag を打つと frontend-ci がここに version を登録する。</p>`;
+
+  return `
+    <div class="section">
+      <h2>Pending releases (no-traffic)</h2>
+      <p class="meta">単独 <code>v*</code> リリースで <code>wrangler versions upload</code>
+        した no-traffic version。Flip で 100% traffic へ promote する。
+        Refs <a href="https://github.com/ippoan/ci-dashboard/issues/181">#181</a>.</p>
+      ${body}
+    </div>`;
 }
 
 // ----------------------------------------------------------------------------
