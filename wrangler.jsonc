@@ -7,14 +7,12 @@
   "observability": {
     "enabled": true
   },
-  "vars": {
-    // Comma-separated `owner/name` repos that do NOT cut release tags. For these
-    // repos the dashboard treats each PR merge into the default branch as a
-    // mini-release: it scans the merged PR for `Refs #N` and surfaces any still-
-    // open issues on the dashboard banner + /releases synthetic blocks. Repos
-    // not listed here keep the original tag-driven flow.
-    "TAGLESS_REPOS": "ippoan/secrets-inventory,ippoan/secrets-inventory-gcp,ippoan/ci-dashboard,ippoan/HealthConnectReaderWorker,ippoan/claude-md,ippoan/mcp-relay-rs"
-  },
+  // 運用 vars (TAGLESS_REPOS 等) は env.staging に一本化した。staging が
+  // `ci-dashboard.ippoan.org` を bind する実稼働 env (= staging=prod) で、
+  // top-level は `wrangler dev` / 予約 production 用。Wrangler は named env に
+  // top-level `vars` を継承しないため、ここに TAGLESS を重複定義しても staging
+  // には効かず、二重メンテの footgun になっていた。ローカル dev で TAGLESS の
+  // 挙動を見たい時は `wrangler dev --env staging` を使う。
   "kv_namespaces": [
     {
       "binding": "CI_STATUS",
@@ -122,6 +120,10 @@
         }
       ],
       "vars": {
+        // 運用 vars の単一 SoT。Comma-separated `owner/name` repos that do NOT
+        // cut release tags: dashboard はこれらの PR merge を mini-release 扱いし、
+        // merged PR の `Refs #N` を逆引きして /releases synthetic block + banner に
+        // 出す (= stable tag 前でも早期 close 可能)。未掲載 repo は tag-driven flow。
         "TAGLESS_REPOS": "ippoan/secrets-inventory,ippoan/secrets-inventory-gcp,ippoan/ci-dashboard,ippoan/HealthConnectReaderWorker,ippoan/claude-md,ippoan/mcp-relay-rs"
       },
       "kv_namespaces": [
