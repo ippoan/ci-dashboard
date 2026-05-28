@@ -635,6 +635,14 @@ function renderCompatibilitySvg(compat: WaveCompatibility): string {
   const frontendVersion = new Map<string, string | null>();
   // frontend が 1 つでも赤 edge を持てば赤扱い (node 枠色)。
   const frontendHasRed = new Map<string, boolean>();
+  // frontend が突合した backend image (= 緑なら current と同一 SHA、赤なら最後に
+  // test した stale SHA)。両ノードに short SHA を出して一致を目視できるようにする。
+  const frontendTestedImg = new Map<string, string | null>();
+
+  // 長い image 識別子 (git SHA / revision) を先頭 12 文字に短縮する。完全値は
+  // hover (title) 側に出す。
+  const shortSha = (s: string | null | undefined): string =>
+    !s ? "—" : s.length > 14 ? `${s.slice(0, 12)}…` : s;
 
   for (const b of compat.backends) {
     if (!backendOrder.includes(b.backend_repo)) {
@@ -648,6 +656,13 @@ function renderCompatibilitySvg(compat: WaveCompatibility): string {
         frontendHasRed.set(m.frontend, false);
       }
       if (!m.tested_against_target) frontendHasRed.set(m.frontend, true);
+      // 突合 SHA を表示用に記録。緑 (current image を test 済) があればそれを
+      // 優先し、無ければ最後に test した image を出す。
+      if (m.tested_against_target) {
+        frontendTestedImg.set(m.frontend, b.current_image);
+      } else if (!frontendTestedImg.has(m.frontend)) {
+        frontendTestedImg.set(m.frontend, m.last_tested_image ?? null);
+      }
 
       const histLines = m.history.length
         ? m.history
@@ -738,9 +753,9 @@ function renderCompatibilitySvg(compat: WaveCompatibility): string {
         leftX,
         bY(repo),
         repo,
-        `@ ${img}`,
+        `@ ${shortSha(img)}`,
         BLUE,
-        `${repo}\ncurrent image: ${img}`,
+        `${repo}\ncurrent image: ${img ?? "—"}`,
       );
     })
     .join("");
@@ -748,17 +763,21 @@ function renderCompatibilitySvg(compat: WaveCompatibility): string {
   const frontendSvg = frontendOrder
     .map((repo) => {
       const ver = frontendVersion.get(repo) ?? "—";
+      const testedImg = frontendTestedImg.get(repo) ?? null;
       const border = frontendHasRed.get(repo) ? RED : GREEN;
       const verdictTxt = frontendHasRed.get(repo)
         ? "has untested edge(s)"
         : "all tested";
+      // line2 に突合 SHA を出して backend ノードの @<sha> と目視照合できるように
+      // する。tested 済 image が無ければ prod version に fallback。
+      const line2 = testedImg ? `${ver} · vs @${shortSha(testedImg)}` : `prod ${ver}`;
       return node(
         rightX,
         fY(repo),
         repo,
-        `prod ${ver}`,
+        line2,
         border,
-        `${repo}\nprod version: ${ver}\n${verdictTxt}`,
+        `${repo}\nprod version: ${ver}\ntested vs image: ${testedImg ?? "—"}\n${verdictTxt}`,
       );
     })
     .join("");
