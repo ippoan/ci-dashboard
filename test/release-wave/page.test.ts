@@ -149,6 +149,94 @@ describe("handleReleaseWaveListPage", () => {
     expect(html).not.toContain("<script>");
     expect(html).toContain("evil&lt;script&gt;");
   });
+
+  it("renders preview URL links per repo in the list", async () => {
+    const env = fakeEnv({
+      listReturn: [
+        makeWave({
+          wave_id: "w1",
+          state: "pending-approval",
+          repos: [
+            {
+              repo: "ippoan/auth-worker",
+              target_tag: "v0.5.0",
+              head_sha: "abc",
+              require_compatibility: false,
+              stage_status: "done",
+              preview_url: "https://preview-auth.ippoan.org/",
+              stage_error: null,
+              flip_status: "pending",
+              flip_error: null,
+              flip_from_revision: null,
+              previewed_version_id: null,
+              rolled_back_to_revision: null,
+            },
+          ],
+        }),
+      ],
+    });
+    const html = await (await handleReleaseWaveListPage(env)).text();
+    expect(html).toContain('href="https://preview-auth.ippoan.org/"');
+  });
+
+  it("rejects javascript: scheme preview_url in the list (XSS regression)", async () => {
+    const env = fakeEnv({
+      listReturn: [
+        makeWave({
+          wave_id: "w1",
+          repos: [
+            {
+              repo: "ippoan/auth-worker",
+              target_tag: "v0.5.0",
+              head_sha: "abc",
+              require_compatibility: false,
+              stage_status: "done",
+              preview_url: "javascript:alert(1)",
+              stage_error: null,
+              flip_status: "pending",
+              flip_error: null,
+              flip_from_revision: null,
+              previewed_version_id: null,
+              rolled_back_to_revision: null,
+            },
+          ],
+        }),
+      ],
+    });
+    const html = await (await handleReleaseWaveListPage(env)).text();
+    expect(html).not.toContain("javascript:alert(1)");
+  });
+
+  it("enables the per-wave Approve & Flip button only in pending-approval", async () => {
+    const env = fakeEnv({
+      listReturn: [
+        makeWave({ wave_id: "w-pending", state: "pending-approval" }),
+        makeWave({ wave_id: "w-staging", state: "staging" }),
+      ],
+    });
+    const html = await (await handleReleaseWaveListPage(env)).text();
+    expect(html).toContain("Approve &amp; Flip");
+    // pending-approval wave の form は approve endpoint を向く
+    expect(html).toContain(
+      'action="/api/release-wave/w-pending/approve"',
+    );
+    // staging wave のボタンは disabled
+    const stagingFormIdx = html.indexOf(
+      'action="/api/release-wave/w-staging/approve"',
+    );
+    const stagingButton = html.slice(stagingFormIdx, stagingFormIdx + 200);
+    expect(stagingButton).toContain("disabled");
+  });
+
+  it("does not pass force=true from the list flip button", async () => {
+    const env = fakeEnv({
+      listReturn: [makeWave({ wave_id: "w1", state: "pending-approval" })],
+    });
+    const html = await (await handleReleaseWaveListPage(env)).text();
+    const formIdx = html.indexOf('action="/api/release-wave/w1/approve"');
+    const formChunk = html.slice(formIdx, formIdx + 300);
+    expect(formChunk).not.toContain('name="force"');
+  });
 });
 
 // ============================================================================
