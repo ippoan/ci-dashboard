@@ -5,12 +5,37 @@
 // `Refs #N` / `Related to #N` / `Part of #N` (case-insensitive). The Refs-style
 // convention is documented in CLAUDE.md as the auto-close-safe replacement for
 // `Closes #N` / `Fixes #N`.
-const REF_PATTERN = /(?:Refs|Related to|Part of)\s+#(\d+)/gi;
+//
+// Cross-repo style `Refs <owner>/<name>#N` も許容する。Claude (LLM agent) が
+// PR を生成する際、同 repo の issue でも cross-repo style で書く場合があり
+// (Refs ippoan/secrets-inventory#57, ippoan/HealthConnectReaderWorker#60 等)、
+// これを capture するため owner/name 部分を optional として match する。
+// caller が `currentRepo` を渡すと、その repo に属する ref のみ返す
+// (= 真の cross-repo ref を誤って同 repo issue として混入させない)。
+const REF_PATTERN = /(?:Refs|Related to|Part of)\s+([\w.-]+\/[\w.-]+)?#(\d+)/gi;
 
-export function extractRefIssues(text: string): number[] {
+export function extractRefIssues(
+  text: string,
+  currentRepo?: { owner: string; name: string },
+): number[] {
   if (!text) return [];
   const out = new Set<number>();
-  for (const m of text.matchAll(REF_PATTERN)) out.add(Number(m[1]));
+  const wantOwner = currentRepo?.owner.toLowerCase();
+  const wantName = currentRepo?.name.toLowerCase();
+  for (const m of text.matchAll(REF_PATTERN)) {
+    const crossRepo = m[1]; // optional `<owner>/<name>`
+    const num = Number(m[2]);
+    if (crossRepo) {
+      // currentRepo 未指定なら cross-repo ref は除外 (= 別 repo の issue
+      // 番号を本 repo のものと誤って混ぜないよう conservative に skip)。
+      if (!wantOwner || !wantName) continue;
+      const slash = crossRepo.indexOf("/");
+      const o = crossRepo.slice(0, slash).toLowerCase();
+      const n = crossRepo.slice(slash + 1).toLowerCase();
+      if (o !== wantOwner || n !== wantName) continue;
+    }
+    out.add(num);
+  }
   return [...out];
 }
 

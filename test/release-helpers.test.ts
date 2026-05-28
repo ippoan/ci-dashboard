@@ -28,6 +28,41 @@ describe("extractRefIssues", () => {
     expect(extractRefIssues("")).toEqual([]);
     expect(extractRefIssues("no references here")).toEqual([]);
   });
+
+  // Cross-repo style `Refs <owner>/<name>#N` のサポート。Claude (LLM agent) が
+  // PR を生成する際、同 repo の issue でも cross-repo style で書くことがあり
+  // (例: 本 commit 内で見られる `Refs ippoan/HealthConnectReaderWorker#60`)、
+  // currentRepo を渡せばその repo の ref として正しく拾えるようにする。
+  describe("cross-repo style (Refs <owner>/<name>#N)", () => {
+    const repo = { owner: "ippoan", name: "HealthConnectReaderWorker" };
+
+    it("picks cross-repo refs that match currentRepo", () => {
+      const msg = "Refs ippoan/HealthConnectReaderWorker#60\nRefs #61";
+      expect(extractRefIssues(msg, repo).sort()).toEqual([60, 61]);
+    });
+
+    it("filters out cross-repo refs to other repos", () => {
+      const msg =
+        "Refs ippoan/HealthConnectReaderWorker#60\n" +
+        "Refs ippoan/other-repo#99";
+      expect(extractRefIssues(msg, repo)).toEqual([60]);
+    });
+
+    it("is case-insensitive on owner/name", () => {
+      const msg = "Refs IPPOAN/healthconnectreaderworker#60";
+      expect(extractRefIssues(msg, repo)).toEqual([60]);
+    });
+
+    it("without currentRepo skips cross-repo refs (conservative)", () => {
+      // currentRepo 未指定なら cross-repo style は全部 skip。bare `Refs #N`
+      // のみ拾う。これは別 repo の issue 番号を本 repo の番号と取り違える
+      // 事故を防ぐため。
+      const msg =
+        "Refs ippoan/HealthConnectReaderWorker#60\n" +
+        "Refs #42";
+      expect(extractRefIssues(msg)).toEqual([42]);
+    });
+  });
 });
 
 describe("extractPrNumber", () => {

@@ -71,9 +71,10 @@ export async function collectIssueNumbersForRange(
 
   const issueNumbers = new Set<number>();
   const prNumbers = new Set<number>();
+  const repoCtx = { owner, name };
   for (const c of commits) {
     const msg = c.commit.message;
-    for (const n of extractRefIssues(msg)) issueNumbers.add(n);
+    for (const n of extractRefIssues(msg, repoCtx)) issueNumbers.add(n);
     const pr = extractPrNumber(msg);
     if (pr !== null) prNumbers.add(pr);
   }
@@ -86,7 +87,7 @@ export async function collectIssueNumbersForRange(
       const fromBranch = extractBranchIssue(pr.head.ref);
       if (fromBranch !== null) issueNumbers.add(fromBranch);
       if (pr.body) {
-        for (const ref of extractRefIssues(pr.body)) issueNumbers.add(ref);
+        for (const ref of extractRefIssues(pr.body, repoCtx)) issueNumbers.add(ref);
       }
     } catch { /* ignore per-PR failure */ }
   }));
@@ -198,6 +199,7 @@ export async function computeReleaseAlertForPr(
   const token = await tokenForOrg(env, owner);
 
   const issueNumbers = new Set<number>();
+  const repoCtx = { owner, name };
 
   // PR metadata: body has `Refs #N`, branch name has the issue prefix
   // (CLAUDE.md convention <issue>-<type>-<desc>).
@@ -206,7 +208,7 @@ export async function computeReleaseAlertForPr(
     const fromBranch = extractBranchIssue(pr.head.ref);
     if (fromBranch !== null) issueNumbers.add(fromBranch);
     if (pr.body) {
-      for (const ref of extractRefIssues(pr.body)) issueNumbers.add(ref);
+      for (const ref of extractRefIssues(pr.body, repoCtx)) issueNumbers.add(ref);
     }
   } catch { /* PR fetch failure — still try commit walk */ }
 
@@ -216,7 +218,7 @@ export async function computeReleaseAlertForPr(
   try {
     const commits = await cachedPullRequestCommits(token, kv, owner, name, prNumber);
     for (const c of commits) {
-      for (const n of extractRefIssues(c.commit.message)) issueNumbers.add(n);
+      for (const n of extractRefIssues(c.commit.message, repoCtx)) issueNumbers.add(n);
     }
   } catch { /* commits API failure — proceed with what we have */ }
 
