@@ -18,6 +18,7 @@
 import type { Env } from "../index";
 import { githubApi, parseRepo, tokenForOrg } from "../github-api";
 import type { WaveState } from "./types";
+import type { WaveCompatibility } from "./compat";
 
 // ----------------------------------------------------------------------------
 // Types
@@ -26,7 +27,8 @@ import type { WaveState } from "./types";
 export type DispatchEventType =
   | "release-wave-stage"
   | "release-wave-flip"
-  | "release-wave-rollback";
+  | "release-wave-rollback"
+  | "release-wave-retest";
 
 export interface Dispatch {
   /** "owner/name" 形式 */
@@ -115,6 +117,45 @@ export function decideDispatches(
   }
 
   return [];
+}
+
+// ----------------------------------------------------------------------------
+// Pure: decideRetestDispatches (Refs #157 Phase B)
+// ----------------------------------------------------------------------------
+
+/**
+ * compatibility matrix の赤 (= 現 backend image を未 test の frontend) に対し
+ * `release-wave-retest` dispatch を作る。frontend 側 workflow が
+ * `repository_dispatch: types: [release-wave-retest]` を受け、渡された
+ * `backend_image` 相手に integration test を回して green なら ci-dashboard の
+ * `frontend-test-report` webhook に report する想定。
+ *
+ * @param onlyFrontend 指定時はその "owner/name" 1 件だけに絞る (per-frontend
+ *   "Re-test" ボタン用)。未指定なら全 red を対象 ("Re-test all reds")。
+ */
+export function decideRetestDispatches(
+  wave_id: string,
+  compat: WaveCompatibility,
+  onlyFrontend?: string,
+): Dispatch[] {
+  const out: Dispatch[] = [];
+  for (const b of compat.backends) {
+    for (const m of b.matrix) {
+      if (m.tested_against_target) continue; // green は skip
+      if (onlyFrontend && m.frontend !== onlyFrontend) continue;
+      out.push({
+        repo: m.frontend,
+        event_type: "release-wave-retest",
+        client_payload: {
+          wave_id,
+          backend_repo: b.backend_repo,
+          backend_image: b.current_image,
+          prod_version: m.prod_version,
+        },
+      });
+    }
+  }
+  return out;
 }
 
 // ----------------------------------------------------------------------------
