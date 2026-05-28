@@ -634,6 +634,43 @@ describe("handleReleaseWaveDetailPage compatibility section", () => {
     expect(html).toContain("untested (red)");
   });
 
+  it("shows short SHA on both nodes (full SHA in hover) so the match is visible", async () => {
+    const longSha = "3212fa882f9567ad22c661659cbf204ecafe1234";
+    const env = fakeEnv({
+      getReturn: { ok: true, data: makeWave() },
+      compatKv: memKv({
+        "backend::ippoan/rust-alc-api": {
+          schema_version: 1,
+          repo: "ippoan/rust-alc-api",
+          current_image: longSha,
+          deployed_at: "2026-05-27T00:00:00Z",
+          deployed_by: "x",
+          wave_id: null,
+        },
+        "frontend::ippoan/nuxt-notify": {
+          schema_version: 1,
+          repo: "ippoan/nuxt-notify",
+          prod_version: "main",
+          prod_deployed_at: "2026-05-27T00:00:00Z",
+          tested_against: [
+            {
+              backend_repo: "ippoan/rust-alc-api",
+              backend_image: longSha,
+              tested_at: "2026-05-27T00:00:00Z",
+            },
+          ],
+        },
+      }),
+    });
+    const resp = await handleReleaseWaveDetailPage(env, "w1");
+    const html = await resp.text();
+    // node ラベルは short SHA (先頭 12 + …)、両ノードに出るので目視照合できる
+    expect(html).toContain(`${longSha.slice(0, 12)}…`);
+    expect(html).toContain(`vs @${longSha.slice(0, 12)}…`);
+    // 完全 SHA は hover (title) に残る
+    expect(html).toContain(longSha);
+  });
+
   it("shows compat gate override on approve button when a required backend has reds", async () => {
     const wave = makeWave({
       state: "pending-approval",
