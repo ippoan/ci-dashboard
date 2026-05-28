@@ -27,6 +27,7 @@ import type {
   WaveEvent,
   WaveState,
 } from "./types";
+import { decideDispatches, dispatchAll } from "./dispatch";
 
 // ----------------------------------------------------------------------------
 // Storage keys
@@ -165,6 +166,9 @@ export class ReleaseWaveHub extends DurableObject<Env> {
       now,
     });
     await this.saveWave(state);
+    // 各 caller repo に release-wave-stage dispatch を fan-out。
+    // 失敗は best-effort で log/result に残す (dispatchAll は throw しない)。
+    await this.maybeDispatch(null, state);
     return { ok: true, data: state };
   }
 
@@ -271,7 +275,37 @@ export class ReleaseWaveHub extends DurableObject<Env> {
       return { ok: false, code: result.code, error: result.error };
     }
     await this.saveWave(result.state);
+    // 副作用: state 遷移に応じて caller repo へ repository_dispatch を発火。
+    // approve → flipping, stage_report → flipping (auto), rollback → rolled-back
+    // のいずれかで dispatchAll が走る。stage_report の途中遷移 (= staging のまま)
+    // / contract_applied / fail 等は decideDispatches が空配列を返すので no-op。
+    await this.maybeDispatch(state, result.state);
     return { ok: true, data: result.state };
+  }
+
+  /**
+   * state 遷移 (prev → next) を受けて発火すべき dispatch を計算し、GitHub
+   * `POST /repos/:owner/:repo/dispatches` で fan-out する。失敗は best-effort。
+   *
+   * 本来は ctx.waitUntil() で非同期に投げて DO method を即時 return したい
+   * ところだが、テスト容易性 + state machine と dispatch の対応関係の透明性
+   * を優先して同期的に await する。release wave の N=10 程度の参加 repo に
+   * 並列 POST する HTTP 程度なら数秒で済むので許容範囲。
+   */
+  private async maybeDispatch(
+    prev: WaveState | null,
+    next: WaveState,
+  ): Promise<void> {
+    const dispatches = decideDispatches(prev, next);
+    if (dispatches.length === 0) return;
+    const results = await dispatchAll(this.env, dispatches);
+    for (const r of results) {
+      if (!r.ok) {
+        console.warn(
+          `[release-wave] dispatch failed: repo=${r.repo} event=${r.event_type}: ${r.error}`,
+        );
+      }
+    }
   }
 
   private async loadWave(wave_id: string): Promise<WaveState | null> {
