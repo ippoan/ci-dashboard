@@ -681,6 +681,12 @@ describe("GET /releases", () => {
       if (url.includes("/repos/ippoan/placeholder/commits")) {
         return Response.json([]);
       }
+      // archived filter (#155) で meta fetch が走るため、ここも stub して
+      // 2 度目の load で KV hit するようにする (= fetch 数が増えない invariant
+      // を維持)。stub しないと 500 → throw → 未キャッシュで毎回 fetch する。
+      if (url.match(/\/repos\/ippoan\/ci-dashboard(\?|$)/)) {
+        return Response.json({ default_branch: "main" });
+      }
       if (url.includes("/repos/ippoan/ci-dashboard/tags")) {
         return Response.json([
           { name: "v1.2.0", commit: { sha: "a" } },
