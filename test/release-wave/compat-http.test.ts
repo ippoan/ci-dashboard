@@ -3,6 +3,7 @@ import { env as testEnv } from "cloudflare:test";
 import {
   handleFrontendTestReportWebhook,
   handleBackendDeployReportWebhook,
+  handleBackendCurrentImageWebhook,
 } from "../../src/release-wave/webhook";
 import {
   handleCompatibility,
@@ -215,5 +216,74 @@ describe("handleBackendCurrentImage (GET /backend-current-image)", () => {
     expect(resp.status).toBe(200);
     const body = (await resp.json()) as { current_image: string };
     expect(body.current_image).toBe("img-9");
+  });
+});
+
+describe("handleBackendCurrentImageWebhook (authed GET under /webhooks)", () => {
+  const BCI_URL =
+    "https://ci-dashboard.ippoan.org/webhooks/release-wave/backend-current-image?repo=ippoan/rust-alc-api";
+
+  function getReq(url: string, secret: string | null = SECRET): Request {
+    const headers: Record<string, string> = {};
+    if (secret !== null) headers["X-Release-Wave-Webhook-Secret"] = secret;
+    return new Request(url, { method: "GET", headers });
+  }
+
+  it("rejects non-GET with 405", async () => {
+    const resp = await handleBackendCurrentImageWebhook(
+      new Request(BCI_URL, {
+        method: "POST",
+        headers: { "X-Release-Wave-Webhook-Secret": SECRET },
+      }),
+      compatEnv(),
+    );
+    expect(resp.status).toBe(405);
+  });
+
+  it("500 when secret not configured", async () => {
+    const resp = await handleBackendCurrentImageWebhook(
+      getReq(BCI_URL),
+      compatEnv(null),
+    );
+    expect(resp.status).toBe(500);
+  });
+
+  it("rejects wrong secret with 401", async () => {
+    const resp = await handleBackendCurrentImageWebhook(
+      getReq(BCI_URL, "wrong"),
+      compatEnv(),
+    );
+    expect(resp.status).toBe(401);
+  });
+
+  it("400 when repo missing", async () => {
+    const resp = await handleBackendCurrentImageWebhook(
+      getReq("https://ci-dashboard.ippoan.org/webhooks/release-wave/backend-current-image"),
+      compatEnv(),
+    );
+    expect(resp.status).toBe(400);
+  });
+
+  it("404 when no record", async () => {
+    const resp = await handleBackendCurrentImageWebhook(
+      getReq("https://ci-dashboard.ippoan.org/webhooks/release-wave/backend-current-image?repo=ippoan/nope"),
+      compatEnv(),
+    );
+    expect(resp.status).toBe(404);
+  });
+
+  it("returns current image when present", async () => {
+    await handleBackendDeployReportWebhook(
+      postReq(BD_URL, {
+        repo: "ippoan/rust-alc-api",
+        current_image: "img-authed",
+        deployed_by: "x",
+      }),
+      compatEnv(),
+    );
+    const resp = await handleBackendCurrentImageWebhook(getReq(BCI_URL), compatEnv());
+    expect(resp.status).toBe(200);
+    const body = (await resp.json()) as { current_image: string };
+    expect(body.current_image).toBe("img-authed");
   });
 });

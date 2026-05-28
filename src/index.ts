@@ -23,6 +23,7 @@ import {
   handleFlipReportWebhook,
   handleFrontendTestReportWebhook,
   handleBackendDeployReportWebhook,
+  handleBackendCurrentImageWebhook,
 } from "./release-wave/webhook";
 import {
   handleCompatibility,
@@ -218,6 +219,12 @@ app.post("/webhooks/release-wave/frontend-test-report", (c) =>
 );
 app.post("/webhooks/release-wave/backend-deploy-report", (c) =>
   handleBackendDeployReportWebhook(c.req.raw, c.env),
+);
+// 認証付き read (CF Access が bypass する /webhooks/* 配下)。frontend CI が
+// 現 prod backend image を解決する用 — CF Access 下の /backend-current-image は
+// GitHub Actions runner から 302 で到達不能なため。Refs #157。
+app.get("/webhooks/release-wave/backend-current-image", (c) =>
+  handleBackendCurrentImageWebhook(c.req.raw, c.env),
 );
 
 // Compatibility read endpoints (CF Access edge gate に認証を委譲、read-only)。

@@ -22,7 +22,7 @@ import { z } from "zod";
 import type { Env } from "../index";
 import type { ReleaseWaveHub, RpcResult } from "./do";
 import type { WaveState } from "./types";
-import { recordFrontendTest, recordBackendDeploy } from "./compat";
+import { recordFrontendTest, recordBackendDeploy, getBackendCurrent } from "./compat";
 
 // ----------------------------------------------------------------------------
 // Common helpers
@@ -319,4 +319,62 @@ export async function handleBackendDeployReportWebhook(
     now: new Date().toISOString(),
   });
   return jsonResponse(200, { ok: true, record });
+}
+
+// ----------------------------------------------------------------------------
+// GET /webhooks/release-wave/backend-current-image  (compatibility, Refs #157)
+// ----------------------------------------------------------------------------
+
+/**
+ * frontend CI が「現 production backend image」を解決する用の read endpoint。
+ *
+ * compat-api.ts の `GET /backend-current-image` と機能等価だが、そちらは
+ * ci-dashboard host 全体に被さる Cloudflare Access edge gate の背後にあり
+ * GitHub Actions runner からは 302 で到達できない。本 endpoint は CF Access が
+ * bypass している `/webhooks/*` prefix 配下に置き、代わりに shared secret
+ * (`X-Release-Wave-Webhook-Secret`) で認証する。
+ */
+export async function handleBackendCurrentImageWebhook(
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  if (request.method !== "GET") {
+    return jsonResponse(405, { code: "METHOD_NOT_ALLOWED", error: "use GET" });
+  }
+  const provided = request.headers.get("X-Release-Wave-Webhook-Secret") ?? "";
+  const expected = await env.RELEASE_WAVE_WEBHOOK_SECRET.get();
+  if (!expected) {
+    return jsonResponse(500, {
+      code: "SECRET_NOT_CONFIGURED",
+      error: "RELEASE_WAVE_WEBHOOK_SECRET is not bound",
+    });
+  }
+  if (!constantTimeEqual(provided, expected)) {
+    return jsonResponse(401, {
+      code: "UNAUTHORIZED",
+      error: "invalid webhook secret",
+    });
+  }
+
+  const url = new URL(request.url);
+  const repo = url.searchParams.get("repo")?.trim();
+  if (!repo) {
+    return jsonResponse(400, {
+      code: "BAD_REQUEST",
+      error: "repo query param is required",
+    });
+  }
+
+  const record = await getBackendCurrent(env.COMPAT_KV, repo);
+  if (!record) {
+    return jsonResponse(404, {
+      code: "NOT_FOUND",
+      error: `no backend deploy record for ${repo}`,
+    });
+  }
+  return jsonResponse(200, {
+    repo: record.repo,
+    current_image: record.current_image,
+    deployed_at: record.deployed_at,
+  });
 }
