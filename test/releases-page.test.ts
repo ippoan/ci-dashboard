@@ -802,6 +802,45 @@ describe("GET /releases", () => {
     expect(html).toContain("ippoan/mixed-repo");
   });
 
+  // archived repo は GitHub API で issue close ができない (403 read-only) ため、
+  // /releases から一切除外する。Refs ippoan/ci-dashboard#155
+  // (ippoan/github-mcp-server-rs が monorepo 化で archive されたが Refs を
+  // 含む過去 commit のせいで /releases に残り、close を試みて failed
+  // していた問題)。
+  it("excludes archived repos from /releases entirely", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (req) => {
+      const url = typeof req === "string" ? req : (req as Request).url;
+
+      if (url.includes("/contents/wt-direct-push/config/direct-push-ok.txt")) {
+        return Response.json({ content: btoa(""), encoding: "base64" });
+      }
+
+      // /repos/{o}/{n} で archived: true を返す
+      if (url.match(/\/repos\/ippoan\/zombie-repo(\?|$)/)) {
+        return Response.json({ default_branch: "main", archived: true });
+      }
+
+      // archived 判定が効いていれば tag fetch には到達しない。到達したら test fail。
+      if (url.includes("/repos/ippoan/zombie-repo/tags")) {
+        throw new Error("unexpected fetch: archived filter leaked, tag path reached");
+      }
+
+      return new Response(`not stubbed: ${url}`, { status: 500 });
+    });
+
+    const e = testEnv({ watched: ["ippoan/zombie-repo"] });
+    const req = new Request("http://localhost/releases");
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(req, e, ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).not.toContain("zombie-repo");
+    // 何も watched に残らない empty-state に倒れる
+    expect(html).toContain("No releases with referenced issues");
+  });
+
   it("does not turn an unallowlisted tag-less repo into a synthetic block", async () => {
     // Guard against the auto-merge regression the user called out: a PR repo
     // briefly without tags must NOT show its main-branch commits here.

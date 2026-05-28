@@ -40,7 +40,13 @@ interface TagListItem { name: string; commit: { sha: string } }
 interface RawCommit { sha: string; commit: { message: string } }
 interface CompareResponse { commits: RawCommit[] }
 interface PrResponse { head: { ref: string }; body: string | null }
-interface RepoMeta { default_branch: string }
+interface RepoMeta {
+  default_branch: string;
+  // GitHub /repos endpoint returns `archived: true` for archived repos.
+  // archived repo は issues も read-only になり close できないため、
+  // /releases ページから除外するのに使う (Refs ippoan/ci-dashboard#155)。
+  archived?: boolean;
+}
 export interface RawIssue {
   number: number;
   title: string;
