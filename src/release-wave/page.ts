@@ -163,7 +163,10 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
       globalCompat = null;
     }
   }
-  const compatSection = renderGlobalCompatibilitySection(globalCompat);
+  const compatSection = renderGlobalCompatibilitySection(
+    globalCompat,
+    buildActiveWaveInfo(waves),
+  );
 
   const rows = waves.length === 0
     ? `<tr><td colspan="7" class="empty">No release waves yet.</td></tr>`
@@ -469,8 +472,41 @@ export async function handleReleaseWaveDetailPage(
  * 全 `backend::` record とその consumer frontend の突合グラフ (SVG) を出す。
  * backend record が無ければ案内文のみ。
  */
+/**
+ * 全体俯瞰グラフ (wave 非依存) に重ねる「現在進行中の wave」由来の情報。
+ *
+ * - `preview`:  frontend repo → 今 staging / pending-approval 中の wave の
+ *   preview URL。複数 active wave がある場合は list 末尾 (= 最新) が勝つ。
+ * - `waveOf`:   frontend repo → その active wave の wave_id (node を詳細ページへ
+ *   link するため)。
+ * - `pendingFlips`: pending-approval の wave 群 (Approve & Flip ボタン用)。
+ */
+interface ActiveWaveInfo {
+  preview: Map<string, { url: string; wave_id: string }>;
+  waveOf: Map<string, string>;
+  pendingFlips: Array<{ wave_id: string }>;
+}
+
+/** active な (staging / pending-approval) wave から ActiveWaveInfo を組む。 */
+function buildActiveWaveInfo(waves: WaveState[]): ActiveWaveInfo {
+  const preview = new Map<string, { url: string; wave_id: string }>();
+  const waveOf = new Map<string, string>();
+  const pendingFlips: Array<{ wave_id: string }> = [];
+  for (const w of waves) {
+    if (w.state !== "staging" && w.state !== "pending-approval") continue;
+    if (w.state === "pending-approval") pendingFlips.push({ wave_id: w.wave_id });
+    for (const r of w.repos) {
+      waveOf.set(r.repo, w.wave_id);
+      const safe = safeHttpUrl(r.preview_url);
+      if (safe) preview.set(r.repo, { url: safe, wave_id: w.wave_id });
+    }
+  }
+  return { preview, waveOf, pendingFlips };
+}
+
 function renderGlobalCompatibilitySection(
   compat: WaveCompatibility | null,
+  active?: ActiveWaveInfo,
 ): string {
   if (!compat || compat.backends.length === 0) {
     return `
@@ -488,7 +524,7 @@ function renderGlobalCompatibilitySection(
     : compat.verified
     ? `<span class="ok"><strong>all consumers tested</strong></span>`
     : `<span class="err"><strong>some consumers untested</strong></span>`;
-  const svg = renderCompatibilitySvg(compat);
+  const svg = renderCompatibilitySvg(compat, active);
   const body = svg
     ? svg
     : `<p class="meta">backend record はあるが、まだどの frontend も test 履歴を
@@ -501,7 +537,51 @@ function renderGlobalCompatibilitySection(
         個別 wave の retest 操作は各 wave 詳細ページで。
         Refs <a href="https://github.com/ippoan/ci-dashboard/issues/157">#157</a>.</p>
       ${body}
+      ${renderActiveWaveOverlay(active)}
     </div>`;
+}
+
+/**
+ * 俯瞰グラフ直下に、進行中 wave の preview link と Approve & Flip ボタンを出す。
+ * SVG node に直接埋めると anchor のネストや座標管理が破綻するため、HTML として
+ * グラフの下にまとめて描画する (= preview を「ここ (compat section)」に出す)。
+ */
+function renderActiveWaveOverlay(active?: ActiveWaveInfo): string {
+  if (!active) return "";
+
+  const previews = [...active.preview.entries()]
+    .map(
+      ([repo, p]) =>
+        `<li><code>${escapeHtml(repo)}</code> →
+          <a href="${escapeHtml(p.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(p.url)}</a>
+          <span class="meta">(${escapeHtml(p.wave_id)})</span></li>`,
+    )
+    .join("");
+  const previewBlock = previews
+    ? `<div style="margin-top:10px">
+         <strong class="meta">Staged previews (active waves)</strong>
+         <ul style="margin:4px 0 0; padding-left:20px">${previews}</ul>
+       </div>`
+    : "";
+
+  // pending-approval の wave ごとに Approve & Flip ボタン。一覧 (list page) と
+  // 同じく force は付けない (compat gate ブロック時は詳細ページで override)。
+  const flips = active.pendingFlips
+    .map(
+      (f) => `
+        <form method="post" action="/api/release-wave/${encodeURIComponent(f.wave_id)}/approve" style="margin:0">
+          <button type="submit"
+            title="Approve & flip ${escapeHtml(f.wave_id)} (no compat-gate override here)">
+            Approve &amp; Flip: ${escapeHtml(f.wave_id)}
+          </button>
+        </form>`,
+    )
+    .join("");
+  const flipBlock = flips
+    ? `<div class="actions" style="margin-top:10px">${flips}</div>`
+    : "";
+
+  return previewBlock + flipBlock;
 }
 
 /**
@@ -651,7 +731,10 @@ function truncLabel(s: string, max = 30): string {
  * JS を使わず SVG + inline style のみ (= ページの strict CSP `default-src 'none'`
  * のまま動く)。
  */
-function renderCompatibilitySvg(compat: WaveCompatibility): string {
+function renderCompatibilitySvg(
+  compat: WaveCompatibility,
+  active?: ActiveWaveInfo,
+): string {
   type Edge = {
     backend: string;
     frontend: string;
@@ -765,8 +848,9 @@ function renderCompatibilitySvg(compat: WaveCompatibility): string {
     line2: string,
     border: string,
     fullTitle: string,
+    href?: string,
   ): string => {
-    return `<g><title>${escapeHtml(fullTitle)}</title>
+    const g = `<g><title>${escapeHtml(fullTitle)}</title>
       <rect x="${x}" y="${y}" width="${boxW}" height="${boxH}" rx="6"
         fill="#ffffff" stroke="${border}" stroke-width="1.5"/>
       <text x="${x + 10}" y="${y + 15}" font-family="monospace" font-size="12"
@@ -774,6 +858,10 @@ function renderCompatibilitySvg(compat: WaveCompatibility): string {
       <text x="${x + 10}" y="${y + 29}" font-family="monospace" font-size="10.5"
         fill="${GRAY}">${escapeHtml(truncLabel(line2, 36))}</text>
     </g>`;
+    // active wave 中の frontend node は詳細ページへの link にする (node link 化)。
+    return href
+      ? `<a href="${escapeHtml(href)}" style="cursor:pointer">${g}</a>`
+      : g;
   };
 
   const backendSvg = backendOrder
@@ -801,13 +889,21 @@ function renderCompatibilitySvg(compat: WaveCompatibility): string {
       // line2 に突合 SHA を出して backend ノードの @<sha> と目視照合できるように
       // する。tested 済 image が無ければ prod version に fallback。
       const line2 = testedImg ? `${ver} · vs @${shortSha(testedImg)}` : `prod ${ver}`;
+      const waveId = active?.waveOf.get(repo);
+      const href = waveId
+        ? `/release-wave/${encodeURIComponent(waveId)}`
+        : undefined;
+      const previewNote = active?.preview.has(repo)
+        ? `\npreview: ${active.preview.get(repo)!.url}`
+        : "";
       return node(
         rightX,
         fY(repo),
         repo,
         line2,
         border,
-        `${repo}\nprod version: ${ver}\ntested vs image: ${testedImg ?? "—"}\n${verdictTxt}`,
+        `${repo}\nprod version: ${ver}\ntested vs image: ${testedImg ?? "—"}\n${verdictTxt}${previewNote}`,
+        href,
       );
     })
     .join("");
