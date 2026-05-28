@@ -851,12 +851,17 @@ describe("GET /releases", () => {
       if (url.includes("/contents/wt-direct-push/config/direct-push-ok.txt")) {
         return Response.json({ content: btoa(""), encoding: "base64" });
       }
+      // archived filter (#155) で meta fetch が走るようになったので、
+      // 通常 repo として返す (archived: false 相当 = 未指定)。
+      if (url.match(/\/repos\/ippoan\/some-pr-repo(\?|$)/)) {
+        return Response.json({ default_branch: "main" });
+      }
       if (url.includes("/repos/ippoan/some-pr-repo/tags")) {
         return Response.json([]);
       }
-      // /repos/{o}/{n} should NOT be hit for the non-allowlisted path; fail
-      // loudly if it is so we notice the regression in CI.
-      if (url.match(/\/repos\/ippoan\/some-pr-repo(\?|$)/)) {
+      // synthetic path 本体の indicator: /commits は loadSyntheticBlock 経由
+      // のみで叩かれる。ここに到達したら synthetic path 漏れ。
+      if (url.includes("/repos/ippoan/some-pr-repo/commits")) {
         throw new Error("unexpected fetch: synthetic path leaked");
       }
       return new Response(`not stubbed: ${url}`, { status: 500 });
