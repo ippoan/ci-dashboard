@@ -24,6 +24,7 @@ import {
   handleFrontendTestReportWebhook,
   handleBackendDeployReportWebhook,
   handleBackendCurrentImageWebhook,
+  handlePendingReleaseWebhook,
 } from "./release-wave/webhook";
 import {
   handleCompatibility,
@@ -38,6 +39,7 @@ import {
   handleReleaseWaveRollback,
   handleReleaseWaveAbort,
   handleReleaseWaveRetest,
+  handleReleaseWavePendingReleaseFlip,
 } from "./release-wave/api";
 import {
   handlePwaManifest,
@@ -225,6 +227,11 @@ app.post("/webhooks/release-wave/frontend-test-report", (c) =>
 app.post("/webhooks/release-wave/backend-deploy-report", (c) =>
   handleBackendDeployReportWebhook(c.req.raw, c.env),
 );
+// frontend-ci の release deploy が `wrangler versions upload` (no-traffic) 後に
+// version_id / tag / preview_url を報告する (Refs #181 / #174)。
+app.post("/webhooks/release-wave/pending-release", (c) =>
+  handlePendingReleaseWebhook(c.req.raw, c.env),
+);
 // 認証付き read (CF Access が bypass する /webhooks/* 配下)。frontend CI が
 // 現 prod backend image を解決する用 — CF Access 下の /backend-current-image は
 // GitHub Actions runner から 302 で到達不能なため。Refs #157。
@@ -260,6 +267,13 @@ app.post("/api/release-wave/:wave_id/abort", (c) =>
 // (Refs #157 Phase B)。form field `frontend` で 1 件指定可、無ければ全 red。
 app.post("/api/release-wave/:wave_id/retest", (c) =>
   handleReleaseWaveRetest(c.req.raw, c.env, c.req.param("wave_id")),
+);
+// 単独 v* リリースの no-traffic version を 100% へ flip (Refs #181 / #174)。
+// wave を起こさず form field `repo` の pending-release record を promote する。
+// `:wave_id` を取る上の route とは action segment (`flip` vs approve/.../retest)
+// で区別されるため衝突しない。
+app.post("/api/release-wave/pending-release/flip", (c) =>
+  handleReleaseWavePendingReleaseFlip(c.req.raw, c.env),
 );
 
 export default app;

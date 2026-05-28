@@ -3,9 +3,37 @@ import {
   handleContractAppliedWebhook,
   handleStageReportWebhook,
   handleFlipReportWebhook,
+  handlePendingReleaseWebhook,
 } from "../../src/release-wave/webhook";
+import { getPendingRelease } from "../../src/release-wave/pending-release";
 import type { Env } from "../../src/index";
 import type { ReleaseWaveHub } from "../../src/release-wave/do";
+
+/** in-memory KVNamespace for COMPAT_KV-backed handlers. */
+function memKv(seed: Record<string, unknown> = {}): KVNamespace {
+  const store = new Map<string, string>(
+    Object.entries(seed).map(([k, v]) => [k, JSON.stringify(v)]),
+  );
+  return {
+    async get(key: string, type?: string) {
+      const raw = store.get(key);
+      if (raw === undefined) return null;
+      return type === "json" ? JSON.parse(raw) : raw;
+    },
+    async put(key: string, value: string) {
+      store.set(key, value);
+    },
+    async delete(key: string) {
+      store.delete(key);
+    },
+    async list({ prefix = "" }: { prefix?: string } = {}) {
+      const keys = [...store.keys()]
+        .filter((k) => k.startsWith(prefix))
+        .map((name) => ({ name }));
+      return { keys, list_complete: true, cacheStatus: null };
+    },
+  } as unknown as KVNamespace;
+}
 
 // ----------------------------------------------------------------------------
 // Fake env / request builder (3 endpoint 共通)
@@ -28,6 +56,7 @@ function fakeEnv(opts: {
   flipReportReturn?:
     | { ok: true; data: unknown }
     | { ok: false; code: string; error: string };
+  compatKv?: KVNamespace;
 } = {}): { env: Env; spies: FakeSpies } {
   const okState = { wave_id: "w1", state: "staging" };
   const spies: FakeSpies = {
@@ -51,6 +80,7 @@ function fakeEnv(opts: {
       get: async () =>
         opts.secret === undefined ? "expected-secret" : opts.secret,
     },
+    COMPAT_KV: opts.compatKv,
   } as unknown as Env;
   return { env, spies };
 }
@@ -528,5 +558,84 @@ describe("handleFlipReportWebhook", () => {
       env,
     );
     expect(resp.status).toBe(409);
+  });
+});
+
+// ============================================================================
+// /webhooks/release-wave/pending-release  (Refs #181 / #174)
+// ============================================================================
+
+const PENDING_URL =
+  "https://ci-dashboard.ippoan.org/webhooks/release-wave/pending-release";
+const VALID_VID = "530b908c-5385-451c-b163-747caaedafd3";
+
+describe("handlePendingReleaseWebhook", () => {
+  it("stores a pending release record (ok=true)", async () => {
+    const kv = memKv();
+    const { env } = fakeEnv({ compatKv: kv });
+    const resp = await handlePendingReleaseWebhook(
+      jsonRequest({
+        url: PENDING_URL,
+        secret: "expected-secret",
+        body: {
+          repo: "ippoan/auth-worker",
+          version_id: VALID_VID,
+          tag: "v0.2.38",
+          preview_url: "https://abc-auth-worker.example.workers.dev",
+        },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(200);
+    const rec = await getPendingRelease(kv, "ippoan/auth-worker");
+    expect(rec).not.toBeNull();
+    expect(rec!.version_id).toBe(VALID_VID);
+    expect(rec!.tag).toBe("v0.2.38");
+    expect(rec!.preview_url).toBe("https://abc-auth-worker.example.workers.dev");
+  });
+
+  it("accepts missing preview_url (nullified)", async () => {
+    const kv = memKv();
+    const { env } = fakeEnv({ compatKv: kv });
+    const resp = await handlePendingReleaseWebhook(
+      jsonRequest({
+        url: PENDING_URL,
+        secret: "expected-secret",
+        body: { repo: "ippoan/auth-worker", version_id: VALID_VID, tag: "v1.0.0" },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(200);
+    const rec = await getPendingRelease(kv, "ippoan/auth-worker");
+    expect(rec!.preview_url).toBeNull();
+  });
+
+  it("rejects non-UUID version_id with 400", async () => {
+    const kv = memKv();
+    const { env } = fakeEnv({ compatKv: kv });
+    const resp = await handlePendingReleaseWebhook(
+      jsonRequest({
+        url: PENDING_URL,
+        secret: "expected-secret",
+        body: { repo: "ippoan/auth-worker", version_id: "not-a-uuid", tag: "v1.0.0" },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(400);
+    expect(await getPendingRelease(kv, "ippoan/auth-worker")).toBeNull();
+  });
+
+  it("rejects bad webhook secret with 401", async () => {
+    const kv = memKv();
+    const { env } = fakeEnv({ compatKv: kv });
+    const resp = await handlePendingReleaseWebhook(
+      jsonRequest({
+        url: PENDING_URL,
+        secret: "wrong-secret",
+        body: { repo: "ippoan/auth-worker", version_id: VALID_VID, tag: "v1.0.0" },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(401);
   });
 });

@@ -23,6 +23,7 @@ import type { Env } from "../index";
 import type { ReleaseWaveHub, RpcResult } from "./do";
 import type { WaveState } from "./types";
 import { recordFrontendTest, recordBackendDeploy, getBackendCurrent } from "./compat";
+import { recordPendingRelease } from "./pending-release";
 
 // ----------------------------------------------------------------------------
 // Common helpers
@@ -319,6 +320,56 @@ export async function handleBackendDeployReportWebhook(
     current_image: v.data.current_image,
     deployed_by: v.data.deployed_by,
     wave_id: v.data.wave_id ?? null,
+    now: new Date().toISOString(),
+  });
+  return jsonResponse(200, { ok: true, record });
+}
+
+// ----------------------------------------------------------------------------
+// /webhooks/release-wave/pending-release  (Refs #181 / #174)
+// ----------------------------------------------------------------------------
+
+/**
+ * frontend-ci.yml の release deploy が `wrangler versions upload` (no-traffic)
+ * 後に打つ。ci-dashboard 側で `pending-release::<repo>` を upsert し、
+ * /release-wave 一覧の「Pending releases」セクションに出して Flip させる。
+ *
+ * best-effort 報告 (失敗してもリリースは止めない) なので、shared secret 認証は
+ * 他 webhook と同じだが、対応する wave は存在しない (= 単独 release)。
+ *
+ * body:
+ *   {
+ *     "repo": "ippoan/auth-worker",
+ *     "version_id": "530b908c-5385-451c-b163-747caaedafd3",  // wrangler version id (UUID)
+ *     "tag": "v0.2.38",
+ *     "preview_url": "https://<hash>-auth-worker.<sub>.workers.dev"   // optional
+ *   }
+ */
+const pendingReleaseSchema = z.object({
+  repo: z.string().min(1),
+  // version_id は wrangler の version id (UUID)。flip 時に
+  // `wrangler versions deploy <id>@100%` に渡るため UUID 形式を強制する。
+  version_id: z
+    .string()
+    .regex(
+      /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/,
+      "version_id must be a UUID",
+    ),
+  tag: z.string().min(1),
+  preview_url: z.string().url().optional(),
+});
+
+export async function handlePendingReleaseWebhook(
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  const v = await validateAndAuth(request, env, pendingReleaseSchema);
+  if (!v.ok) return v.response;
+  const record = await recordPendingRelease(env.COMPAT_KV, {
+    repo: v.data.repo,
+    version_id: v.data.version_id,
+    tag: v.data.tag,
+    preview_url: v.data.preview_url ?? null,
     now: new Date().toISOString(),
   });
   return jsonResponse(200, { ok: true, record });
