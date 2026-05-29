@@ -275,6 +275,10 @@ caller repo (e.g. `rust-alc-api`) の migration deploy workflow に以下 step �
   `<form method="post">` + Post/Redirect/Get (303 → `/release-wave`) で動く。
 - `TAGLESS_REPOS` 指定 repo は **一覧から除外する** (merge into default branch が
   release event 扱いで、そもそもリリース対象ではないため)。
+- **Compatibility グラフ内 repo の Tag Release**: Compatibility (all consumers)
+  グラフの直下に、グラフに出ている repo (backend + 既 deploy frontend) の
+  `Tag Release: <repo>` ボタンを並べる。グラフを見ながらその場でリリースを発火
+  できる (tagless repo は除外)。発火経路は上記 Tag Release と同じ。
 
 repo 一覧の出所は `/releases` と同じ 3 ソース (Hub status / direct-push
 allowlist / `TAGLESS_REPOS`)。tag / compare / repo-meta の GitHub 呼び出しは

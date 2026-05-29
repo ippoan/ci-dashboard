@@ -3,6 +3,8 @@ import {
   needsRelease,
   renderRepoReleaseStatusSection,
   injectRepoStatusSection,
+  renderCompatTagReleaseButtons,
+  injectCompatTagReleaseButtons,
   handleReleaseWaveListPageWithRepoStatus,
 } from "../../src/release-wave/repo-status-section";
 import type { RepoReleaseStatus } from "../../src/release-wave/repo-release-status";
@@ -137,6 +139,70 @@ describe("injectRepoStatusSection", () => {
   it("falls back to before </body> when no markers are present", () => {
     const out = injectRepoStatusSection("<body>hi</body>", "<div>SECTION</div>");
     expect(out).toContain("<div>SECTION</div>\n</body>");
+  });
+});
+
+describe("renderCompatTagReleaseButtons", () => {
+  it("renders one Tag Release button per repo, excluding tagless", () => {
+    const html = renderCompatTagReleaseButtons(
+      ["ippoan/rust-alc-api", "ippoan/auth-worker", "ippoan/ci-dashboard"],
+      new Set(["ippoan/ci-dashboard"]),
+    );
+    expect(html).toContain("Tag Release: ippoan/rust-alc-api");
+    expect(html).toContain("Tag Release: ippoan/auth-worker");
+    expect(html).not.toContain("ippoan/ci-dashboard");
+    expect(html).toContain('action="/api/release-wave/tag-release"');
+    expect(html).toContain('name="repo" value="ippoan/auth-worker"');
+  });
+
+  it("dedupes repos", () => {
+    const html = renderCompatTagReleaseButtons(
+      ["ippoan/a", "ippoan/a", "ippoan/b"],
+      new Set(),
+    );
+    expect(html.match(/Tag Release: ippoan\/a/g)?.length).toBe(1);
+  });
+
+  it("returns empty string when every repo is tagless", () => {
+    const html = renderCompatTagReleaseButtons(
+      ["ippoan/ci-dashboard"],
+      new Set(["ippoan/ci-dashboard"]),
+    );
+    expect(html).toBe("");
+  });
+
+  it("returns empty string for an empty repo set", () => {
+    expect(renderCompatTagReleaseButtons([], new Set())).toBe("");
+  });
+
+  it("escapes repo names", () => {
+    const html = renderCompatTagReleaseButtons(['a/<b>"&'], new Set());
+    expect(html).not.toContain("<b>");
+    expect(html).toContain("&lt;b&gt;");
+  });
+});
+
+describe("injectCompatTagReleaseButtons", () => {
+  const overlay =
+    'graph</svg></div>\n    <div style="margin-top:10px">\n      <strong class="meta">Staged previews (active waves)</strong></div>';
+
+  it("inserts the buttons right before the Staged previews block", () => {
+    const out = injectCompatTagReleaseButtons(overlay, "<!--BTN-->");
+    expect(out).toContain("<!--BTN-->");
+    expect(out.indexOf("<!--BTN-->")).toBeLessThan(
+      out.indexOf("Staged previews (active waves)"),
+    );
+    // graph (= svg) は ボタンより前
+    expect(out.indexOf("</svg>")).toBeLessThan(out.indexOf("<!--BTN-->"));
+  });
+
+  it("returns html unchanged when the block is empty", () => {
+    expect(injectCompatTagReleaseButtons(overlay, "")).toBe(overlay);
+  });
+
+  it("returns html unchanged when the overlay anchor is missing", () => {
+    const html = "<div>no compat overlay here</div>";
+    expect(injectCompatTagReleaseButtons(html, "<!--BTN-->")).toBe(html);
   });
 });
 

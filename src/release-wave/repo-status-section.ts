@@ -22,6 +22,8 @@ import {
   getRepoReleaseStatuses,
   type RepoReleaseStatus,
 } from "./repo-release-status";
+import { computeGlobalCompatibility } from "./compat";
+import { parseTaglessRepos } from "../tagless-repos";
 
 function escapeHtml(s: string): string {
   return s
@@ -161,10 +163,59 @@ export function injectRepoStatusSection(html: string, section: string): string {
 }
 
 /**
- * GET /release-wave: 既存の一覧ページ + Repo リリース状況 section。
+ * Compatibility (all consumers) グラフに出ている repo (backend + frontend) の
+ * Tag Release ボタン群を HTML で返す。tagless repo は除外。1 つも無ければ ""。
+ *
+ * グラフ内の repo をその場でリリースしたい、という要望 (ここにボタン欲しい) に
+ * 応えるための block。グラフ直下に注入する (injectCompatTagReleaseButtons)。
+ */
+export function renderCompatTagReleaseButtons(
+  repos: Iterable<string>,
+  tagless: Set<string>,
+): string {
+  const list = [...new Set(repos)].filter((r) => !tagless.has(r)).sort();
+  if (list.length === 0) return "";
+  const buttons = list
+    .map(
+      (r) => `
+        <form method="post" action="/api/release-wave/tag-release" style="margin:0 6px 6px 0;display:inline-block">
+          <input type="hidden" name="repo" value="${escapeHtml(r)}">
+          <button type="submit" title="${escapeHtml(r)} の tag-release.yml workflow を main で dispatch する">Tag Release: ${escapeHtml(r)}</button>
+        </form>`,
+    )
+    .join("");
+  return `
+    <div class="actions" style="margin-top:10px">
+      <strong class="meta">Tag Release (compatibility graph の repo)</strong>
+      <div style="margin-top:6px">${buttons}</div>
+    </div>`;
+}
+
+/**
+ * Compatibility グラフ直下 (= "Staged previews (active waves)" block の直前) に
+ * Tag Release ボタン block を注入する。アンカー (グラフの overlay) が無い
+ * (compat 未記録) 場合や block 空のときは html をそのまま返す。
+ */
+export function injectCompatTagReleaseButtons(
+  html: string,
+  block: string,
+): string {
+  if (!block) return html;
+  const marker = "Staged previews (active waves)";
+  const m = html.indexOf(marker);
+  if (m === -1) return html;
+  const divStart = html.lastIndexOf('<div style="margin-top:10px">', m);
+  if (divStart === -1) return html;
+  return html.slice(0, divStart) + block + "\n      " + html.slice(divStart);
+}
+
+/**
+ * GET /release-wave: 既存の一覧ページ + Repo リリース状況 section
+ * + Compatibility グラフ内 repo の Tag Release ボタン。
  *
  * CI_STATUS 未 bind (一部 unit test) や release-status 取得失敗時は、元の一覧を
- * そのまま返す (section だけ落として degrade)。
+ * そのまま返す (section だけ落として degrade)。COMPAT_KV 未 bind / 取得失敗時は
+ * compat ボタンだけ落とす。
  */
 export async function handleReleaseWaveListPageWithRepoStatus(
   env: Env,
@@ -180,7 +231,25 @@ export async function handleReleaseWaveListPageWithRepoStatus(
   }
 
   const section = renderRepoReleaseStatusSection(statuses);
-  const html = await res.text();
-  const injected = injectRepoStatusSection(html, section);
-  return new Response(injected, { status: res.status, headers: res.headers });
+  let html = await res.text();
+  html = injectRepoStatusSection(html, section);
+
+  // Compatibility (all consumers) グラフ内 repo に Tag Release ボタンを足す。
+  if (env.COMPAT_KV) {
+    try {
+      const compat = await computeGlobalCompatibility(env.COMPAT_KV);
+      const repos = new Set<string>();
+      for (const b of compat.backends) {
+        repos.add(b.backend_repo);
+        for (const m of b.matrix) repos.add(m.frontend);
+      }
+      const tagless = parseTaglessRepos(env.TAGLESS_REPOS);
+      const buttons = renderCompatTagReleaseButtons(repos, tagless);
+      html = injectCompatTagReleaseButtons(html, buttons);
+    } catch {
+      // compat 取得失敗時はボタンだけ落とす
+    }
+  }
+
+  return new Response(html, { status: res.status, headers: res.headers });
 }
