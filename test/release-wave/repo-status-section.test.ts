@@ -6,8 +6,10 @@ import {
   injectRepoStatusSection,
   renderCompatTagReleaseButtons,
   injectCompatTagReleaseButtons,
+  renderTrafficVersionsBlock,
   handleReleaseWaveListPageWithRepoStatus,
 } from "../../src/release-wave/repo-status-section";
+import type { TrafficRecord } from "../../src/release-wave/traffic";
 import type { RepoReleaseStatus } from "../../src/release-wave/repo-release-status";
 import type { Env } from "../../src/index";
 
@@ -246,6 +248,54 @@ describe("renderCompatTagReleaseButtons", () => {
   });
 });
 
+describe("renderTrafficVersionsBlock", () => {
+  function rec(repo: string, versions: TrafficRecord["versions"]): TrafficRecord {
+    return { schema_version: 1, repo, versions, reported_at: "t" };
+  }
+
+  it("shows 100% and 0% version ids for a repo", () => {
+    const map = new Map([
+      [
+        "ippoan/auth-worker",
+        rec("ippoan/auth-worker", [
+          { version_id: "530b908c-aaaa", percentage: 100 },
+          { version_id: "1a2b3c4d-bbbb", percentage: 0 },
+        ]),
+      ],
+    ]);
+    const html = renderTrafficVersionsBlock(["ippoan/auth-worker"], map);
+    expect(html).toContain("Traffic (version split)");
+    expect(html).toContain("ippoan/auth-worker");
+    expect(html).toContain("100% 530b908c-aaa"); // shortId truncates at 12 chars
+    expect(html).toContain("0% 1a2b3c4d-bbb");
+    // full id in title for 100% and 0%
+    expect(html).toContain("530b908c-aaaa = 100%");
+    expect(html).toContain("1a2b3c4d-bbbb = 0%");
+  });
+
+  it("only lists repos that have a traffic record", () => {
+    const map = new Map([
+      ["ippoan/a", rec("ippoan/a", [{ version_id: "v", percentage: 100 }])],
+    ]);
+    const html = renderTrafficVersionsBlock(["ippoan/a", "ippoan/b"], map);
+    expect(html).toContain("ippoan/a");
+    expect(html).not.toContain("ippoan/b");
+  });
+
+  it("returns empty string when no repo has traffic", () => {
+    expect(renderTrafficVersionsBlock(["ippoan/a"], new Map())).toBe("");
+  });
+
+  it("escapes repo names and version ids", () => {
+    const map = new Map([
+      ['a/<b>', rec('a/<b>', [{ version_id: '<v>', percentage: 100 }])],
+    ]);
+    const html = renderTrafficVersionsBlock(['a/<b>'], map);
+    expect(html).not.toContain("<b>");
+    expect(html).toContain("&lt;b&gt;");
+  });
+});
+
 describe("isUpToDate", () => {
   it("true only when tagged and behind === 0", () => {
     expect(isUpToDate(status({ hasTag: true, latestTag: "v1.0.0", behind: 0 }))).toBe(true);
@@ -398,5 +448,41 @@ describe("handleReleaseWaveListPageWithRepoStatus", () => {
     const html = await res.text();
     expect(html).toContain("Tag Release: ippoan/rust-alc-api");
     expect(html).toContain('name="repo" value="ippoan/rust-alc-api"');
+  });
+
+  it("shows the version traffic split under the compatibility graph", async () => {
+    const compatKv = memKv({
+      "backend::ippoan/rust-alc-api": {
+        schema_version: 1,
+        repo: "ippoan/rust-alc-api",
+        current_image: "sha-abc123",
+        deployed_at: "2026-05-29T00:00:00Z",
+        deployed_by: "ci",
+        wave_id: null,
+      },
+      "traffic::ippoan/rust-alc-api": {
+        schema_version: 1,
+        repo: "ippoan/rust-alc-api",
+        versions: [
+          { version_id: "full-100-id", percentage: 100 },
+          { version_id: "zero-000-id", percentage: 0 },
+        ],
+        reported_at: "2026-05-29T00:00:00Z",
+      },
+    });
+    const env = {
+      ...baseEnv(),
+      CI_STATUS: memKv(),
+      COMPAT_KV: compatKv,
+    } as unknown as Env;
+    const res = await handleReleaseWaveListPageWithRepoStatus(env);
+    const html = await res.text();
+    expect(html).toContain("Traffic (version split)");
+    expect(html).toContain("100% full-100-id");
+    expect(html).toContain("0% zero-000-id");
+    // グラフ overlay の Staged previews より前 (= グラフ直下) に出る。
+    expect(html.indexOf("Traffic (version split)")).toBeLessThan(
+      html.indexOf("Staged previews (active waves)"),
+    );
   });
 });

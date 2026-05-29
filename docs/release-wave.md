@@ -278,7 +278,38 @@ caller repo (e.g. `rust-alc-api`) の migration deploy workflow に以下 step �
 - **Compatibility グラフ内 repo の Tag Release**: Compatibility (all consumers)
   グラフの直下に、グラフに出ている repo (backend + 既 deploy frontend) の
   `Tag Release: <repo>` ボタンを並べる。グラフを見ながらその場でリリースを発火
-  できる (tagless repo は除外)。発火経路は上記 Tag Release と同じ。
+  できる (tagless repo は除外)。発火経路は上記 Tag Release と同じ。「最新」
+  (tag あり & main と差分なし) の repo はボタンを `disabled` (inactive) にする。
+
+## Traffic (version split) — Compatibility グラフ下 (Refs #137)
+
+Compatibility グラフの直下に「Traffic (version split)」テーブルを出す。各 repo の
+worker version の traffic 配分 (どの version に何 % traffic が乗っているか) を
+percentage 降順で並べ、**「100% がどの version / 0% (no-traffic) がどの version」**
+を一目で確認できる (緑 = 100% / 灰 = 0% / 黄 = その他)。version id は先頭 12 文字に
+短縮表示し、full id と % は hover (title) で見える。
+
+データソースは frontend CI からの webhook 報告:
+
+### POST /webhooks/release-wave/traffic-report
+
+frontend CI が deploy 時に `wrangler deployments list` 相当の version 配分を報告し、
+`traffic::<repo>` (COMPAT_KV) に upsert する。shared secret
+(`RELEASE_WAVE_WEBHOOK_SECRET`) 認証。
+
+```jsonc
+// body
+{
+  "repo": "ippoan/auth-worker",
+  "versions": [
+    { "version_id": "530b908c-5385-451c-b163-747caaedafd3", "percentage": 100 },
+    { "version_id": "1a2b3c4d-...",                          "percentage": 0 }
+  ]
+}
+```
+
+報告が無い repo は traffic 行が出ないだけ (graceful)。報告を流すには各 frontend の
+CI (ci-workflows の frontend-ci 等) に traffic-report step を足す必要がある。
 
 repo 一覧の出所は `/releases` と同じ 3 ソース (Hub status / direct-push
 allowlist / `TAGLESS_REPOS`)。tag / compare / repo-meta の GitHub 呼び出しは
