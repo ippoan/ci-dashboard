@@ -8,10 +8,13 @@
  *                    (= まだ release されていない変更量)。-1 は取得失敗。
  *   - tagless      : TAGLESS_REPOS 指定の repo か (tag を打たない方針)
  *
- * repo 一覧の出所は /releases ページと同じ 3 ソース (Hub status / direct-push
- * allowlist / TAGLESS_REPOS)。tag / compare / repo-meta の GitHub 呼び出しは
- * release-cache の KV キャッシュ層を共用するので /releases と同じ rcache: entry を
- * 再利用する (二重 fetch にならない)。
+ * repo 一覧の出所は /releases と同じ 3 ソース (Hub status / direct-push
+ * allowlist / TAGLESS_REPOS) に加え、Compatibility (all consumers) グラフに出る
+ * repo (compat KV の backend + frontend) も含める。後者を足すのは、compat グラフ
+ * にしか出ない consumer frontend (例: nuxt-notify。ci-dashboard 宛の CI webhook を
+ * 出さず allowlist/tagless でもない) を取りこぼさないため。tag / compare /
+ * repo-meta の GitHub 呼び出しは release-cache の KV キャッシュ層を共用するので
+ * /releases と同じ rcache: entry を再利用する (二重 fetch にならない)。
  */
 
 import type { Env } from "../index";
@@ -20,6 +23,7 @@ import { cachedTags, cachedCompare, cachedRepoMeta } from "../release-cache";
 import { loadDirectPushAllowlist } from "../direct-push-allowlist";
 import { parseTaglessRepos } from "../tagless-repos";
 import { sortSemverDesc } from "../release-helpers";
+import { computeGlobalCompatibility } from "./compat";
 
 export interface RepoReleaseStatus {
   repo: string;
@@ -32,7 +36,7 @@ export interface RepoReleaseStatus {
   tagless: boolean;
 }
 
-/** 監視対象 repo の集合と tagless set を /releases と同じ 3 ソースから組む。 */
+/** 監視対象 repo の集合と tagless set を 4 ソースから組む。 */
 async function discoverRepos(
   env: Env,
 ): Promise<{ repos: string[]; tagless: Set<string> }> {
@@ -63,6 +67,20 @@ async function discoverRepos(
   // (c) TAGLESS_REPOS wrangler var。
   const tagless = parseTaglessRepos(env.TAGLESS_REPOS);
   for (const r of tagless) watched.add(r);
+
+  // (d) Compatibility (all consumers) グラフに出る repo (backend + frontend)。
+  // compat グラフにしか出ない consumer frontend (nuxt-notify 等) を取りこぼさない。
+  if (env.COMPAT_KV) {
+    try {
+      const compat = await computeGlobalCompatibility(env.COMPAT_KV);
+      for (const b of compat.backends) {
+        watched.add(b.backend_repo);
+        for (const m of b.matrix) watched.add(m.frontend);
+      }
+    } catch {
+      // compat 取得失敗 → 他ソースに委ねる
+    }
+  }
 
   return { repos: [...watched].sort(), tagless };
 }
