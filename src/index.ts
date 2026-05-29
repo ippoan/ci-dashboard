@@ -16,6 +16,8 @@ import { handleReleaseCloseBatch } from "./release-close-batch";
 import { handleRecheck } from "./recheck";
 import { handleSecretGenPage } from "./secret-gen-page";
 import { handleTagRelease } from "./tag-release";
+import { handleReleaseWaveTagRelease } from "./release-wave/tag-release-action";
+import { handleReleaseWaveListPageWithRepoStatus } from "./release-wave/repo-status-section";
 import { handleMcpRequest } from "./mcp/server";
 import {
   handleContractAppliedWebhook,
@@ -31,7 +33,6 @@ import {
   handleBackendCurrentImage,
 } from "./release-wave/compat-api";
 import {
-  handleReleaseWaveListPage,
   handleReleaseWaveDetailPage,
 } from "./release-wave/page";
 import {
@@ -173,6 +174,11 @@ app.get("/snapshot", async (c) => {
 
 // Tag release
 app.post("/api/tag-release", (c) => handleTagRelease(c.req.raw, c.env));
+// Release Wave ページ (strict CSP / JS 無効) からの form-POST 用。dispatch 後
+// 303 で /release-wave へ戻す。
+app.post("/api/release-wave/tag-release", (c) =>
+  handleReleaseWaveTagRelease(c.req.raw, c.env),
+);
 
 // Recheck
 app.post("/api/recheck", (c) => handleRecheck(c.req.raw, c.env, getHub(c.env)));
@@ -248,7 +254,7 @@ app.get("/backend-current-image", (c) =>
 // Release Wave admin UI (Refs #137 Phase 3e)。
 // Auth は ci-dashboard 全体に被さる Cloudflare Access (Google OAuth + email
 // allowlist) edge gate に委譲。/releases ページと同じトラストモデル。
-app.get("/release-wave", (c) => handleReleaseWaveListPage(c.env));
+app.get("/release-wave", (c) => handleReleaseWaveListPageWithRepoStatus(c.env));
 app.get("/release-wave/:wave_id", (c) =>
   handleReleaseWaveDetailPage(c.env, c.req.param("wave_id")),
 );
