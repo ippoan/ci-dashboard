@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { githubApi, githubApiRaw, parseRepo, validateOrg, GitHubApiError } from "../../src/github-api";
+import { githubApi, githubApiRaw, githubGraphQL, parseRepo, validateOrg, GitHubApiError } from "../../src/github-api";
 import { buildUpdateIssuePayload, fetchOrgIssues } from "../../src/mcp/tools/issues";
 import { appTestEnv } from "../_helpers/app-env";
 
@@ -468,6 +468,66 @@ describe("Issues write tool logic", () => {
     const body = JSON.parse(fetchSpy.mock.calls[0]![1]!.body as string);
     expect(body.state).toBe("open");
     expect(body.state_reason).toBeUndefined();
+  });
+
+  it("delete_issue resolves node_id via REST then calls the deleteIssue mutation", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    // 1) REST GET resolves the GraphQL node id
+    fetchSpy.mockResolvedValueOnce(
+      Response.json({
+        number: 99,
+        node_id: "I_kwDONODE99",
+        title: "spam issue",
+        state: "open",
+        html_url: "https://github.com/ippoan/ci-dashboard/issues/99",
+      }),
+    );
+    // 2) GraphQL deleteIssue mutation
+    fetchSpy.mockResolvedValueOnce(
+      Response.json({
+        data: { deleteIssue: { repository: { nameWithOwner: "ippoan/ci-dashboard" } } },
+      }),
+    );
+
+    const { owner, repo } = parseRepo("ci-dashboard");
+    validateOrg(owner);
+    const issue = await githubApi<{ node_id: string }>(
+      "token", "GET", `/repos/${owner}/${repo}/issues/99`,
+    );
+    const data = await githubGraphQL<{
+      deleteIssue: { repository: { nameWithOwner: string } | null } | null;
+    }>(
+      "token",
+      `mutation($issueId: ID!) {
+        deleteIssue(input: { issueId: $issueId }) {
+          repository { nameWithOwner }
+        }
+      }`,
+      { issueId: issue.node_id },
+    );
+
+    // GraphQL hits the /graphql endpoint with the resolved node id in variables
+    const gqlUrl = fetchSpy.mock.calls[1]![0] as string;
+    expect(gqlUrl).toContain("/graphql");
+    const gqlBody = JSON.parse(fetchSpy.mock.calls[1]![1]!.body as string);
+    expect(gqlBody.variables.issueId).toBe("I_kwDONODE99");
+    expect(data.deleteIssue?.repository?.nameWithOwner).toBe("ippoan/ci-dashboard");
+  });
+
+  it("delete_issue surfaces GraphQL errors (e.g. insufficient permission)", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({
+        errors: [{ message: "Must have admin access to delete an issue" }],
+      }),
+    );
+
+    await expect(
+      githubGraphQL(
+        "token",
+        `mutation($issueId: ID!) { deleteIssue(input: { issueId: $issueId }) { clientMutationId } }`,
+        { issueId: "I_kwDONODE99" },
+      ),
+    ).rejects.toThrow(GitHubApiError);
   });
 });
 

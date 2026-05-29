@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { githubApi, parseRepo, tokenForOrg, validateOrg, AUTH_WORKER_ORIGIN } from "../../github-api";
+import { githubApi, githubGraphQL, parseRepo, tokenForOrg, validateOrg, AUTH_WORKER_ORIGIN } from "../../github-api";
 import { getGitHubToken, type AuthClientWorkerEnv } from "@ippoan/auth-client-worker";
 
 /** Build the PATCH body for `update_issue` from optional fields. Strips
@@ -336,6 +336,53 @@ export function registerIssuesTools(server: McpServer, env: AuthClientWorkerEnv)
   );
 
   server.registerTool(
+    "delete_issue",
+    {
+      description:
+        "Permanently delete an issue. This is irreversible — the issue and its " +
+        "comments are removed and cannot be recovered. For normal workflows " +
+        "prefer close_issue. Requires admin/maintainer permission on the repo. " +
+        "(GitHub REST has no delete endpoint, so the GraphQL `deleteIssue` " +
+        "mutation is used.)",
+      inputSchema: {
+        repo: z.string().describe("Repository (e.g. 'rust-alc-api')"),
+        issue_number: z.number().describe("Issue number"),
+      },
+      annotations: { destructiveHint: true },
+    },
+    async ({ repo, issue_number }) => {
+      const { owner, repo: name } = parseRepo(repo);
+      const token = await tokenForOrg(env, owner);
+
+      // REST exposes no DELETE for issues; resolve the GraphQL node id first,
+      // then invoke the `deleteIssue` mutation with it.
+      const issue = await githubApi<Issue & { node_id: string }>(
+        token, "GET", `/repos/${owner}/${name}/issues/${issue_number}`,
+      );
+
+      const data = await githubGraphQL<{
+        deleteIssue: { repository: { nameWithOwner: string } | null } | null;
+      }>(
+        token,
+        `mutation($issueId: ID!) {
+          deleteIssue(input: { issueId: $issueId }) {
+            repository { nameWithOwner }
+          }
+        }`,
+        { issueId: issue.node_id },
+      );
+
+      const result = {
+        deleted: true,
+        number: issue_number,
+        repo: data.deleteIssue?.repository?.nameWithOwner ?? `${owner}/${name}`,
+      };
+
+      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    },
+  );
+
+  server.registerTool(
     "list_org_issues",
     {
       description:
@@ -489,6 +536,7 @@ interface SearchIssueItem {
 
 interface Issue {
   number: number;
+  node_id?: string;
   title: string;
   state: string;
   user: { login: string };
