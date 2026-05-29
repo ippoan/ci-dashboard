@@ -5,6 +5,8 @@ import {
   handleReleaseWaveAbort,
   handleReleaseWaveRetest,
   handleReleaseWavePendingReleaseFlip,
+  handleReleaseWaveTrafficRollback,
+  handleReleaseWaveBackendRollback,
 } from "../../src/release-wave/api";
 import { getPendingRelease } from "../../src/release-wave/pending-release";
 import type { Env } from "../../src/index";
@@ -548,5 +550,184 @@ describe("handleReleaseWavePendingReleaseFlip", () => {
     expect(resp.status).toBe(502);
     // 着火失敗時は record を残す (operator が再試行可能)
     expect(await getPendingRelease(kv, "ippoan/auth-worker")).not.toBeNull();
+  });
+});
+
+// ============================================================================
+// /api/release-wave/traffic-rollback  (Refs #196)
+// ============================================================================
+
+const ROLLBACK_VID = "8664c989-1111-2222-3333-444455556666";
+
+/** deploy_history 付き traffic record を仕込んだ COMPAT_KV。 */
+function trafficRollbackKv(): KVNamespace {
+  return memKv({
+    "traffic::ippoan/auth-worker": {
+      schema_version: 4,
+      repo: "ippoan/auth-worker",
+      versions: [{ version_id: "current-vid", percentage: 100, tag: "v0.2.50" }],
+      deploy_history: [
+        { version_id: "current-vid", tag: "v0.2.50", became_active_at: "2026-05-29T09:30:00Z" },
+        { version_id: ROLLBACK_VID, tag: "v0.2.49", became_active_at: "2026-05-28T11:37:00Z" },
+      ],
+      reported_at: "2026-05-29T09:30:00Z",
+    },
+  });
+}
+
+describe("handleReleaseWaveTrafficRollback", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("returns 405 on GET", async () => {
+    const req = new Request(
+      "https://ci-dashboard.ippoan.org/api/release-wave/traffic-rollback",
+      { method: "GET" },
+    );
+    const resp = await handleReleaseWaveTrafficRollback(req, pendingFlipEnv(trafficRollbackKv()));
+    expect(resp.status).toBe(405);
+  });
+
+  it("returns 400 when repo or version_id missing", async () => {
+    const resp = await handleReleaseWaveTrafficRollback(
+      postRequest("/api/release-wave/traffic-rollback", {
+        formBody: { repo: "ippoan/auth-worker" },
+      }),
+      pendingFlipEnv(trafficRollbackKv()),
+    );
+    expect(resp.status).toBe(400);
+  });
+
+  it("returns 404 when no traffic record", async () => {
+    const resp = await handleReleaseWaveTrafficRollback(
+      postRequest("/api/release-wave/traffic-rollback", {
+        formBody: { repo: "ippoan/none", version_id: ROLLBACK_VID },
+      }),
+      pendingFlipEnv(trafficRollbackKv()),
+    );
+    expect(resp.status).toBe(404);
+  });
+
+  it("returns 404 when version_id not in traffic history", async () => {
+    const resp = await handleReleaseWaveTrafficRollback(
+      postRequest("/api/release-wave/traffic-rollback", {
+        formBody: { repo: "ippoan/auth-worker", version_id: "unknown-vid" },
+      }),
+      pendingFlipEnv(trafficRollbackKv()),
+    );
+    expect(resp.status).toBe(404);
+  });
+
+  it("dispatches release-wave-traffic-rollback with previewed_version_id + marker", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const resp = await handleReleaseWaveTrafficRollback(
+      postRequest("/api/release-wave/traffic-rollback", {
+        formBody: { repo: "ippoan/auth-worker", version_id: ROLLBACK_VID },
+      }),
+      pendingFlipEnv(trafficRollbackKv()),
+    );
+    expect(resp.status).toBe(303);
+    const call = fetchSpy.mock.calls.find((c) =>
+      String(c[0]).includes("/repos/ippoan/auth-worker/dispatches"),
+    );
+    expect(call).toBeDefined();
+    const body = JSON.parse(call![1].body);
+    expect(body.event_type).toBe("release-wave-traffic-rollback");
+    expect(body.client_payload).toMatchObject({
+      previewed_version_id: ROLLBACK_VID,
+      target_tag: "v0.2.49",
+      traffic_rollback: true,
+    });
+    expect(body.client_payload.wave_id).toMatch(/^[a-zA-Z0-9._-]{1,128}$/);
+  });
+
+  it("returns 502 when dispatch fails", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response("boom", { status: 500 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const resp = await handleReleaseWaveTrafficRollback(
+      postRequest("/api/release-wave/traffic-rollback", {
+        formBody: { repo: "ippoan/auth-worker", version_id: ROLLBACK_VID },
+      }),
+      pendingFlipEnv(trafficRollbackKv()),
+    );
+    expect(resp.status).toBe(502);
+  });
+});
+
+// ============================================================================
+// /api/release-wave/backend-rollback  (Refs #197)
+// ============================================================================
+
+/** deploy_history 付き backend record を仕込んだ COMPAT_KV。 */
+function backendRollbackKv(): KVNamespace {
+  return memKv({
+    "backend::ippoan/rust-alc-api": {
+      schema_version: 2,
+      repo: "ippoan/rust-alc-api",
+      current_image: "rust-alc-api-00042-abc",
+      current_tag: "v1.4.2",
+      deployed_at: "2026-05-29T09:30:00Z",
+      deployed_by: "release-wave-gcp",
+      wave_id: null,
+      deploy_history: [
+        { image: "rust-alc-api-00042-abc", tag: "v1.4.2", became_active_at: "2026-05-29T09:30:00Z" },
+        { image: "rust-alc-api-00041-xyz", tag: "v1.4.1", became_active_at: "2026-05-28T11:37:00Z" },
+      ],
+    },
+  });
+}
+
+describe("handleReleaseWaveBackendRollback", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("returns 400 when repo or image missing", async () => {
+    const resp = await handleReleaseWaveBackendRollback(
+      postRequest("/api/release-wave/backend-rollback", {
+        formBody: { repo: "ippoan/rust-alc-api" },
+      }),
+      pendingFlipEnv(backendRollbackKv()),
+    );
+    expect(resp.status).toBe(400);
+  });
+
+  it("returns 404 when revision not in deploy history", async () => {
+    const resp = await handleReleaseWaveBackendRollback(
+      postRequest("/api/release-wave/backend-rollback", {
+        formBody: { repo: "ippoan/rust-alc-api", image: "rust-alc-api-99999-zzz" },
+      }),
+      pendingFlipEnv(backendRollbackKv()),
+    );
+    expect(resp.status).toBe(404);
+  });
+
+  it("dispatches release-wave-backend-rollback with rollback_target map derived from revision", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const resp = await handleReleaseWaveBackendRollback(
+      postRequest("/api/release-wave/backend-rollback", {
+        formBody: { repo: "ippoan/rust-alc-api", image: "rust-alc-api-00041-xyz" },
+      }),
+      pendingFlipEnv(backendRollbackKv()),
+    );
+    expect(resp.status).toBe(303);
+    const call = fetchSpy.mock.calls.find((c) =>
+      String(c[0]).includes("/repos/ippoan/rust-alc-api/dispatches"),
+    );
+    expect(call).toBeDefined();
+    const body = JSON.parse(call![1].body);
+    expect(body.event_type).toBe("release-wave-backend-rollback");
+    expect(body.client_payload).toMatchObject({
+      target_tag: "v1.4.1",
+      rollback_revision: "rust-alc-api-00041-xyz",
+      backend_rollback: true,
+    });
+    // service 名は revision から逆算され rollback_target に入る。
+    expect(body.client_payload.rollback_target).toEqual({
+      "rust-alc-api": "rust-alc-api-00041-xyz",
+    });
   });
 });

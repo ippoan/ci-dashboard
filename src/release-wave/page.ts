@@ -769,7 +769,7 @@ function renderCompatibilitySection(
               .join("");
       return `
       <h3>${escapeHtml(b.backend_repo)}
-        <span class="meta">@ ${escapeHtml(b.current_image ?? "—")}</span>
+        <span class="meta">${b.current_tag ? `${escapeHtml(b.current_tag)} · ` : ""}@ ${escapeHtml(b.current_image ?? "—")}</span>
       </h3>
       <table>
         <thead>
@@ -857,6 +857,8 @@ function renderCompatibilitySvg(
   const backendOrder: string[] = [];
   const frontendOrder: string[] = [];
   const backendImage = new Map<string, string | null>();
+  // backend image に対応する git release tag (v2 record のみ)。node line2 に併記。
+  const backendTag = new Map<string, string | null>();
   const frontendVersion = new Map<string, string | null>();
   // frontend が 1 つでも赤 edge を持てば赤扱い (node 枠色)。
   const frontendHasRed = new Map<string, boolean>();
@@ -873,6 +875,7 @@ function renderCompatibilitySvg(
     if (!backendOrder.includes(b.backend_repo)) {
       backendOrder.push(b.backend_repo);
       backendImage.set(b.backend_repo, b.current_image);
+      backendTag.set(b.backend_repo, b.current_tag ?? null);
     }
     for (const m of b.matrix) {
       if (!frontendOrder.includes(m.frontend)) {
@@ -986,13 +989,16 @@ function renderCompatibilitySvg(
   const backendSvg = backendOrder
     .map((repo) => {
       const img = backendImage.get(repo) ?? "—";
+      const tag = backendTag.get(repo) ?? null;
+      // line2: git tag があれば "<tag> · @ <sha>"、無ければ従来の "@ <sha>"。Refs #197。
+      const line2 = tag ? `${tag} · @ ${shortSha(img)}` : `@ ${shortSha(img)}`;
       return node(
         leftX,
         bY(repo),
         repo,
-        `@ ${shortSha(img)}`,
+        line2,
         BLUE,
-        `${repo}\ncurrent image: ${img ?? "—"}`,
+        `${repo}\ncurrent image: ${img ?? "—"}${tag ? `\ncurrent tag: ${tag}` : ""}`,
       );
     })
     .join("");

@@ -42,6 +42,8 @@ import {
   handleReleaseWaveAbort,
   handleReleaseWaveRetest,
   handleReleaseWavePendingReleaseFlip,
+  handleReleaseWaveTrafficRollback,
+  handleReleaseWaveBackendRollback,
 } from "./release-wave/api";
 import {
   handlePwaManifest,
@@ -286,6 +288,16 @@ app.post("/api/release-wave/:wave_id/retest", (c) =>
 // で区別されるため衝突しない。
 app.post("/api/release-wave/pending-release/flip", (c) =>
   handleReleaseWavePendingReleaseFlip(c.req.raw, c.env),
+);
+// frontend worker の traffic を任意の過去 version に即 100% で戻す (Refs #196)。
+// form field `repo` + `version_id`。release-wave-traffic-rollback を dispatch。
+app.post("/api/release-wave/traffic-rollback", (c) =>
+  handleReleaseWaveTrafficRollback(c.req.raw, c.env),
+);
+// backend (Cloud Run) の traffic を任意の過去 revision に即 100% で戻す (Refs #197)。
+// form field `repo` + `image`。release-wave-backend-rollback を dispatch。
+app.post("/api/release-wave/backend-rollback", (c) =>
+  handleReleaseWaveBackendRollback(c.req.raw, c.env),
 );
 
 export default app;

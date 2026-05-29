@@ -13,8 +13,20 @@
 // 定数
 // ----------------------------------------------------------------------------
 
-/** 現行 schema version。破壊的変更時に bump。 */
+/** 現行 schema version (`frontend::*`)。破壊的変更時に bump。 */
 export const SCHEMA_VERSION = 1;
+
+/**
+ * `backend::*` record の schema version。
+ *   v1: { current_image, deployed_at, deployed_by, wave_id }
+ *   v2: + current_tag (image に対応する git release tag)
+ *       + deploy_history (過去 revision の遷移履歴、新しい順、rollback 先候補)
+ * reader (`getBackendCurrent`) は v1/v2 双方を許容する。Refs #197。
+ */
+export const BACKEND_SCHEMA_VERSION = 2;
+
+/** backend `deploy_history` の保持件数上限 (新しい順に trim)。 */
+export const BACKEND_DEPLOY_HISTORY_MAX = 20;
 
 /** `tested_against` の最大保持件数 (sliding window の件数上限)。 */
 export const TESTED_AGAINST_MAX = 50;
@@ -59,15 +71,36 @@ export interface FrontendCompatRecord {
   tested_against: TestedAgainstEntry[];
 }
 
+/**
+ * 過去に active だった backend revision 1 件分の履歴 entry。
+ * rollback 先候補として `deploy_history[]` に新しい順で積む。Refs #197。
+ */
+export interface BackendDeployHistoryEntry {
+  /** Cloud Run revision name 等の image identifier。 */
+  image: string;
+  /** その image に対応する git release tag (不明なら null)。 */
+  tag: string | null;
+  /** active になったと検知した UTC ISO。 */
+  became_active_at: string;
+}
+
 /** `backend::<repo>` value。最新 deploy のみ保持 (upsert)。 */
 export interface BackendCompatRecord {
   schema_version: number;
   repo: string;
   current_image: string;
+  /** current_image に対応する git release tag (v2+、不明なら null)。Refs #197。 */
+  current_tag?: string | null;
   deployed_at: string;
   deployed_by: string;
   /** wave 経由 deploy なら wave_id、単独 deploy なら null。 */
   wave_id: string | null;
+  /**
+   * 過去 revision の遷移履歴 (新しい順、上限 BACKEND_DEPLOY_HISTORY_MAX)。
+   * index 0 = 現在 active、index 1 = 直前の active (= rollback 先候補)。
+   * v1 record では undefined。Refs #197。
+   */
+  deploy_history?: BackendDeployHistoryEntry[];
 }
 
 // ----------------------------------------------------------------------------
@@ -160,39 +193,83 @@ function trimTestedAgainst(
 export interface RecordBackendDeployInput {
   repo: string;
   current_image: string;
+  /** image に対応する git release tag (省略 / null 可)。Refs #197。 */
+  current_tag?: string | null;
   deployed_by: string;
   wave_id?: string | null;
   now: string;
 }
 
-/** backend deploy 成功時の upsert (最新のみ、TTL なし)。 */
+/**
+ * backend deploy 成功時の upsert (最新のみ、TTL なし)。
+ *
+ * current_image が前回 record と変わっていれば `deploy_history` の先頭に
+ * 旧→新の遷移として積む (新しい順、上限件数で trim)。同 image の再報告では
+ * 履歴を変えない (重複を積まない)。Refs #197。
+ */
 export async function recordBackendDeploy(
   kv: KVNamespace,
   input: RecordBackendDeployInput,
 ): Promise<BackendCompatRecord> {
+  const prev = await getBackendCurrent(kv, input.repo);
+  const deploy_history = nextBackendDeployHistory(
+    prev?.deploy_history,
+    input.current_image,
+    input.current_tag ?? null,
+    input.now,
+  );
   const record: BackendCompatRecord = {
-    schema_version: SCHEMA_VERSION,
+    schema_version: BACKEND_SCHEMA_VERSION,
     repo: input.repo,
     current_image: input.current_image,
+    current_tag: input.current_tag ?? null,
     deployed_at: input.now,
     deployed_by: input.deployed_by,
     wave_id: input.wave_id ?? null,
+    ...(deploy_history.length > 0 ? { deploy_history } : {}),
   };
   await kv.put(backendKey(input.repo), JSON.stringify(record));
   return record;
+}
+
+/**
+ * 新 current_image から backend deploy_history を導出する純粋関数。traffic.ts の
+ * `nextDeployHistory` と対称。current_image が履歴先頭と異なれば積み、同じなら
+ * 据え置く。再 deploy で履歴が重複しないよう同 image は除去して積み直す。
+ */
+export function nextBackendDeployHistory(
+  prevHistory: BackendDeployHistoryEntry[] | undefined,
+  currentImage: string,
+  currentTag: string | null,
+  now: string,
+): BackendDeployHistoryEntry[] {
+  const prior = Array.isArray(prevHistory) ? prevHistory : [];
+  if (!currentImage) return prior.slice(0, BACKEND_DEPLOY_HISTORY_MAX);
+  if (prior[0]?.image === currentImage) {
+    return prior.slice(0, BACKEND_DEPLOY_HISTORY_MAX);
+  }
+  const entry: BackendDeployHistoryEntry = {
+    image: currentImage,
+    tag: currentTag,
+    became_active_at: now,
+  };
+  const rest = prior.filter((e) => e.image !== currentImage);
+  return [entry, ...rest].slice(0, BACKEND_DEPLOY_HISTORY_MAX);
 }
 
 // ----------------------------------------------------------------------------
 // Read: backend current image
 // ----------------------------------------------------------------------------
 
-/** `backend::<repo>` を読む。無ければ null。 */
+/** `backend::<repo>` を読む。無ければ null。v1/v2 双方を許容する (Refs #197)。 */
 export async function getBackendCurrent(
   kv: KVNamespace,
   repo: string,
 ): Promise<BackendCompatRecord | null> {
   const v = await kv.get<BackendCompatRecord>(backendKey(repo), "json");
-  if (!v || v.schema_version !== SCHEMA_VERSION) return null;
+  if (!v || v.schema_version < SCHEMA_VERSION || v.schema_version > BACKEND_SCHEMA_VERSION) {
+    return null;
+  }
   return v;
 }
 
@@ -281,6 +358,10 @@ export interface WaveBackendCompat {
   backend_repo: string;
   /** `backend::<repo>` に記録された現 production image (record 無しなら null)。 */
   current_image: string | null;
+  /** current_image に対応する git release tag (v2 record のみ、無ければ null)。Refs #197。 */
+  current_tag: string | null;
+  /** 過去 revision の rollback 先候補 (新しい順、record 無し / v1 なら空)。Refs #197。 */
+  deploy_history: BackendDeployHistoryEntry[];
   /** 当該 backend を test 済みの frontend の matrix (consumer 無しなら空)。 */
   matrix: CompatMatrixEntry[];
 }
@@ -318,6 +399,8 @@ export async function computeWaveCompatibility(
     backends.push({
       backend_repo: repo,
       current_image: rec.current_image,
+      current_tag: rec.current_tag ?? null,
+      deploy_history: Array.isArray(rec.deploy_history) ? rec.deploy_history : [],
       matrix: compat.matrix,
     });
   }

@@ -299,6 +299,7 @@ export async function handleFrontendTestReportWebhook(
  *   {
  *     "repo": "ippoan/rust-alc-api",
  *     "current_image": "rust-alc-api-00042-abc",
+ *     "current_tag": "v1.4.2",          // optional (image に対応する git tag、Refs #197)
  *     "deployed_by": "release-wave-gcp",
  *     "wave_id": "wave_2026_05_27_01"   // optional (単独 deploy 時は省略)
  *   }
@@ -306,6 +307,8 @@ export async function handleFrontendTestReportWebhook(
 const backendDeployReportSchema = z.object({
   repo: z.string().min(1),
   current_image: z.string().min(1),
+  // null / undefined / 省略すべて許容 (旧 deploy workflow は載せない)。
+  current_tag: z.string().min(1).nullish(),
   deployed_by: z.string().min(1),
   wave_id: z.string().min(1).nullable().optional(),
 });
@@ -319,6 +322,7 @@ export async function handleBackendDeployReportWebhook(
   const record = await recordBackendDeploy(env.COMPAT_KV, {
     repo: v.data.repo,
     current_image: v.data.current_image,
+    current_tag: v.data.current_tag ?? null,
     deployed_by: v.data.deployed_by,
     wave_id: v.data.wave_id ?? null,
     now: new Date().toISOString(),

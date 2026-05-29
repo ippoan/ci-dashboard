@@ -7,9 +7,11 @@ import {
   renderCompatTagReleaseButtons,
   injectCompatTagReleaseButtons,
   renderTrafficVersionsBlock,
+  renderBackendRollbackBlock,
   handleReleaseWaveListPageWithRepoStatus,
 } from "../../src/release-wave/repo-status-section";
 import type { TrafficRecord } from "../../src/release-wave/traffic";
+import type { WaveCompatibility } from "../../src/release-wave/compat";
 import type { RepoReleaseStatus } from "../../src/release-wave/repo-release-status";
 import type { Env } from "../../src/index";
 
@@ -365,6 +367,81 @@ describe("renderTrafficVersionsBlock", () => {
     expect(html).toContain("(他2件)");
     // 0% (最新) が 100% (より古い active) より上に来る (日時降順)。
     expect(html.indexOf("zero-newest")).toBeLessThan(html.indexOf("active-id"));
+  });
+
+  it("renders a Rollback button for prior deployed versions (Refs #196)", () => {
+    const r: TrafficRecord = {
+      schema_version: 4,
+      repo: "ippoan/auth-worker",
+      versions: [{ version_id: "cur", percentage: 100, tag: "v0.2.50" }],
+      deploy_history: [
+        { version_id: "cur", tag: "v0.2.50", became_active_at: "2026-05-29T09:30:00Z" },
+        { version_id: "prev", tag: "v0.2.49", became_active_at: "2026-05-28T11:37:00Z" },
+      ],
+      reported_at: "t",
+    };
+    const html = renderTrafficVersionsBlock(["ippoan/auth-worker"], new Map([["ippoan/auth-worker", r]]));
+    expect(html).toContain("/api/release-wave/traffic-rollback");
+    expect(html).toContain('name="version_id" value="prev"');
+    expect(html).toContain("Rollback to v0.2.49");
+    // 現 active (cur) への rollback ボタンは出さない。
+    expect(html).not.toContain('name="version_id" value="cur"');
+  });
+
+  it("renders no Rollback button when deploy_history has only the active version", () => {
+    const r: TrafficRecord = {
+      schema_version: 4,
+      repo: "ippoan/x",
+      versions: [{ version_id: "cur", percentage: 100 }],
+      deploy_history: [{ version_id: "cur", tag: null, became_active_at: "t" }],
+      reported_at: "t",
+    };
+    const html = renderTrafficVersionsBlock(["ippoan/x"], new Map([["ippoan/x", r]]));
+    expect(html).not.toContain("/api/release-wave/traffic-rollback");
+  });
+});
+
+describe("renderBackendRollbackBlock", () => {
+  function compat(backends: WaveCompatibility["backends"]): WaveCompatibility {
+    return { verified: true, checked: true, backends };
+  }
+
+  it("renders Rollback buttons for prior Cloud Run revisions (Refs #197)", () => {
+    const html = renderBackendRollbackBlock(
+      compat([
+        {
+          backend_repo: "ippoan/rust-alc-api",
+          current_image: "rust-alc-api-00042-abc",
+          current_tag: "v1.4.2",
+          deploy_history: [
+            { image: "rust-alc-api-00042-abc", tag: "v1.4.2", became_active_at: "2026-05-29T09:30:00Z" },
+            { image: "rust-alc-api-00041-xyz", tag: "v1.4.1", became_active_at: "2026-05-28T11:37:00Z" },
+          ],
+          matrix: [],
+        },
+      ]),
+    );
+    expect(html).toContain("Backend rollback (Cloud Run revision)");
+    expect(html).toContain("/api/release-wave/backend-rollback");
+    expect(html).toContain('name="image" value="rust-alc-api-00041-xyz"');
+    expect(html).toContain("Rollback to v1.4.1");
+    // 現 active (00042) への rollback ボタンは出さない。
+    expect(html).not.toContain('name="image" value="rust-alc-api-00042-abc"');
+  });
+
+  it("returns empty string when no backend has rollback candidates", () => {
+    const html = renderBackendRollbackBlock(
+      compat([
+        {
+          backend_repo: "ippoan/rust-alc-api",
+          current_image: "cur",
+          current_tag: null,
+          deploy_history: [{ image: "cur", tag: null, became_active_at: "t" }],
+          matrix: [],
+        },
+      ]),
+    );
+    expect(html).toBe("");
   });
 });
 

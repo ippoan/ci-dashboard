@@ -916,6 +916,26 @@ describe("handleReleaseWaveDetailPage compatibility section", () => {
     expect(html).toContain("<svg");
     expect(html).toContain("cur-img");
   });
+
+  it("shows the git tag on the backend node when the v2 record has current_tag (Refs #197)", async () => {
+    const env = fakeEnv({
+      getReturn: { ok: true, data: makeWave() },
+      compatKv: memKv({
+        "backend::ippoan/rust-alc-api": {
+          schema_version: 2,
+          repo: "ippoan/rust-alc-api",
+          current_image: "rust-alc-api-00042-abc",
+          current_tag: "v1.4.2",
+          deployed_at: "2026-05-29T00:00:00Z",
+          deployed_by: "release-wave-gcp",
+          wave_id: null,
+        },
+      }),
+    });
+    const html = await (await handleReleaseWaveDetailPage(env, "w1")).text();
+    // node line2 は "<tag> · @ <sha>" 形式 (tag を併記)。
+    expect(html).toContain("v1.4.2");
+  });
 });
 
 // ============================================================================
