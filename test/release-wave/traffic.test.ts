@@ -47,7 +47,7 @@ describe("traffic record", () => {
     expect(rec!.versions[0].version_id).toBe("full");
     expect(rec!.versions[1].version_id).toBe("zero");
     expect(rec!.reported_at).toBe("2026-05-29T00:00:00Z");
-    expect(rec!.schema_version).toBe(2);
+    expect(rec!.schema_version).toBe(3);
   });
 
   it("recordTraffic breaks percentage ties by created_on desc (newest 0% first)", async () => {
@@ -95,8 +95,36 @@ describe("traffic record", () => {
       now: "t2",
     });
     const rec = await getTraffic(kv, "ippoan/x");
-    expect(rec!.versions).toEqual([{ version_id: "b", percentage: 100 }]);
+    expect(rec!.versions).toEqual([
+      { version_id: "b", percentage: 100, created_on: null, tag: null },
+    ]);
     expect(rec!.reported_at).toBe("t2");
+  });
+
+  it("merges (accumulates) tags across reports per version_id", async () => {
+    const kv = memKv();
+    // 1 回目: full に tag v1.0.0 が付く。
+    await recordTraffic(kv, {
+      repo: "ippoan/x",
+      versions: [
+        { version_id: "full", percentage: 100, tag: "v1.0.0" },
+        { version_id: "zero", percentage: 0 },
+      ],
+      now: "t1",
+    });
+    // 2 回目: zero に tag v1.0.1。full は tag を送らない (= 既存 v1.0.0 を保持)。
+    await recordTraffic(kv, {
+      repo: "ippoan/x",
+      versions: [
+        { version_id: "full", percentage: 100 },
+        { version_id: "zero", percentage: 0, tag: "v1.0.1" },
+      ],
+      now: "t2",
+    });
+    const rec = await getTraffic(kv, "ippoan/x");
+    const byId = Object.fromEntries(rec!.versions.map((v) => [v.version_id, v.tag]));
+    expect(byId["full"]).toBe("v1.0.0"); // 過去 report の tag を保持
+    expect(byId["zero"]).toBe("v1.0.1"); // 新 report の tag
   });
 
   it("getTrafficForRepos returns only repos that have a record", async () => {

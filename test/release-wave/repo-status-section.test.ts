@@ -253,6 +253,24 @@ describe("renderTrafficVersionsBlock", () => {
     return { schema_version: 1, repo, versions, reported_at: "t" };
   }
 
+  it("shows the per-version git tag next to the version id", () => {
+    const map = new Map([
+      [
+        "ippoan/auth-worker",
+        rec("ippoan/auth-worker", [
+          { version_id: "deployed-id", percentage: 100, created_on: "2026-05-28T11:00:00Z", tag: "v0.2.42" },
+          { version_id: "uploaded-id", percentage: 0, created_on: "2026-05-29T08:00:00Z", tag: "v0.2.43" },
+        ]),
+      ],
+    ]);
+    const html = renderTrafficVersionsBlock(["ippoan/auth-worker"], map);
+    // 100% (deployed) と 0% (uploaded) で別 tag が出る。
+    expect(html).toContain("v0.2.42");
+    expect(html).toContain("v0.2.43");
+    expect(html).toContain("deployed-id");
+    expect(html).toContain("uploaded-id");
+  });
+
   it("shows 100% and 0% version ids (+ deploy/upload 日時) for a repo", () => {
     const map = new Map([
       [
@@ -326,7 +344,7 @@ describe("renderTrafficVersionsBlock", () => {
     expect(html).not.toContain("older-zero"); // active より古い 0% は隠す
   });
 
-  it("shows only the newest 0% as a row and folds the rest into a summary", () => {
+  it("shows only the newest 0% as a row and folds the rest into the % cell", () => {
     const map = new Map([
       [
         "ippoan/auth-worker",
@@ -343,8 +361,10 @@ describe("renderTrafficVersionsBlock", () => {
     expect(html).toContain("zero-newest");
     expect(html).not.toContain("zero-mid");
     expect(html).not.toContain("zero-old");
-    // 残りは件数サマリ。
-    expect(html).toContain("他 2 件 (no-traffic)");
+    // 残り件数は % セルに「(他N件)」併記 (別サマリ行ではない)。
+    expect(html).toContain("(他2件)");
+    // 0% (最新) が 100% (より古い active) より上に来る (日時降順)。
+    expect(html.indexOf("zero-newest")).toBeLessThan(html.indexOf("active-id"));
   });
 });
 
