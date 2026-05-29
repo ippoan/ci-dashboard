@@ -229,8 +229,10 @@ describe("handleReleaseWaveListPageWithRepoStatus", () => {
   }
 
   /** in-memory KV (allowlist / token lookups miss → discovery yields []). */
-  function memKv(): KVNamespace {
-    const store = new Map<string, string>();
+  function memKv(seed: Record<string, unknown> = {}): KVNamespace {
+    const store = new Map<string, string>(
+      Object.entries(seed).map(([k, v]) => [k, JSON.stringify(v)]),
+    );
     return {
       async get(key: string, type?: string) {
         const raw = store.get(key);
