@@ -4,8 +4,10 @@ import {
   handleStageReportWebhook,
   handleFlipReportWebhook,
   handlePendingReleaseWebhook,
+  handleTrafficReportWebhook,
 } from "../../src/release-wave/webhook";
 import { getPendingRelease } from "../../src/release-wave/pending-release";
+import { getTraffic } from "../../src/release-wave/traffic";
 import type { Env } from "../../src/index";
 import type { ReleaseWaveHub } from "../../src/release-wave/do";
 
@@ -633,6 +635,84 @@ describe("handlePendingReleaseWebhook", () => {
         url: PENDING_URL,
         secret: "wrong-secret",
         body: { repo: "ippoan/auth-worker", version_id: VALID_VID, tag: "v1.0.0" },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(401);
+  });
+});
+
+// ============================================================================
+// traffic-report webhook
+// ============================================================================
+
+const TRAFFIC_URL =
+  "https://ci-dashboard.ippoan.org/webhooks/release-wave/traffic-report";
+
+describe("handleTrafficReportWebhook", () => {
+  it("records traffic split sorted by percentage desc (ok=true)", async () => {
+    const kv = memKv();
+    const { env } = fakeEnv({ compatKv: kv });
+    const resp = await handleTrafficReportWebhook(
+      jsonRequest({
+        url: TRAFFIC_URL,
+        secret: "expected-secret",
+        body: {
+          repo: "ippoan/auth-worker",
+          versions: [
+            { version_id: "zero-id", percentage: 0 },
+            { version_id: "full-id", percentage: 100 },
+          ],
+        },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(200);
+    const rec = await getTraffic(kv, "ippoan/auth-worker");
+    expect(rec).not.toBeNull();
+    expect(rec!.versions[0]).toEqual({ version_id: "full-id", percentage: 100 });
+    expect(rec!.versions[1]).toEqual({ version_id: "zero-id", percentage: 0 });
+  });
+
+  it("rejects an empty versions array with 400", async () => {
+    const kv = memKv();
+    const { env } = fakeEnv({ compatKv: kv });
+    const resp = await handleTrafficReportWebhook(
+      jsonRequest({
+        url: TRAFFIC_URL,
+        secret: "expected-secret",
+        body: { repo: "ippoan/x", versions: [] },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(400);
+  });
+
+  it("rejects a percentage out of range with 400", async () => {
+    const kv = memKv();
+    const { env } = fakeEnv({ compatKv: kv });
+    const resp = await handleTrafficReportWebhook(
+      jsonRequest({
+        url: TRAFFIC_URL,
+        secret: "expected-secret",
+        body: { repo: "ippoan/x", versions: [{ version_id: "a", percentage: 150 }] },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(400);
+  });
+
+  it("rejects bad webhook secret with 401", async () => {
+    const kv = memKv();
+    const { env } = fakeEnv({ compatKv: kv });
+    const resp = await handleTrafficReportWebhook(
+      jsonRequest({
+        url: TRAFFIC_URL,
+        secret: "wrong-secret",
+        body: {
+          repo: "ippoan/auth-worker",
+          versions: [{ version_id: "a", percentage: 100 }],
+        },
       }),
       env,
     );

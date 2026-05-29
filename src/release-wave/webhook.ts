@@ -433,3 +433,54 @@ export async function handleBackendCurrentImageWebhook(
     deployed_at: record.deployed_at,
   });
 }
+
+// ----------------------------------------------------------------------------
+// /webhooks/release-wave/traffic-report  (Refs #137)
+// ----------------------------------------------------------------------------
+
+/**
+ * frontend CI が deploy 時に worker の version traffic split を報告する。
+ * `wrangler deployments list` 相当の「version_id → percentage」配列を受け取り、
+ * `traffic::<repo>` (COMPAT_KV) に upsert する。Compatibility グラフ下に
+ * 「100% がどの version / 0% (no-traffic) がどの version」を出すための入力。
+ *
+ * body:
+ *   {
+ *     "repo": "ippoan/auth-worker",
+ *     "versions": [
+ *       { "version_id": "530b908c-...", "percentage": 100 },
+ *       { "version_id": "1a2b3c4d-...", "percentage": 0 }
+ *     ]
+ *   }
+ */
+const trafficReportSchema = z.object({
+  repo: z.string().min(1),
+  versions: z
+    .array(
+      z.object({
+        version_id: z.string().min(1),
+        percentage: z.number().min(0).max(100),
+      }),
+    )
+    .min(1),
+});
+
+export async function handleTrafficReportWebhook(
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  const v = await validateAndAuth(request, env, trafficReportSchema);
+  if (!v.ok) return v.response;
+  if (!env.COMPAT_KV) {
+    return jsonResponse(500, {
+      code: "KV_NOT_CONFIGURED",
+      error: "COMPAT_KV is not bound",
+    });
+  }
+  const record = await recordTraffic(env.COMPAT_KV, {
+    repo: v.data.repo,
+    versions: v.data.versions,
+    now: new Date().toISOString(),
+  });
+  return jsonResponse(200, { ok: true, record });
+}
