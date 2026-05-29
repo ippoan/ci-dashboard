@@ -73,12 +73,24 @@ describe("renderRepoReleaseStatusSection", () => {
     expect(html).toContain("Tag Release");
   });
 
-  it("marks tagless repos and does not offer a button", () => {
+  it("filters out tagless repos entirely", () => {
     const html = renderRepoReleaseStatusSection([
       status({ repo: "ippoan/ci-dashboard", tagless: true }),
     ]);
-    expect(html).toContain("tagless");
+    expect(html).not.toContain("ippoan/ci-dashboard");
     expect(html).not.toContain('action="/api/release-wave/tag-release"');
+    // 全部 tagless なら一覧は空扱い
+    expect(html).toContain("リリース対象の repo はありません");
+  });
+
+  it("keeps non-tagless repos while dropping tagless ones in a mixed list", () => {
+    const html = renderRepoReleaseStatusSection([
+      status({ repo: "ippoan/keep", hasTag: false }),
+      status({ repo: "ippoan/drop", tagless: true }),
+    ]);
+    expect(html).toContain("ippoan/keep");
+    expect(html).not.toContain("ippoan/drop");
+    expect(html).toContain("未tag 1");
   });
 
   it("shows errored repo as 取得失敗 with no button", () => {
@@ -100,12 +112,21 @@ describe("renderRepoReleaseStatusSection", () => {
 
   it("handles empty repo list", () => {
     const html = renderRepoReleaseStatusSection([]);
-    expect(html).toContain("監視対象 repo がありません");
+    expect(html).toContain("リリース対象の repo はありません");
   });
 });
 
 describe("injectRepoStatusSection", () => {
-  it("inserts the section right after the h1", () => {
+  it("inserts the section below Compatibility (just before the Pending releases section)", () => {
+    const html =
+      '<div class="section"><h2>Compatibility (all consumers)</h2></div>' +
+      '<div class="section">\n      <h2>Pending releases (no-traffic)</h2></div>';
+    const out = injectRepoStatusSection(html, "<!--RS-->");
+    expect(out.indexOf("Compatibility")).toBeLessThan(out.indexOf("<!--RS-->"));
+    expect(out.indexOf("<!--RS-->")).toBeLessThan(out.indexOf("Pending releases"));
+  });
+
+  it("falls back to after the h1 when the Pending section is missing", () => {
     const out = injectRepoStatusSection(
       "<body><h1>Release Waves</h1><table></table></body>",
       "<div>SECTION</div>",
@@ -113,7 +134,7 @@ describe("injectRepoStatusSection", () => {
     expect(out).toContain("<h1>Release Waves</h1>\n    <div>SECTION</div>");
   });
 
-  it("falls back to before </body> when the h1 marker is missing", () => {
+  it("falls back to before </body> when no markers are present", () => {
     const out = injectRepoStatusSection("<body>hi</body>", "<div>SECTION</div>");
     expect(out).toContain("<div>SECTION</div>\n</body>");
   });
