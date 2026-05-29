@@ -8,10 +8,13 @@
  *                    (= まだ release されていない変更量)。-1 は取得失敗。
  *   - tagless      : TAGLESS_REPOS 指定の repo か (tag を打たない方針)
  *
- * repo 一覧の出所は /releases ページと同じ 3 ソース (Hub status / direct-push
- * allowlist / TAGLESS_REPOS)。tag / compare / repo-meta の GitHub 呼び出しは
- * release-cache の KV キャッシュ層を共用するので /releases と同じ rcache: entry を
- * 再利用する (二重 fetch にならない)。
+ * repo 一覧の出所は /releases と同じ 3 ソース (Hub status / direct-push
+ * allowlist / TAGLESS_REPOS) に加え、Compatibility (all consumers) グラフに出る
+ * repo (compat KV の backend + frontend) も含める。後者を足すのは、compat グラフ
+ * にしか出ない consumer frontend (例: nuxt-notify。ci-dashboard 宛の CI webhook を
+ * 出さず allowlist/tagless でもない) を取りこぼさないため。tag / compare /
+ * repo-meta の GitHub 呼び出しは release-cache の KV キャッシュ層を共用するので
+ * /releases と同じ rcache: entry を再利用する (二重 fetch にならない)。
  */
 
 import type { Env } from "../index";
@@ -20,6 +23,7 @@ import { cachedTags, cachedCompare, cachedRepoMeta } from "../release-cache";
 import { loadDirectPushAllowlist } from "../direct-push-allowlist";
 import { parseTaglessRepos } from "../tagless-repos";
 import { sortSemverDesc } from "../release-helpers";
+import { computeGlobalCompatibility } from "./compat";
 
 export interface RepoReleaseStatus {
   repo: string;
