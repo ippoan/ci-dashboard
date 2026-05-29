@@ -162,27 +162,47 @@ export function injectRepoStatusSection(html: string, section: string): string {
   return html.replace("</body>", `${section}\n</body>`);
 }
 
+/** 最新か (tag あり & main と差分なし)。最新なら release 不要なのでボタンを無効化。 */
+export function isUpToDate(s: RepoReleaseStatus): boolean {
+  return s.hasTag && s.behind === 0;
+}
+
 /**
  * Compatibility (all consumers) グラフに出ている repo (backend + frontend) の
  * Tag Release ボタン群を HTML で返す。tagless repo は除外。1 つも無ければ ""。
  *
  * グラフ内の repo をその場でリリースしたい、という要望 (ここにボタン欲しい) に
  * 応えるための block。グラフ直下に注入する (injectCompatTagReleaseButtons)。
+ *
+ * `statusByRepo` に該当があり「最新」(tag あり & main と差分なし) の repo は
+ * ボタンを `disabled` (inactive) にする (= release 不要)。status 不明の repo は
+ * active のまま。
  */
 export function renderCompatTagReleaseButtons(
   repos: Iterable<string>,
   tagless: Set<string>,
+  statusByRepo?: Map<string, RepoReleaseStatus>,
 ): string {
   const list = [...new Set(repos)].filter((r) => !tagless.has(r)).sort();
   if (list.length === 0) return "";
   const buttons = list
-    .map(
-      (r) => `
+    .map((r) => {
+      const st = statusByRepo?.get(r);
+      const upToDate = st ? isUpToDate(st) : false;
+      if (upToDate) {
+        const tag = st?.latestTag ? ` (${escapeHtml(st.latestTag)})` : "";
+        // 最新 = release 不要。submit させない素の disabled button。
+        return `
+        <span style="margin:0 6px 6px 0;display:inline-block">
+          <button type="button" disabled title="${escapeHtml(r)} は最新${tag} のため release 不要">Tag Release: ${escapeHtml(r)}</button>
+        </span>`;
+      }
+      return `
         <form method="post" action="/api/release-wave/tag-release" style="margin:0 6px 6px 0;display:inline-block">
           <input type="hidden" name="repo" value="${escapeHtml(r)}">
           <button type="submit" title="${escapeHtml(r)} の tag-release.yml workflow を main で dispatch する">Tag Release: ${escapeHtml(r)}</button>
-        </form>`,
-    )
+        </form>`;
+    })
     .join("");
   return `
     <div class="actions" style="margin-top:10px">
@@ -244,7 +264,10 @@ export async function handleReleaseWaveListPageWithRepoStatus(
         for (const m of b.matrix) repos.add(m.frontend);
       }
       const tagless = parseTaglessRepos(env.TAGLESS_REPOS);
-      const buttons = renderCompatTagReleaseButtons(repos, tagless);
+      // Repo リリース状況で算出済みの status を repo→status で引けるようにし、
+      // 「最新」repo のボタンを inactive にする。
+      const statusByRepo = new Map(statuses.map((s) => [s.repo, s]));
+      const buttons = renderCompatTagReleaseButtons(repos, tagless, statusByRepo);
       html = injectCompatTagReleaseButtons(html, buttons);
     } catch {
       // compat 取得失敗時はボタンだけ落とす

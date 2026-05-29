@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   needsRelease,
+  isUpToDate,
   renderRepoReleaseStatusSection,
   injectRepoStatusSection,
   renderCompatTagReleaseButtons,
@@ -179,6 +180,78 @@ describe("renderCompatTagReleaseButtons", () => {
     const html = renderCompatTagReleaseButtons(['a/<b>"&'], new Set());
     expect(html).not.toContain("<b>");
     expect(html).toContain("&lt;b&gt;");
+  });
+
+  it("disables (inactive) the button for an up-to-date repo", () => {
+    const statusByRepo = new Map([
+      [
+        "ippoan/rust-alc-api",
+        status({ repo: "ippoan/rust-alc-api", hasTag: true, latestTag: "v0.0.75", behind: 0 }),
+      ],
+    ]);
+    const html = renderCompatTagReleaseButtons(
+      ["ippoan/rust-alc-api"],
+      new Set(),
+      statusByRepo,
+    );
+    expect(html).toContain("Tag Release: ippoan/rust-alc-api");
+    expect(html).toContain("disabled");
+    // 最新なので submit form は作らない
+    expect(html).not.toContain('action="/api/release-wave/tag-release"');
+    expect(html).toContain("最新 (v0.0.75)");
+  });
+
+  it("keeps the button active for a behind repo", () => {
+    const statusByRepo = new Map([
+      [
+        "ippoan/auth-worker",
+        status({ repo: "ippoan/auth-worker", hasTag: true, latestTag: "v0.5.0", behind: 8 }),
+      ],
+    ]);
+    const html = renderCompatTagReleaseButtons(
+      ["ippoan/auth-worker"],
+      new Set(),
+      statusByRepo,
+    );
+    expect(html).not.toContain("disabled");
+    expect(html).toContain('action="/api/release-wave/tag-release"');
+    expect(html).toContain('name="repo" value="ippoan/auth-worker"');
+  });
+
+  it("keeps the button active for an untagged repo", () => {
+    const statusByRepo = new Map([
+      ["ippoan/new", status({ repo: "ippoan/new", hasTag: false })],
+    ]);
+    const html = renderCompatTagReleaseButtons(["ippoan/new"], new Set(), statusByRepo);
+    expect(html).not.toContain("disabled");
+    expect(html).toContain('action="/api/release-wave/tag-release"');
+  });
+
+  it("keeps the button active when status is unknown (repo not in map)", () => {
+    const html = renderCompatTagReleaseButtons(
+      ["ippoan/unknown"],
+      new Set(),
+      new Map(),
+    );
+    expect(html).not.toContain("disabled");
+    expect(html).toContain('action="/api/release-wave/tag-release"');
+  });
+
+  it("does not disable an errored repo (behind < 0)", () => {
+    const statusByRepo = new Map([
+      ["ippoan/err", status({ repo: "ippoan/err", hasTag: false, behind: -1 })],
+    ]);
+    const html = renderCompatTagReleaseButtons(["ippoan/err"], new Set(), statusByRepo);
+    expect(html).not.toContain("disabled");
+  });
+});
+
+describe("isUpToDate", () => {
+  it("true only when tagged and behind === 0", () => {
+    expect(isUpToDate(status({ hasTag: true, latestTag: "v1.0.0", behind: 0 }))).toBe(true);
+    expect(isUpToDate(status({ hasTag: true, latestTag: "v1.0.0", behind: 2 }))).toBe(false);
+    expect(isUpToDate(status({ hasTag: false, behind: 0 }))).toBe(false);
+    expect(isUpToDate(status({ hasTag: false, behind: -1 }))).toBe(false);
   });
 });
 
