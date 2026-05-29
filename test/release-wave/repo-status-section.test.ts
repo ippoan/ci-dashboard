@@ -262,17 +262,66 @@ describe("handleReleaseWaveListPageWithRepoStatus", () => {
     expect(html).not.toContain("Repo リリース状況");
   });
 
-  it("injects the repo status section when CI_STATUS is bound", async () => {
-    const env = { ...baseEnv(), CI_STATUS: memKv() } as unknown as Env;
+  it("injects the repo status section between Compatibility and Pending releases", async () => {
+    // backend:: record を 1 件入れて Compatibility (all consumers) section を
+    // 実際にレンダリングさせる (record が無いと俯瞰グラフ section の verdict 付き
+    // 見出しは出ない)。
+    const compatKv = memKv({
+      "backend::ippoan/rust-alc-api": {
+        schema_version: 1,
+        repo: "ippoan/rust-alc-api",
+        current_image: "sha-abc123",
+        deployed_at: "2026-05-29T00:00:00Z",
+        deployed_by: "ci",
+        wave_id: null,
+      },
+    });
+    const env = {
+      ...baseEnv(),
+      CI_STATUS: memKv(),
+      COMPAT_KV: compatKv,
+    } as unknown as Env;
     const res = await handleReleaseWaveListPageWithRepoStatus(env);
     const html = await res.text();
     expect(res.status).toBe(200);
-    expect(html).toContain("Repo リリース状況");
-    // no repos discoverable in the test env → empty-list copy
-    expect(html).toContain("監視対象 repo がありません");
-    // CSP header from the original page is preserved through injection.
+
+    const compatIdx = html.indexOf("Compatibility (all consumers)");
+    const repoIdx = html.indexOf("Repo リリース状況");
+    const pendingIdx = html.indexOf("Pending releases");
+    expect(compatIdx).toBeGreaterThanOrEqual(0);
+    expect(repoIdx).toBeGreaterThanOrEqual(0);
+    expect(pendingIdx).toBeGreaterThanOrEqual(0);
+    // Compatibility の下、Pending releases の上に置かれる。
+    expect(compatIdx).toBeLessThan(repoIdx);
+    expect(repoIdx).toBeLessThan(pendingIdx);
+    // discovery では repo が見つからないので空一覧コピー。
+    expect(html).toContain("リリース対象の repo はありません");
+
+    // CSP header は injection 後も維持される。
     expect(res.headers.get("Content-Security-Policy")).toContain(
       "default-src 'none'",
     );
+  });
+
+  it("adds a Tag Release button for repos in the compatibility graph", async () => {
+    const compatKv = memKv({
+      "backend::ippoan/rust-alc-api": {
+        schema_version: 1,
+        repo: "ippoan/rust-alc-api",
+        current_image: "sha-abc123",
+        deployed_at: "2026-05-29T00:00:00Z",
+        deployed_by: "ci",
+        wave_id: null,
+      },
+    });
+    const env = {
+      ...baseEnv(),
+      CI_STATUS: memKv(),
+      COMPAT_KV: compatKv,
+    } as unknown as Env;
+    const res = await handleReleaseWaveListPageWithRepoStatus(env);
+    const html = await res.text();
+    expect(html).toContain("Tag Release: ippoan/rust-alc-api");
+    expect(html).toContain('name="repo" value="ippoan/rust-alc-api"');
   });
 });
