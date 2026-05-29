@@ -727,6 +727,30 @@ describe("handleTrafficReportWebhook", () => {
     expect(rec!.versions[0].tag).toBe("v0.2.43");
   });
 
+  it("accepts explicit null created_on / tag (does not 400)", async () => {
+    const kv = memKv();
+    const { env } = fakeEnv({ compatKv: kv });
+    const resp = await handleTrafficReportWebhook(
+      jsonRequest({
+        url: TRAFFIC_URL,
+        secret: "expected-secret",
+        body: {
+          repo: "ippoan/x",
+          versions: [
+            { version_id: "a", percentage: 100, created_on: null, tag: null },
+            { version_id: "b", percentage: 0, created_on: "2026-05-29T00:00:00Z", tag: "v9.9.9" },
+          ],
+        },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(200);
+    const rec = await getTraffic(kv, "ippoan/x");
+    const byId = Object.fromEntries(rec!.versions.map((v) => [v.version_id, v.tag]));
+    expect(byId["a"]).toBeNull();
+    expect(byId["b"]).toBe("v9.9.9");
+  });
+
   it("rejects an empty versions array with 400", async () => {
     const kv = memKv();
     const { env } = fakeEnv({ compatKv: kv });
