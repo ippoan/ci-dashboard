@@ -24,6 +24,7 @@ import type { ReleaseWaveHub, RpcResult } from "./do";
 import type { WaveState } from "./types";
 import { recordFrontendTest, recordBackendDeploy, getBackendCurrent } from "./compat";
 import { recordPendingRelease } from "./pending-release";
+import { recordTraffic } from "./traffic";
 
 // ----------------------------------------------------------------------------
 // Common helpers

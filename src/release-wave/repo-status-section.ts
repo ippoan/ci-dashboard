@@ -24,6 +24,7 @@ import {
 } from "./repo-release-status";
 import { computeGlobalCompatibility } from "./compat";
 import { parseTaglessRepos } from "../tagless-repos";
+import { getTrafficForRepos, type TrafficRecord } from "./traffic";
 
 function escapeHtml(s: string): string {
   return s
@@ -211,6 +212,57 @@ export function renderCompatTagReleaseButtons(
     </div>`;
 }
 
+/** 短縮 version id 表示 (full は title に出す)。 */
+function shortId(id: string): string {
+  return id.length > 12 ? `${id.slice(0, 12)}…` : id;
+}
+
+/**
+ * Compatibility グラフに出ている repo の version traffic split を HTML で返す。
+ * frontend CI が報告した `traffic::<repo>` を読み、repo ごとに
+ * 「version_id → percentage」を percentage 降順で並べる。
+ *
+ * これで「100% がどの version / 0% (no-traffic) がどの version」が一目で分かる
+ * (要望: 0% の場合 100% はどの id か)。traffic 報告のある repo が 1 つも無ければ ""。
+ */
+export function renderTrafficVersionsBlock(
+  repos: Iterable<string>,
+  trafficByRepo: Map<string, TrafficRecord>,
+): string {
+  const list = [...new Set(repos)]
+    .filter((r) => trafficByRepo.has(r))
+    .sort();
+  if (list.length === 0) return "";
+
+  const rows = list
+    .map((repo) => {
+      const rec = trafficByRepo.get(repo)!;
+      const chips = rec.versions
+        .map((v) => {
+          // 100% = 緑 / 0% = 灰 / その他 (canary 等) = 黄。
+          const color = v.percentage >= 100 ? GREEN : v.percentage <= 0 ? GRAY : AMBER;
+          return `<span class="badge" style="background:${color};margin-right:6px"
+            title="${escapeHtml(repo)} version ${escapeHtml(v.version_id)} = ${v.percentage}%">${v.percentage}% ${escapeHtml(shortId(v.version_id))}</span>`;
+        })
+        .join("");
+      return `
+        <tr>
+          <td>${escapeHtml(repo)}</td>
+          <td>${chips}</td>
+        </tr>`;
+    })
+    .join("");
+
+  return `
+    <div style="margin-top:10px">
+      <strong class="meta">Traffic (version split)</strong>
+      <table style="margin-top:6px">
+        <thead><tr><th>Repo</th><th>Versions (100% / 0% …)</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
 /**
  * Compatibility グラフ直下 (= "Staged previews (active waves)" block の直前) に
  * Tag Release ボタン block を注入する。アンカー (グラフの overlay) が無い
@@ -268,7 +320,13 @@ export async function handleReleaseWaveListPageWithRepoStatus(
       // 「最新」repo のボタンを inactive にする。
       const statusByRepo = new Map(statuses.map((s) => [s.repo, s]));
       const buttons = renderCompatTagReleaseButtons(repos, tagless, statusByRepo);
-      html = injectCompatTagReleaseButtons(html, buttons);
+
+      // version traffic split (frontend CI が報告) をグラフ下に出す。
+      const trafficByRepo = await getTrafficForRepos(env.COMPAT_KV, repos);
+      const trafficBlock = renderTrafficVersionsBlock(repos, trafficByRepo);
+
+      // traffic を上、Tag Release ボタンを下にして 1 回で注入する。
+      html = injectCompatTagReleaseButtons(html, trafficBlock + buttons);
     } catch {
       // compat 取得失敗時はボタンだけ落とす
     }

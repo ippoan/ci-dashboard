@@ -27,6 +27,7 @@ import {
   handleBackendDeployReportWebhook,
   handleBackendCurrentImageWebhook,
   handlePendingReleaseWebhook,
+  handleTrafficReportWebhook,
 } from "./release-wave/webhook";
 import {
   handleCompatibility,
@@ -237,6 +238,11 @@ app.post("/webhooks/release-wave/backend-deploy-report", (c) =>
 // version_id / tag / preview_url を報告する (Refs #181 / #174)。
 app.post("/webhooks/release-wave/pending-release", (c) =>
   handlePendingReleaseWebhook(c.req.raw, c.env),
+);
+// frontend CI が deploy 時に worker の version traffic split (version_id →
+// percentage) を報告する。Compatibility グラフ下に 100%/0% version を出す用。
+app.post("/webhooks/release-wave/traffic-report", (c) =>
+  handleTrafficReportWebhook(c.req.raw, c.env),
 );
 // 認証付き read (CF Access が bypass する /webhooks/* 配下)。frontend CI が
 // 現 prod backend image を解決する用 — CF Access 下の /backend-current-image は
