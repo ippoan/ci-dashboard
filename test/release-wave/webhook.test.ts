@@ -650,7 +650,7 @@ const TRAFFIC_URL =
   "https://ci-dashboard.ippoan.org/webhooks/release-wave/traffic-report";
 
 describe("handleTrafficReportWebhook", () => {
-  it("records traffic split sorted by percentage desc (ok=true)", async () => {
+  it("records traffic split sorted by percentage desc (ok=true), carrying created_on", async () => {
     const kv = memKv();
     const { env } = fakeEnv({ compatKv: kv });
     const resp = await handleTrafficReportWebhook(
@@ -660,8 +660,8 @@ describe("handleTrafficReportWebhook", () => {
         body: {
           repo: "ippoan/auth-worker",
           versions: [
-            { version_id: "zero-id", percentage: 0 },
-            { version_id: "full-id", percentage: 100 },
+            { version_id: "zero-id", percentage: 0, created_on: "2026-05-29T07:00:00Z" },
+            { version_id: "full-id", percentage: 100, created_on: "2026-05-28T11:00:00Z" },
           ],
         },
       }),
@@ -670,8 +670,39 @@ describe("handleTrafficReportWebhook", () => {
     expect(resp.status).toBe(200);
     const rec = await getTraffic(kv, "ippoan/auth-worker");
     expect(rec).not.toBeNull();
-    expect(rec!.versions[0]).toEqual({ version_id: "full-id", percentage: 100 });
-    expect(rec!.versions[1]).toEqual({ version_id: "zero-id", percentage: 0 });
+    expect(rec!.versions[0]).toEqual({
+      version_id: "full-id",
+      percentage: 100,
+      created_on: "2026-05-28T11:00:00Z",
+    });
+    expect(rec!.versions[1]).toEqual({
+      version_id: "zero-id",
+      percentage: 0,
+      created_on: "2026-05-29T07:00:00Z",
+    });
+  });
+
+  it("defaults created_on to null when omitted", async () => {
+    const kv = memKv();
+    const { env } = fakeEnv({ compatKv: kv });
+    const resp = await handleTrafficReportWebhook(
+      jsonRequest({
+        url: TRAFFIC_URL,
+        secret: "expected-secret",
+        body: {
+          repo: "ippoan/x",
+          versions: [{ version_id: "v", percentage: 100 }],
+        },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(200);
+    const rec = await getTraffic(kv, "ippoan/x");
+    expect(rec!.versions[0]).toEqual({
+      version_id: "v",
+      percentage: 100,
+      created_on: null,
+    });
   });
 
   it("rejects an empty versions array with 400", async () => {

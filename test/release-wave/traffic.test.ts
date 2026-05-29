@@ -44,9 +44,31 @@ describe("traffic record", () => {
     });
     const rec = await getTraffic(kv, "ippoan/auth-worker");
     expect(rec).not.toBeNull();
-    expect(rec!.versions[0]).toEqual({ version_id: "full", percentage: 100 });
-    expect(rec!.versions[1]).toEqual({ version_id: "zero", percentage: 0 });
+    expect(rec!.versions[0].version_id).toBe("full");
+    expect(rec!.versions[1].version_id).toBe("zero");
     expect(rec!.reported_at).toBe("2026-05-29T00:00:00Z");
+    expect(rec!.schema_version).toBe(2);
+  });
+
+  it("recordTraffic breaks percentage ties by created_on desc (newest 0% first)", async () => {
+    const kv = memKv();
+    await recordTraffic(kv, {
+      repo: "ippoan/auth-worker",
+      versions: [
+        { version_id: "full", percentage: 100, created_on: "2026-05-20T00:00:00Z" },
+        { version_id: "zero-old", percentage: 0, created_on: "2026-05-28T00:00:00Z" },
+        { version_id: "zero-new", percentage: 0, created_on: "2026-05-29T00:00:00Z" },
+        { version_id: "zero-nodate", percentage: 0 },
+      ],
+      now: "t",
+    });
+    const rec = await getTraffic(kv, "ippoan/auth-worker");
+    expect(rec!.versions.map((v) => v.version_id)).toEqual([
+      "full", // 100% が先頭
+      "zero-new", // 0% は created_on 降順
+      "zero-old",
+      "zero-nodate", // created_on 無しは末尾
+    ]);
   });
 
   it("getTraffic returns null for a missing repo", async () => {

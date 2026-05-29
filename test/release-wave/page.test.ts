@@ -269,6 +269,49 @@ describe("handleReleaseWaveListPage", () => {
     const formChunk = html.slice(formIdx, formIdx + 300);
     expect(formChunk).not.toContain('name="force"');
   });
+
+  it("shows version traffic (100% / 0%) in the compat graph frontend node hover", async () => {
+    const env = fakeEnv({
+      listReturn: [],
+      compatKv: memKv({
+        "backend::ippoan/rust-alc-api": {
+          schema_version: 1,
+          repo: "ippoan/rust-alc-api",
+          current_image: "cur-img",
+          deployed_at: "2026-05-27T00:00:00Z",
+          deployed_by: "x",
+          wave_id: null,
+        },
+        "frontend::ippoan/auth-worker": {
+          schema_version: 1,
+          repo: "ippoan/auth-worker",
+          prod_version: "v0.2.42",
+          prod_deployed_at: "2026-05-29T00:00:00Z",
+          tested_against: [
+            {
+              backend_repo: "ippoan/rust-alc-api",
+              backend_image: "cur-img",
+              tested_at: "2026-05-29T00:00:00Z",
+            },
+          ],
+        },
+        "traffic::ippoan/auth-worker": {
+          schema_version: 2,
+          repo: "ippoan/auth-worker",
+          versions: [
+            { version_id: "6403c1dc-full", percentage: 100, created_on: "2026-05-28T11:00:00Z" },
+            { version_id: "ac6841e4-zero", percentage: 0, created_on: "2026-05-29T07:00:00Z" },
+          ],
+          reported_at: "2026-05-29T07:02:00Z",
+        },
+      }),
+    });
+    const html = await (await handleReleaseWaveListPage(env)).text();
+    // SVG node の <title> (hover) に traffic 行が出る。
+    expect(html).toContain("traffic:");
+    expect(html).toContain("100% 6403c1dc-full");
+    expect(html).toContain("0% ac6841e4-zero");
+  });
 });
 
 // ============================================================================

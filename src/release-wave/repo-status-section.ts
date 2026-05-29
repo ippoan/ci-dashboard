@@ -217,13 +217,23 @@ function shortId(id: string): string {
   return id.length > 12 ? `${id.slice(0, 12)}…` : id;
 }
 
+/** ISO 日時を "MM-DD HH:mm" (UTC) に短縮。null は "—"。 */
+function shortWhen(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`;
+}
+
 /**
  * Compatibility グラフに出ている repo の version traffic split を HTML で返す。
- * frontend CI が報告した `traffic::<repo>` を読み、repo ごとに
- * 「version_id → percentage」を percentage 降順で並べる。
+ * frontend CI が報告した `traffic::<repo>` を読み、repo ごとに各 version を
+ * 「percentage / version_id / deploy(100%)・upload(0%) 日時」で 1 行ずつ並べる。
  *
- * これで「100% がどの version / 0% (no-traffic) がどの version」が一目で分かる
- * (要望: 0% の場合 100% はどの id か)。traffic 報告のある repo が 1 つも無ければ ""。
+ * これで「100% (active) がどの version / 0% (promote 待ち) がどの version で、
+ * それぞれいつ deploy/upload されたか」が一目で分かる。
+ * traffic 報告のある repo が 1 つも無ければ ""。
  */
 export function renderTrafficVersionsBlock(
   repos: Iterable<string>,
@@ -234,22 +244,28 @@ export function renderTrafficVersionsBlock(
     .sort();
   if (list.length === 0) return "";
 
+  // 各 repo の各 version を 1 行ずつ (repo 名は最初の version 行にだけ出す)。
   const rows = list
     .map((repo) => {
       const rec = trafficByRepo.get(repo)!;
-      const chips = rec.versions
-        .map((v) => {
+      return rec.versions
+        .map((v, i) => {
           // 100% = 緑 / 0% = 灰 / その他 (canary 等) = 黄。
-          const color = v.percentage >= 100 ? GREEN : v.percentage <= 0 ? GRAY : AMBER;
-          return `<span class="badge" style="background:${color};margin-right:6px"
-            title="${escapeHtml(repo)} version ${escapeHtml(v.version_id)} = ${v.percentage}%">${v.percentage}% ${escapeHtml(shortId(v.version_id))}</span>`;
+          const color =
+            v.percentage >= 100 ? GREEN : v.percentage <= 0 ? GRAY : AMBER;
+          const pctBadge = `<span class="badge" style="background:${color}">${v.percentage}%</span>`;
+          const vid = `<code title="${escapeHtml(v.version_id)}">${escapeHtml(shortId(v.version_id))}</code>`;
+          const when = `<span class="meta" title="${escapeHtml(v.created_on ?? "")}">${escapeHtml(shortWhen(v.created_on))}</span>`;
+          const repoCell = i === 0 ? escapeHtml(repo) : "";
+          return `
+            <tr>
+              <td>${repoCell}</td>
+              <td>${pctBadge}</td>
+              <td>${vid}</td>
+              <td>${when}</td>
+            </tr>`;
         })
         .join("");
-      return `
-        <tr>
-          <td>${escapeHtml(repo)}</td>
-          <td>${chips}</td>
-        </tr>`;
     })
     .join("");
 
@@ -257,7 +273,7 @@ export function renderTrafficVersionsBlock(
     <div style="margin-top:10px">
       <strong class="meta">Traffic (version split)</strong>
       <table style="margin-top:6px">
-        <thead><tr><th>Repo</th><th>Versions (100% / 0% …)</th></tr></thead>
+        <thead><tr><th>Repo</th><th>%</th><th>Version</th><th>Deployed / Uploaded (UTC)</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </div>`;
