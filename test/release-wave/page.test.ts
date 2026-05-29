@@ -301,6 +301,8 @@ describe("handleReleaseWaveListPage", () => {
           versions: [
             { version_id: "6403c1dc-full", percentage: 100, created_on: "2026-05-28T11:00:00Z", tag: "v0.2.42" },
             { version_id: "ac6841e4-zero", percentage: 0, created_on: "2026-05-29T07:00:00Z", tag: "v0.2.49" },
+            // deployed(05-28 11:00) より古い 0% → promote 候補ではないので数えない。
+            { version_id: "old0-zero", percentage: 0, created_on: "2026-05-20T00:00:00Z" },
           ],
           reported_at: "2026-05-29T07:02:00Z",
         },

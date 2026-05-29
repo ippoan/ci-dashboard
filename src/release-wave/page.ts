@@ -1038,11 +1038,19 @@ function renderCompatibilitySvg(
           deployed && latest && deployed.version_id !== latest.version_id
             ? `deploy ${dep} · new ${lat}`
             : `deploy ${dep}`;
-        // line3: traffic %。100% version と 0% の件数を簡潔に。
+        // line3: traffic %。100% version と「promote 待ち」の 0% 件数。
+        // deployed(active) より古い 0% は用済みの過去履歴なので数えない
+        // (テーブル renderRepoReleaseStatusSection と同じ絞り込み)。
         const pos = tv.filter((v) => v.percentage > 0);
-        const zero = tv.length - pos.length;
+        const depWhen = deployed?.created_on ?? null;
+        const zeroPending = tv.filter(
+          (v) =>
+            v.percentage <= 0 &&
+            (!depWhen || (v.created_on != null && v.created_on > depWhen)),
+        ).length;
         const posPart = pos.map((v) => `${v.percentage}%`).join("/") || "—";
-        line3 = zero > 0 ? `traffic ${posPart} · 0%×${zero}` : `traffic ${posPart}`;
+        line3 =
+          zeroPending > 0 ? `traffic ${posPart} · 0%×${zeroPending}` : `traffic ${posPart}`;
       } else {
         line2 = testedImg ? `${ver} · vs @${shortSha(testedImg)}` : `prod ${ver}`;
       }
