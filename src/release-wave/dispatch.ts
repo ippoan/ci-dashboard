@@ -28,7 +28,11 @@ export type DispatchEventType =
   | "release-wave-stage"
   | "release-wave-flip"
   | "release-wave-rollback"
-  | "release-wave-retest";
+  | "release-wave-retest"
+  // 単独 rollback (wave 非依存)。/release-wave の Traffic / Compatibility UI から
+  // 任意の過去 version / revision に即 100% で戻す。Refs #196 / #197。
+  | "release-wave-traffic-rollback"
+  | "release-wave-backend-rollback";
 
 export interface Dispatch {
   /** "owner/name" 形式 */

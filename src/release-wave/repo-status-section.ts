@@ -22,7 +22,7 @@ import {
   getRepoReleaseStatuses,
   type RepoReleaseStatus,
 } from "./repo-release-status";
-import { computeGlobalCompatibility } from "./compat";
+import { computeGlobalCompatibility, type WaveCompatibility } from "./compat";
 import { parseTaglessRepos } from "../tagless-repos";
 import {
   getTrafficForRepos,
@@ -312,7 +312,7 @@ export function renderTrafficVersionsBlock(
         return ca < cb ? 1 : -1;
       });
 
-      return shown
+      const versionRows = shown
         .map((v, i) =>
           versionRow(
             repo,
@@ -323,6 +323,8 @@ export function renderTrafficVersionsBlock(
           ),
         )
         .join("");
+      // 直前以前の active version への rollback ボタン行を続ける。
+      return versionRows + renderTrafficRollbackRow(repo, rec);
     })
     .join("");
 
@@ -331,6 +333,102 @@ export function renderTrafficVersionsBlock(
       <strong class="meta">Traffic (version split)</strong>
       <table style="margin-top:6px">
         <thead><tr><th>Repo</th><th>%</th><th>Tag / Version</th><th>Deployed / Uploaded (UTC)</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
+/**
+ * 1 repo の Traffic 行に続けて、過去に active だった version への rollback ボタン
+ * 行を返す (Refs #196)。`deploy_history` から「現 active 以外」を rollback 先候補
+ * とし、各候補に `Rollback to <tag/id>` ボタンを出す。候補が無ければ ""。
+ *
+ * 現 active は traffic の最大 percentage version。deploy_history[0] が現 active と
+ * 一致する想定だが、念のため active version_id を除いて候補を作る。
+ */
+function renderTrafficRollbackRow(repo: string, rec: TrafficRecord): string {
+  const history = rec.deploy_history ?? [];
+  if (history.length === 0) return "";
+  const activeId = rec.versions.find((v) => v.percentage > 0)?.version_id ?? null;
+  const candidates = history.filter((e) => e.version_id !== activeId);
+  if (candidates.length === 0) return "";
+
+  const buttons = candidates
+    .map((e) => {
+      const label = e.tag ? escapeHtml(e.tag) : escapeHtml(shortId(e.version_id));
+      const when = escapeHtml(shortWhen(e.became_active_at));
+      return `
+            <form method="post" action="/api/release-wave/traffic-rollback" style="margin:0 6px 4px 0;display:inline-block">
+              <input type="hidden" name="repo" value="${escapeHtml(repo)}">
+              <input type="hidden" name="version_id" value="${escapeHtml(e.version_id)}">
+              <button type="submit" class="danger"
+                title="${escapeHtml(repo)} を ${escapeHtml(e.version_id)} に即 100% で戻す (wrangler versions deploy ${escapeHtml(e.version_id)}@100%)">
+                Rollback to ${label} <span class="meta">(${when})</span>
+              </button>
+            </form>`;
+    })
+    .join("");
+
+  return `
+            <tr>
+              <td></td>
+              <td colspan="3">
+                <span class="meta">Rollback to (過去の deployed version):</span>
+                <div style="margin-top:4px">${buttons}</div>
+              </td>
+            </tr>`;
+}
+
+/**
+ * Compatibility グラフに出ている backend repo の Cloud Run revision rollback
+ * ボタンを HTML で返す (Refs #197)。`backend::<repo>.deploy_history` から
+ * 「現 active 以外」の過去 revision を rollback 先候補とし、各候補に
+ * `Rollback to <tag/revision>` ボタンを出す。候補がある repo が無ければ ""。
+ *
+ * frontend の Traffic rollback と方針を揃える: 任意の過去 revision を選択 / 即 100%。
+ */
+export function renderBackendRollbackBlock(compat: WaveCompatibility): string {
+  const rows = compat.backends
+    .map((b) => {
+      const history = b.deploy_history ?? [];
+      if (history.length === 0) return "";
+      const candidates = history.filter((e) => e.image !== b.current_image);
+      if (candidates.length === 0) return "";
+
+      const buttons = candidates
+        .map((e) => {
+          const label = e.tag ? escapeHtml(e.tag) : escapeHtml(shortId(e.image));
+          const when = escapeHtml(shortWhen(e.became_active_at));
+          return `
+            <form method="post" action="/api/release-wave/backend-rollback" style="margin:0 6px 4px 0;display:inline-block">
+              <input type="hidden" name="repo" value="${escapeHtml(b.backend_repo)}">
+              <input type="hidden" name="image" value="${escapeHtml(e.image)}">
+              <button type="submit" class="danger"
+                title="${escapeHtml(b.backend_repo)} の Cloud Run traffic を ${escapeHtml(e.image)} に即 100% で戻す">
+                Rollback to ${label} <span class="meta">(${when})</span>
+              </button>
+            </form>`;
+        })
+        .join("");
+
+      const curTag = b.current_tag ? `${escapeHtml(b.current_tag)} · ` : "";
+      return `
+        <tr>
+          <td>${escapeHtml(b.backend_repo)}</td>
+          <td class="meta" title="${escapeHtml(b.current_image ?? "—")}">${curTag}${escapeHtml(shortId(b.current_image ?? "—"))}</td>
+          <td><div>${buttons}</div></td>
+        </tr>`;
+    })
+    .filter((r) => r !== "")
+    .join("");
+
+  if (rows === "") return "";
+
+  return `
+    <div style="margin-top:10px">
+      <strong class="meta">Backend rollback (Cloud Run revision)</strong>
+      <table style="margin-top:6px">
+        <thead><tr><th>Backend repo</th><th>Current</th><th>Rollback to (過去 revision)</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </div>`;
@@ -398,8 +496,14 @@ export async function handleReleaseWaveListPageWithRepoStatus(
       const trafficByRepo = await getTrafficForRepos(env.COMPAT_KV, repos);
       const trafficBlock = renderTrafficVersionsBlock(repos, trafficByRepo);
 
-      // traffic を上、Tag Release ボタンを下にして 1 回で注入する。
-      html = injectCompatTagReleaseButtons(html, trafficBlock + buttons);
+      // backend (Cloud Run) revision の rollback ボタンをグラフ下に出す (Refs #197)。
+      const backendRollbackBlock = renderBackendRollbackBlock(compat);
+
+      // traffic → backend rollback → Tag Release ボタンの順で 1 回で注入する。
+      html = injectCompatTagReleaseButtons(
+        html,
+        trafficBlock + backendRollbackBlock + buttons,
+      );
     } catch {
       // compat 取得失敗時はボタンだけ落とす
     }

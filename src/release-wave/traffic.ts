@@ -17,8 +17,14 @@ const TRAFFIC_PREFIX = "traffic::";
 //   v3: + tag (upload 時点の git release tag)。tag は deploy CI ごとに「その回
 //       upload した version」分しか報告されないため、recordTraffic で version_id
 //       単位に **merge 蓄積** する (過去 version の tag を保持)。
-// reader は v1/v2/v3 全部許容する (後方互換)。
-const SCHEMA_VERSION = 3 as const;
+//   v4: + deploy_history (過去に 100% deployed だった version の遷移履歴、
+//       新しい順、上限 DEPLOY_HISTORY_MAX 件)。/release-wave から rollback 先
+//       候補を辿るために蓄積する。Refs ippoan/ci-dashboard#196。
+// reader は v1〜v4 全部許容する (後方互換)。
+const SCHEMA_VERSION = 4 as const;
+
+/** `deploy_history` の保持件数上限 (新しい順に trim)。 */
+export const DEPLOY_HISTORY_MAX = 20;
 
 /** version 1 件の traffic 配分。 */
 export interface TrafficVersion {
@@ -40,6 +46,19 @@ export interface TrafficVersion {
   tag?: string | null;
 }
 
+/**
+ * 過去に active (100% deployed) だった version 1 件分の履歴 entry。
+ * rollback 先候補として `deploy_history[]` に新しい順で積む。Refs #196。
+ */
+export interface DeployHistoryEntry {
+  /** active になった version の wrangler version id。 */
+  version_id: string;
+  /** その version の git release tag (不明なら null)。 */
+  tag: string | null;
+  /** active (100%) になったと検知した UTC ISO (created_on 優先、無ければ報告時刻)。 */
+  became_active_at: string;
+}
+
 /** `traffic::<repo>` value。repo ごとに最新の deployment 配分のみ保持 (upsert)。 */
 export interface TrafficRecord {
   schema_version: number;
@@ -50,6 +69,12 @@ export interface TrafficRecord {
    * 100% (active) と 0% (no-traffic / promote 待ち) が混在する。
    */
   versions: TrafficVersion[];
+  /**
+   * 過去に active だった version の遷移履歴 (新しい順、上限 DEPLOY_HISTORY_MAX)。
+   * index 0 = 現在 active、index 1 = 直前の active (= rollback 先候補)。
+   * v3 以前の record では undefined。Refs #196。
+   */
+  deploy_history?: DeployHistoryEntry[];
   /** 報告を受けた UTC ISO。 */
   reported_at: string;
 }
@@ -104,10 +129,22 @@ export async function recordTraffic(
     if (!cb) return -1;
     return ca < cb ? 1 : -1;
   });
+
+  // deploy_history を更新する。sort 済み merged の先頭で percentage>0 の version を
+  // 「現 active」とみなし、前回履歴の先頭 (= 直前の active) と version_id が異なれば
+  // 新しい active として履歴の先頭に積む。canary 等で active が確定しない (全て 0%)
+  // 場合や、active が前回と同じ場合は履歴を変えない (重複を積まない)。
+  const deploy_history = nextDeployHistory(
+    prev?.deploy_history,
+    merged,
+    input.now,
+  );
+
   const record: TrafficRecord = {
     schema_version: SCHEMA_VERSION,
     repo: input.repo,
     versions: merged,
+    ...(deploy_history.length > 0 ? { deploy_history } : {}),
     reported_at: input.now,
   };
   await kv.put(trafficKey(input.repo), JSON.stringify(record));
@@ -115,15 +152,47 @@ export async function recordTraffic(
 }
 
 /**
+ * 新しい traffic 配分から deploy_history を導出する純粋関数。
+ *
+ * - 「現 active」= sort 済み versions の先頭で percentage>0 のもの (= 最大 traffic)。
+ *   全て 0% なら active 無しとして履歴据え置き。
+ * - 既存履歴の先頭 version_id と一致すれば据え置き (= 同じ version が active のまま)。
+ * - 異なれば新 active を先頭に積む。became_active_at は active version の created_on
+ *   を優先、無ければ報告時刻 now。
+ * - 上限 DEPLOY_HISTORY_MAX 件で trim。同 version_id が既に履歴下方にある場合は
+ *   それを除去して先頭に積み直す (再 promote で履歴が重複しないように)。
+ */
+export function nextDeployHistory(
+  prevHistory: DeployHistoryEntry[] | undefined,
+  versions: TrafficVersion[],
+  now: string,
+): DeployHistoryEntry[] {
+  const prior = Array.isArray(prevHistory) ? prevHistory : [];
+  const active = versions.find((v) => v.percentage > 0);
+  if (!active) return prior.slice(0, DEPLOY_HISTORY_MAX);
+  if (prior[0]?.version_id === active.version_id) {
+    return prior.slice(0, DEPLOY_HISTORY_MAX);
+  }
+  const entry: DeployHistoryEntry = {
+    version_id: active.version_id,
+    tag: active.tag ?? null,
+    became_active_at: active.created_on ?? now,
+  };
+  const rest = prior.filter((e) => e.version_id !== active.version_id);
+  return [entry, ...rest].slice(0, DEPLOY_HISTORY_MAX);
+}
+
+/**
  * 単一 repo の traffic を取得 (無ければ null)。
- * v1 / v2 / v3 の record を許容する (v1 は created_on 無し、v1/v2 は tag 無し)。
+ * v1〜v4 の record を許容する (v1 は created_on 無し、v1/v2 は tag 無し、
+ * v3 以前は deploy_history 無し)。
  */
 export async function getTraffic(
   kv: KVNamespace,
   repo: string,
 ): Promise<TrafficRecord | null> {
   const v = await kv.get<TrafficRecord>(trafficKey(repo), "json");
-  if (!v || v.schema_version < 1 || v.schema_version > 3) return null;
+  if (!v || v.schema_version < 1 || v.schema_version > 4) return null;
   return v;
 }
 

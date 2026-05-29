@@ -101,11 +101,14 @@ context value)。lower-case / hyphen は GitHub 側の正規化に従う。
 
 ```jsonc
 {
-  "schema_version": 1,
+  // v1: current_image のみ / v2: + current_tag + deploy_history (Refs #197)
+  "schema_version": 2,
   "repo": "ippoan/rust-alc-api",
 
   // 現在 production traffic を受けている backend image identifier
   "current_image": "rust-alc-api-00042-abc",
+  // current_image に対応する git release tag (v2+、不明なら null)
+  "current_tag": "v1.4.2",
   "deployed_at": "2026-05-27T01:00:00Z",
 
   // 直近 deploy を行った主体 (= wave 経由 / 単独 deploy の区別が後で必要なら
@@ -113,13 +116,22 @@ context value)。lower-case / hyphen は GitHub 側の正規化に従う。
   "deployed_by": "release-wave-gcp",
 
   // 直近 deploy が wave 経由なら wave_id、単独 deploy なら null
-  "wave_id": "wave_2026_05_27_01"
+  "wave_id": "wave_2026_05_27_01",
+
+  // 過去 revision の遷移履歴 (新しい順、上限 20 件)。/release-wave からの
+  // backend rollback の戻し先候補。index 0 = 現 active、index 1 = 直前の active。
+  // v1 record では undefined。Refs #197。
+  "deploy_history": [
+    { "image": "rust-alc-api-00042-abc", "tag": "v1.4.2", "became_active_at": "2026-05-27T01:00:00Z" },
+    { "image": "rust-alc-api-00041-xyz", "tag": "v1.4.1", "became_active_at": "2026-05-26T10:00:00Z" }
+  ]
 }
 ```
 
-- 履歴は持たず **最新のみ**。deploy 完了 callback で upsert (= 上書き)
-- past history が必要な場面は wave events (= ci-dashboard 内に既にある audit log)
-  で代用、KV 側を audit log 化しない
+- `current_image` / `current_tag` は **最新のみ**。deploy 完了 callback で upsert (= 上書き)
+- `deploy_history` のみ append 蓄積 (= rollback 先候補を辿るため)。`current_image`
+  が前回と変わった時だけ先頭に積み、同 image の再報告では積まない。上限 20 件で trim
+- reader (`getBackendCurrent`) は v1/v2 双方を許容 (v1 は current_tag / deploy_history 無し)
 - `current_image` の identifier 形式は platform 別:
   - **Cloud Run**: revision name (`rust-alc-api-00042-abc`)
   - **Cloudflare Workers**: version id (uuid)
@@ -223,12 +235,16 @@ release-wave-gcp / 各 backend deploy workflow が deploy 成功時に打つ。
 {
   "repo": "ippoan/rust-alc-api",
   "current_image": "rust-alc-api-00042-abc",
+  "current_tag": "v1.4.2",
   "deployed_by": "release-wave-gcp",
   "wave_id": "wave_2026_05_27_01"
 }
 ```
 
 - ci-dashboard 側で `backend::<repo>` を upsert
+- `current_tag` は image に対応する git release tag (省略 / null 可、Refs #197)。
+  deploy workflow が `github.ref_name` を載せる。`current_image` が変わった時だけ
+  `deploy_history` に積まれる
 - `wave_id` は wave 経由でなければ omit (server 側で `null` 格納)
 
 ### `GET /backend-current-image?repo=ippoan/rust-alc-api`

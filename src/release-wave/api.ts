@@ -12,9 +12,11 @@
 import type { Env } from "../index";
 import type { ReleaseWaveHub, RpcResult } from "./do";
 import type { WaveState } from "./types";
-import { computeWaveCompatibility } from "./compat";
+import { computeWaveCompatibility, getBackendCurrent } from "./compat";
 import { decideRetestDispatches, dispatchAll, type Dispatch } from "./dispatch";
 import { getPendingRelease, clearPendingRelease } from "./pending-release";
+import { getTraffic } from "./traffic";
+import { serviceNameFromRevision } from "./revision";
 
 function hubStub(env: Env): DurableObjectStub<ReleaseWaveHub> {
   const id = env.RELEASE_WAVE_HUB.idFromName("singleton");
@@ -293,6 +295,188 @@ export async function handleReleaseWavePendingReleaseFlip(
     return jsonResponse(502, {
       code: "DISPATCH_FAILED",
       error: `failed to dispatch flip for ${repo}: ${err}`,
+    });
+  }
+  return redirectToList();
+}
+
+// ----------------------------------------------------------------------------
+// POST /api/release-wave/traffic-rollback  (Refs #196)
+// ----------------------------------------------------------------------------
+
+/**
+ * frontend worker の traffic を任意の過去 version に即 100% で戻す。
+ *
+ * - form field `repo` ("owner/name") + `version_id` を受ける。
+ * - `traffic::<repo>` の deploy_history / versions に含まれる version_id のみ許可
+ *   (= 未知の version への誤 flip を防ぐ。任意選択だが「履歴にある」ことは強制)。
+ * - dispatch `release-wave-traffic-rollback` を frontend repo に送る。handler は
+ *   `wrangler versions deploy <version_id>@100%` で即 100% に戻す (canary 無し)。
+ * - wave 非依存なので callback は来ない。実 flip の成否は GitHub Actions 側で確認。
+ *
+ * `version_id` から tag を引いて payload の target_tag に載せる (handler の
+ * checkout ref には使わないが audit / 表示用)。tag 不明なら省略。
+ */
+export async function handleReleaseWaveTrafficRollback(
+  req: Request,
+  env: Env,
+): Promise<Response> {
+  if (req.method !== "POST") {
+    return jsonResponse(405, { code: "METHOD_NOT_ALLOWED", error: "use POST" });
+  }
+  if (!env.COMPAT_KV) {
+    return jsonResponse(500, {
+      code: "KV_NOT_CONFIGURED",
+      error: "COMPAT_KV is not bound",
+    });
+  }
+
+  let repo = "";
+  let versionId = "";
+  try {
+    const form = await req.formData();
+    repo = String(form.get("repo") ?? "").trim();
+    versionId = String(form.get("version_id") ?? "").trim();
+  } catch {
+    // form-data 以外は下で 400
+  }
+  if (!repo || !versionId) {
+    return jsonResponse(400, {
+      code: "BAD_REQUEST",
+      error: "form fields 'repo' and 'version_id' are required",
+    });
+  }
+
+  const traffic = await getTraffic(env.COMPAT_KV, repo);
+  if (!traffic) {
+    return jsonResponse(404, {
+      code: "NOT_FOUND",
+      error: `no traffic record for ${repo}`,
+    });
+  }
+  // version_id は履歴 (deploy_history) か現配分 (versions) のどちらかに居ること。
+  const fromHistory = (traffic.deploy_history ?? []).find(
+    (e) => e.version_id === versionId,
+  );
+  const fromVersions = traffic.versions.find((v) => v.version_id === versionId);
+  if (!fromHistory && !fromVersions) {
+    return jsonResponse(404, {
+      code: "VERSION_NOT_FOUND",
+      error: `version ${versionId} is not in traffic history for ${repo}`,
+    });
+  }
+  const tag = fromHistory?.tag ?? fromVersions?.tag ?? null;
+
+  const wave_id = `traffic-rollback-${repo.replace(/[^a-zA-Z0-9._-]/g, "-")}-${Date.now()}`;
+  const dispatch: Dispatch = {
+    repo,
+    event_type: "release-wave-traffic-rollback",
+    client_payload: {
+      wave_id,
+      ...(tag ? { target_tag: tag } : {}),
+      head_sha: "",
+      // handler が `wrangler versions deploy <id>@100%` の対象にする version。
+      previewed_version_id: versionId,
+      // handler が wave callback を skip するためのマーカー。
+      traffic_rollback: true,
+    },
+  };
+
+  const results = await dispatchAll(env, [dispatch]);
+  if (!(results.length > 0 && results[0]!.ok)) {
+    const err = results.length > 0 && !results[0]!.ok ? results[0]!.error : "dispatch failed";
+    return jsonResponse(502, {
+      code: "DISPATCH_FAILED",
+      error: `failed to dispatch traffic-rollback for ${repo}: ${err}`,
+    });
+  }
+  return redirectToList();
+}
+
+// ----------------------------------------------------------------------------
+// POST /api/release-wave/backend-rollback  (Refs #197)
+// ----------------------------------------------------------------------------
+
+/**
+ * backend (Cloud Run) の traffic を任意の過去 revision に即 100% で戻す。
+ *
+ * - form field `repo` ("owner/name") + `image` (Cloud Run revision name) を受ける。
+ * - `backend::<repo>` の deploy_history に含まれる image のみ許可。
+ * - dispatch `release-wave-backend-rollback` を backend repo に送る。handler は
+ *   既存 `/cloudrun/rollback` 経路で `rollback_target[<service>]` の revision に
+ *   即 100% traffic を振る。
+ * - service 名は revision name (`<service>-NNNNN-suffix`) から逆算して
+ *   `rollback_target` map を組む。逆算できない場合も `rollback_revision` 単一値を
+ *   載せ、handler 側 fallback に委ねる。
+ */
+export async function handleReleaseWaveBackendRollback(
+  req: Request,
+  env: Env,
+): Promise<Response> {
+  if (req.method !== "POST") {
+    return jsonResponse(405, { code: "METHOD_NOT_ALLOWED", error: "use POST" });
+  }
+  if (!env.COMPAT_KV) {
+    return jsonResponse(500, {
+      code: "KV_NOT_CONFIGURED",
+      error: "COMPAT_KV is not bound",
+    });
+  }
+
+  let repo = "";
+  let image = "";
+  try {
+    const form = await req.formData();
+    repo = String(form.get("repo") ?? "").trim();
+    image = String(form.get("image") ?? "").trim();
+  } catch {
+    // form-data 以外は下で 400
+  }
+  if (!repo || !image) {
+    return jsonResponse(400, {
+      code: "BAD_REQUEST",
+      error: "form fields 'repo' and 'image' are required",
+    });
+  }
+
+  const backend = await getBackendCurrent(env.COMPAT_KV, repo);
+  if (!backend) {
+    return jsonResponse(404, {
+      code: "NOT_FOUND",
+      error: `no backend deploy record for ${repo}`,
+    });
+  }
+  const entry = (backend.deploy_history ?? []).find((e) => e.image === image);
+  if (!entry) {
+    return jsonResponse(404, {
+      code: "REVISION_NOT_FOUND",
+      error: `revision ${image} is not in deploy history for ${repo}`,
+    });
+  }
+
+  const service = serviceNameFromRevision(image);
+  const wave_id = `backend-rollback-${repo.replace(/[^a-zA-Z0-9._-]/g, "-")}-${Date.now()}`;
+  const dispatch: Dispatch = {
+    repo,
+    event_type: "release-wave-backend-rollback",
+    client_payload: {
+      wave_id,
+      ...(entry.tag ? { target_tag: entry.tag } : {}),
+      head_sha: "",
+      // 既存 /cloudrun/rollback の戻し先 map。service 別。
+      rollback_target: service ? { [service]: image } : {},
+      // service 名を逆算できなかった場合の単一値 fallback。
+      rollback_revision: image,
+      backend_rollback: true,
+    },
+  };
+
+  const results = await dispatchAll(env, [dispatch]);
+  if (!(results.length > 0 && results[0]!.ok)) {
+    const err = results.length > 0 && !results[0]!.ok ? results[0]!.error : "dispatch failed";
+    return jsonResponse(502, {
+      code: "DISPATCH_FAILED",
+      error: `failed to dispatch backend-rollback for ${repo}: ${err}`,
     });
   }
   return redirectToList();

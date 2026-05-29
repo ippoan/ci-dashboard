@@ -10,6 +10,8 @@ import {
   TESTED_AGAINST_MAX,
   WINDOW_DAYS,
   SCHEMA_VERSION,
+  BACKEND_SCHEMA_VERSION,
+  nextBackendDeployHistory,
   type FrontendCompatRecord,
 } from "../../src/release-wave/compat";
 
@@ -246,6 +248,63 @@ describe("recordBackendDeploy / getBackendCurrent", () => {
       JSON.stringify({ schema_version: 99, repo: "ippoan/rust-alc-api" }),
     );
     expect(await getBackendCurrent(kv(), "ippoan/rust-alc-api")).toBeNull();
+  });
+
+  it("stores current_tag and writes v2 schema", async () => {
+    const rec = await recordBackendDeploy(kv(), {
+      repo: "ippoan/rust-alc-api",
+      current_image: "rust-alc-api-00042-abc",
+      current_tag: "v1.4.2",
+      deployed_by: "release-wave-gcp",
+      now: daysAgo(0),
+    });
+    expect(rec.schema_version).toBe(BACKEND_SCHEMA_VERSION);
+    expect(rec.current_tag).toBe("v1.4.2");
+  });
+
+  it("accumulates deploy_history when the revision changes", async () => {
+    await recordBackendDeploy(kv(), {
+      repo: "ippoan/rust-alc-api",
+      current_image: "rust-alc-api-00041-xyz",
+      current_tag: "v1.4.1",
+      deployed_by: "x",
+      now: daysAgo(1),
+    });
+    await recordBackendDeploy(kv(), {
+      repo: "ippoan/rust-alc-api",
+      current_image: "rust-alc-api-00042-abc",
+      current_tag: "v1.4.2",
+      deployed_by: "y",
+      now: daysAgo(0),
+    });
+    const got = await getBackendCurrent(kv(), "ippoan/rust-alc-api");
+    expect(got!.deploy_history!.map((e) => e.image)).toEqual([
+      "rust-alc-api-00042-abc",
+      "rust-alc-api-00041-xyz",
+    ]);
+    expect(got!.deploy_history![1].tag).toBe("v1.4.1");
+  });
+
+  it("reads a legacy v1 backend record (no current_tag / deploy_history)", async () => {
+    await kv().put(
+      "backend::ippoan/rust-alc-api",
+      JSON.stringify({
+        schema_version: 1,
+        repo: "ippoan/rust-alc-api",
+        current_image: "img-legacy",
+        deployed_at: "t",
+        deployed_by: "z",
+        wave_id: null,
+      }),
+    );
+    const got = await getBackendCurrent(kv(), "ippoan/rust-alc-api");
+    expect(got!.current_image).toBe("img-legacy");
+    expect(got!.current_tag ?? null).toBeNull();
+  });
+
+  it("nextBackendDeployHistory: no-op when image is unchanged", () => {
+    const prior = [{ image: "img-1", tag: "v1", became_active_at: "t1" }];
+    expect(nextBackendDeployHistory(prior, "img-1", "v1", "t2")).toEqual(prior);
   });
 });
 
