@@ -260,21 +260,25 @@ caller repo (e.g. `rust-alc-api`) の migration deploy workflow に以下 step �
 
 ## Repo リリース状況 / 直接 Tag Release (Refs #137)
 
-`/release-wave` ページ上部の「Repo リリース状況」セクションで、監視対象 repo の
-tag 状況を一覧する。
+`/release-wave` ページの **Compatibility (all consumers) セクションの下**に
+「Repo リリース状況」セクションがあり、監視対象 repo の tag 状況を一覧する。
 
 - **tag あり / なしを明示**: 最新 tag を緑 badge、未tag (= main しか無い repo) を
   赤 badge で表示。行頭の左帯色でも状態が分かる (緑 = 最新 / 黄 = 要リリース /
-  赤 = 未tag / 灰 = tagless・取得失敗)。
-- 上部サマリに「未tag N / 要リリース N / 最新 N / tagless N」を表示。
+  赤 = 未tag / 灰 = 取得失敗)。
+- 上部サマリに「未tag N / 要リリース N / 最新 N」を表示。
 - **直接 Tag Release**: 未tag、または tag が default branch から離れている
   (commits 未リリース) repo には `Tag Release` ボタンが出る。押すと
   `POST /api/release-wave/tag-release` 経由で各 repo の `tag-release.yml`
   workflow を `main` で `workflow_dispatch` する (tag 採番 + GitHub Release 作成は
   workflow 側に委譲)。`/release-wave` は strict CSP (JS 無効) のため、素の
   `<form method="post">` + Post/Redirect/Get (303 → `/release-wave`) で動く。
-- `TAGLESS_REPOS` 指定 repo は `tagless` 表示でボタンを出さない
-  (merge into default branch が release event 扱いのため)。
+- `TAGLESS_REPOS` 指定 repo は **一覧から除外する** (merge into default branch が
+  release event 扱いで、そもそもリリース対象ではないため)。
+- **Compatibility グラフ内 repo の Tag Release**: Compatibility (all consumers)
+  グラフの直下に、グラフに出ている repo (backend + 既 deploy frontend) の
+  `Tag Release: <repo>` ボタンを並べる。グラフを見ながらその場でリリースを発火
+  できる (tagless repo は除外)。発火経路は上記 Tag Release と同じ。
 
 repo 一覧の出所は `/releases` と同じ 3 ソース (Hub status / direct-push
 allowlist / `TAGLESS_REPOS`)。tag / compare / repo-meta の GitHub 呼び出しは
