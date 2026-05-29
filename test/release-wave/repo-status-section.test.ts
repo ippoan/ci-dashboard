@@ -253,24 +253,38 @@ describe("renderTrafficVersionsBlock", () => {
     return { schema_version: 1, repo, versions, reported_at: "t" };
   }
 
-  it("shows 100% and 0% version ids for a repo", () => {
+  it("shows 100% and 0% version ids (+ deploy/upload 日時) for a repo", () => {
     const map = new Map([
       [
         "ippoan/auth-worker",
         rec("ippoan/auth-worker", [
-          { version_id: "530b908c-aaaa", percentage: 100 },
-          { version_id: "1a2b3c4d-bbbb", percentage: 0 },
+          { version_id: "530b908c-aaaa", percentage: 100, created_on: "2026-05-28T11:37:33Z" },
+          { version_id: "1a2b3c4d-bbbb", percentage: 0, created_on: "2026-05-29T07:02:27Z" },
         ]),
       ],
     ]);
     const html = renderTrafficVersionsBlock(["ippoan/auth-worker"], map);
     expect(html).toContain("Traffic (version split)");
     expect(html).toContain("ippoan/auth-worker");
-    expect(html).toContain("100% 530b908c-aaa"); // shortId truncates at 12 chars
-    expect(html).toContain("0% 1a2b3c4d-bbb");
-    // full id in title for 100% and 0%
-    expect(html).toContain("530b908c-aaaa = 100%");
-    expect(html).toContain("1a2b3c4d-bbbb = 0%");
+    // % と version id は別セル。short id は 12 文字短縮、full id は title。
+    expect(html).toContain(">100%</span>");
+    expect(html).toContain(">0%</span>");
+    expect(html).toContain("530b908c-aaa");
+    expect(html).toContain("1a2b3c4d-bbb");
+    expect(html).toContain('title="530b908c-aaaa"');
+    expect(html).toContain('title="1a2b3c4d-bbbb"');
+    // deploy/upload 日時 (UTC, MM-DD HH:mm)。
+    expect(html).toContain("05-28 11:37");
+    expect(html).toContain("05-29 07:02");
+  });
+
+  it("renders — for a version with no created_on (v1 record)", () => {
+    const map = new Map([
+      ["ippoan/x", rec("ippoan/x", [{ version_id: "v", percentage: 100 }])],
+    ]);
+    const html = renderTrafficVersionsBlock(["ippoan/x"], map);
+    expect(html).toContain(">100%</span>");
+    expect(html).toContain("—");
   });
 
   it("only lists repos that have a traffic record", () => {
@@ -478,8 +492,10 @@ describe("handleReleaseWaveListPageWithRepoStatus", () => {
     const res = await handleReleaseWaveListPageWithRepoStatus(env);
     const html = await res.text();
     expect(html).toContain("Traffic (version split)");
-    expect(html).toContain("100% full-100-id");
-    expect(html).toContain("0% zero-000-id");
+    expect(html).toContain(">100%</span>");
+    expect(html).toContain("full-100-id");
+    expect(html).toContain(">0%</span>");
+    expect(html).toContain("zero-000-id");
     // グラフ overlay の Staged previews より前 (= グラフ直下) に出る。
     expect(html.indexOf("Traffic (version split)")).toBeLessThan(
       html.indexOf("Staged previews (active waves)"),

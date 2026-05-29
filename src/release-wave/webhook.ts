@@ -444,12 +444,12 @@ export async function handleBackendCurrentImageWebhook(
  * `traffic::<repo>` (COMPAT_KV) に upsert する。Compatibility グラフ下に
  * 「100% がどの version / 0% (no-traffic) がどの version」を出すための入力。
  *
- * body:
+ * body (created_on は任意。`wrangler versions list` の metadata.created_on 由来):
  *   {
  *     "repo": "ippoan/auth-worker",
  *     "versions": [
- *       { "version_id": "530b908c-...", "percentage": 100 },
- *       { "version_id": "1a2b3c4d-...", "percentage": 0 }
+ *       { "version_id": "530b908c-...", "percentage": 100, "created_on": "2026-05-28T..." },
+ *       { "version_id": "1a2b3c4d-...", "percentage": 0,   "created_on": "2026-05-29T..." }
  *     ]
  *   }
  */
@@ -460,6 +460,7 @@ const trafficReportSchema = z.object({
       z.object({
         version_id: z.string().min(1),
         percentage: z.number().min(0).max(100),
+        created_on: z.string().min(1).optional(),
       }),
     )
     .min(1),
@@ -479,7 +480,11 @@ export async function handleTrafficReportWebhook(
   }
   const record = await recordTraffic(env.COMPAT_KV, {
     repo: v.data.repo,
-    versions: v.data.versions,
+    versions: v.data.versions.map((x) => ({
+      version_id: x.version_id,
+      percentage: x.percentage,
+      created_on: x.created_on ?? null,
+    })),
     now: new Date().toISOString(),
   });
   return jsonResponse(200, { ok: true, record });

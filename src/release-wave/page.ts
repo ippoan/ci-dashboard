@@ -25,6 +25,7 @@ import {
   listPendingReleases,
   type PendingReleaseRecord,
 } from "./pending-release";
+import { getTrafficForRepos, type TrafficRecord } from "./traffic";
 
 // ----------------------------------------------------------------------------
 // Small HTML helpers
@@ -167,9 +168,25 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
       globalCompat = null;
     }
   }
+  // compat グラフに出る repo (backend + frontend) の version traffic を引く。
+  // グラフの frontend ノード hover に「現 active version の % / id」を出す用。
+  let trafficByRepo: Map<string, TrafficRecord> = new Map();
+  if (env.COMPAT_KV && globalCompat) {
+    const repos = new Set<string>();
+    for (const b of globalCompat.backends) {
+      repos.add(b.backend_repo);
+      for (const m of b.matrix) repos.add(m.frontend);
+    }
+    try {
+      trafficByRepo = await getTrafficForRepos(env.COMPAT_KV, repos);
+    } catch {
+      trafficByRepo = new Map();
+    }
+  }
   const compatSection = renderGlobalCompatibilitySection(
     globalCompat,
     buildActiveWaveInfo(waves),
+    trafficByRepo,
   );
 
   // 単独 v* リリースで upload された no-traffic version の一覧 (Refs #181)。
@@ -590,6 +607,7 @@ function buildActiveWaveInfo(waves: WaveState[]): ActiveWaveInfo {
 function renderGlobalCompatibilitySection(
   compat: WaveCompatibility | null,
   active?: ActiveWaveInfo,
+  trafficByRepo?: Map<string, TrafficRecord>,
 ): string {
   if (!compat || compat.backends.length === 0) {
     return `
@@ -607,7 +625,7 @@ function renderGlobalCompatibilitySection(
     : compat.verified
     ? `<span class="ok"><strong>all consumers tested</strong></span>`
     : `<span class="err"><strong>some consumers untested</strong></span>`;
-  const svg = renderCompatibilitySvg(compat, active);
+  const svg = renderCompatibilitySvg(compat, active, trafficByRepo);
   const body = svg
     ? svg
     : `<p class="meta">backend record はあるが、まだどの frontend も test 履歴を
@@ -827,6 +845,7 @@ function truncLabel(s: string, max = 30): string {
 function renderCompatibilitySvg(
   compat: WaveCompatibility,
   active?: ActiveWaveInfo,
+  trafficByRepo?: Map<string, TrafficRecord>,
 ): string {
   type Edge = {
     backend: string;
@@ -989,13 +1008,23 @@ function renderCompatibilitySvg(
       const previewNote = active?.preview.has(repo)
         ? `\npreview: ${active.preview.get(repo)!.url}`
         : "";
+      // traffic (version split) を hover (title) に出す。active(100%) / 0% の
+      // version id と % を、報告があれば列挙する (要望: ノードにも traffic)。
+      const traffic = trafficByRepo?.get(repo);
+      const trafficNote =
+        traffic && traffic.versions.length > 0
+          ? "\ntraffic:\n" +
+            traffic.versions
+              .map((v) => `  ${v.percentage}% ${v.version_id}`)
+              .join("\n")
+          : "";
       return node(
         rightX,
         fY(repo),
         repo,
         line2,
         border,
-        `${repo}\nprod version: ${ver}\ntested vs image: ${testedImg ?? "—"}\n${verdictTxt}${previewNote}`,
+        `${repo}\nprod version: ${ver}\ntested vs image: ${testedImg ?? "—"}\n${verdictTxt}${previewNote}${trafficNote}`,
         href,
       );
     })

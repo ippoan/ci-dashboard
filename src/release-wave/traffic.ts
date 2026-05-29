@@ -11,7 +11,9 @@
  */
 
 const TRAFFIC_PREFIX = "traffic::";
-const SCHEMA_VERSION = 1 as const;
+// v2: TrafficVersion に created_on を追加 (deploy/upload 日時)。v1 record は
+// created_on 無しとして読めるよう、reader は両方許容する (後方互換)。
+const SCHEMA_VERSION = 2 as const;
 
 /** version 1 件の traffic 配分。 */
 export interface TrafficVersion {
@@ -19,14 +21,23 @@ export interface TrafficVersion {
   version_id: string;
   /** traffic 配分 % (0〜100)。 */
   percentage: number;
+  /**
+   * version の deploy(100%) / upload(0%) 日時 (UTC ISO)。
+   * `wrangler versions list` の metadata.created_on 由来。
+   * 取得できなかった / v1 record では null。
+   */
+  created_on?: string | null;
 }
 
 /** `traffic::<repo>` value。repo ごとに最新の deployment 配分のみ保持 (upsert)。 */
 export interface TrafficRecord {
-  schema_version: typeof SCHEMA_VERSION;
+  schema_version: number;
   /** "owner/name"。 */
   repo: string;
-  /** version 配分 (percentage 降順)。100% / 0% の version が並ぶ。 */
+  /**
+   * version 配分。percentage 降順 → 同率は created_on 降順 (新しい順) で並ぶ。
+   * 100% (active) と 0% (no-traffic / promote 待ち) が混在する。
+   */
   versions: TrafficVersion[];
   /** 報告を受けた UTC ISO。 */
   reported_at: string;
@@ -36,7 +47,11 @@ function trafficKey(repo: string): string {
   return `${TRAFFIC_PREFIX}${repo}`;
 }
 
-/** upsert: repo ごとに最新報告で上書きする。versions は percentage 降順で保存。 */
+/**
+ * upsert: repo ごとに最新報告で上書きする。
+ * versions は percentage 降順 → 同率は created_on 降順 (新しい順) で並べて保存。
+ * これで「100% (active)」が先頭、その後に 0% の新しい version から並ぶ。
+ */
 export async function recordTraffic(
   kv: KVNamespace,
   input: {
@@ -45,9 +60,16 @@ export async function recordTraffic(
     now: string;
   },
 ): Promise<TrafficRecord> {
-  const versions = [...input.versions].sort(
-    (a, b) => b.percentage - a.percentage,
-  );
+  const versions = [...input.versions].sort((a, b) => {
+    if (b.percentage !== a.percentage) return b.percentage - a.percentage;
+    // 同 percentage は created_on 降順 (新しい version を上に)。null は末尾。
+    const ca = a.created_on ?? "";
+    const cb = b.created_on ?? "";
+    if (ca === cb) return 0;
+    if (!ca) return 1;
+    if (!cb) return -1;
+    return ca < cb ? 1 : -1;
+  });
   const record: TrafficRecord = {
     schema_version: SCHEMA_VERSION,
     repo: input.repo,
@@ -58,13 +80,16 @@ export async function recordTraffic(
   return record;
 }
 
-/** 単一 repo の traffic を取得 (無ければ null)。 */
+/**
+ * 単一 repo の traffic を取得 (無ければ null)。
+ * v1 / v2 どちらの record も許容する (v1 は created_on 無し)。古い v0 等は無視。
+ */
 export async function getTraffic(
   kv: KVNamespace,
   repo: string,
 ): Promise<TrafficRecord | null> {
   const v = await kv.get<TrafficRecord>(trafficKey(repo), "json");
-  if (!v || v.schema_version !== SCHEMA_VERSION) return null;
+  if (!v || (v.schema_version !== 1 && v.schema_version !== 2)) return null;
   return v;
 }
 

@@ -284,32 +284,42 @@ caller repo (e.g. `rust-alc-api`) の migration deploy workflow に以下 step �
 ## Traffic (version split) — Compatibility グラフ下 (Refs #137)
 
 Compatibility グラフの直下に「Traffic (version split)」テーブルを出す。各 repo の
-worker version の traffic 配分 (どの version に何 % traffic が乗っているか) を
-percentage 降順で並べ、**「100% がどの version / 0% (no-traffic) がどの version」**
-を一目で確認できる (緑 = 100% / 灰 = 0% / 黄 = その他)。version id は先頭 12 文字に
-短縮表示し、full id と % は hover (title) で見える。
+worker version を **1 行ずつ** `percentage / version_id / deploy(100%)・upload(0%)
+日時` で並べ、**「どの version が 100% (active) / 0% (promote 待ち) で、それぞれ
+いつ deploy/upload されたか」**を一目で確認できる (緑 = 100% / 灰 = 0% / 黄 = その他)。
+version id は先頭 12 文字短縮 (full は hover)、日時は UTC `MM-DD HH:mm`。
+並び順は percentage 降順 → 同率は created_on 降順 (新しい version が上)。
+
+加えて Compatibility グラフの **frontend ノード hover (title)** にも、その repo の
+全 version の `% version_id` を列挙する (要望: グラフにも traffic)。
 
 データソースは frontend CI からの webhook 報告:
 
 ### POST /webhooks/release-wave/traffic-report
 
-frontend CI が deploy 時に `wrangler deployments list` 相当の version 配分を報告し、
-`traffic::<repo>` (COMPAT_KV) に upsert する。shared secret
+frontend CI が deploy 時に **`wrangler deployments list`** (version_id → percentage)
+と **`wrangler versions list`** (version の created_on) をマージして報告し、
+`traffic::<repo>` (COMPAT_KV, schema v2) に upsert する。shared secret
 (`RELEASE_WAVE_WEBHOOK_SECRET`) 認証。
 
+deployments list は active deployment (通常 100% の 1 件) しか返さないため、
+versions list の全 version に percentage を join (無ければ 0%) + created_on を付ける。
+これで **0% (no-traffic / promote 待ち) の version も日時付きで** 報告できる。
+
 ```jsonc
-// body
+// body (created_on は任意)
 {
   "repo": "ippoan/auth-worker",
   "versions": [
-    { "version_id": "530b908c-5385-451c-b163-747caaedafd3", "percentage": 100 },
-    { "version_id": "1a2b3c4d-...",                          "percentage": 0 }
+    { "version_id": "6403c1dc-...", "percentage": 100, "created_on": "2026-05-28T11:37:33Z" },
+    { "version_id": "ac6841e4-...", "percentage": 0,   "created_on": "2026-05-29T07:02:27Z" }
   ]
 }
 ```
 
-報告が無い repo は traffic 行が出ないだけ (graceful)。報告を流すには各 frontend の
-CI (ci-workflows の frontend-ci 等) に traffic-report step を足す必要がある。
+報告が無い repo は traffic 行が出ないだけ (graceful)。schema v1 (created_on 無し)
+record も後方互換で読める (日時は `—` 表示)。報告を流すには各 frontend の CI
+(ci-workflows の frontend-ci) に traffic-report step が必要。
 
 repo 一覧の出所は `/releases` と同じ 3 ソース (Hub status / direct-push
 allowlist / `TAGLESS_REPOS`)。tag / compare / repo-meta の GitHub 呼び出しは
