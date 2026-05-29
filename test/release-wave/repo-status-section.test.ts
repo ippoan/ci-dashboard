@@ -308,6 +308,44 @@ describe("renderTrafficVersionsBlock", () => {
     expect(html).not.toContain("<b>");
     expect(html).toContain("&lt;b&gt;");
   });
+
+  it("hides 0% versions older than the active (100%) version", () => {
+    const map = new Map([
+      [
+        "ippoan/auth-worker",
+        rec("ippoan/auth-worker", [
+          { version_id: "active-id", percentage: 100, created_on: "2026-05-28T11:00:00Z" },
+          { version_id: "newer-zero", percentage: 0, created_on: "2026-05-29T07:00:00Z" },
+          { version_id: "older-zero", percentage: 0, created_on: "2026-05-28T02:00:00Z" },
+        ]),
+      ],
+    ]);
+    const html = renderTrafficVersionsBlock(["ippoan/auth-worker"], map);
+    expect(html).toContain("active-id");
+    expect(html).toContain("newer-zero"); // active より新しい 0% は出る
+    expect(html).not.toContain("older-zero"); // active より古い 0% は隠す
+  });
+
+  it("shows only the newest 0% as a row and folds the rest into a summary", () => {
+    const map = new Map([
+      [
+        "ippoan/auth-worker",
+        rec("ippoan/auth-worker", [
+          { version_id: "active-id", percentage: 100, created_on: "2026-05-28T00:00:00Z" },
+          { version_id: "zero-newest", percentage: 0, created_on: "2026-05-29T09:00:00Z" },
+          { version_id: "zero-mid", percentage: 0, created_on: "2026-05-29T08:00:00Z" },
+          { version_id: "zero-old", percentage: 0, created_on: "2026-05-29T07:00:00Z" },
+        ]),
+      ],
+    ]);
+    const html = renderTrafficVersionsBlock(["ippoan/auth-worker"], map);
+    // 最新 0% だけ行表示。
+    expect(html).toContain("zero-newest");
+    expect(html).not.toContain("zero-mid");
+    expect(html).not.toContain("zero-old");
+    // 残りは件数サマリ。
+    expect(html).toContain("他 2 件 (no-traffic)");
+  });
 });
 
 describe("isUpToDate", () => {
