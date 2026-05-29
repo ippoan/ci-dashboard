@@ -234,12 +234,10 @@ function shortWhen(iso: string | null | undefined): string {
  * Compatibility グラフに出ている repo の version traffic split を HTML で返す。
  * frontend CI が報告した `traffic::<repo>` を読み、repo ごとに:
  *   - traffic を受けている version (100% / canary 等、percentage > 0) は全行表示
- *   - 0% (no-traffic) は **最新 1 件だけ**行表示 (= 次に flip する候補)
- *   - 残りの 0% version は「他 N 件 0% (oldest 〜 newest)」の 1 行サマリに畳む
- * version は percentage 降順 → 同率 created_on 降順で並んでいる前提 (recordTraffic)。
- *
- * 0% の version history は時間経過でいくらでも増える (= ノイズ) ため、active と
- * 直近の promote 候補だけ出し、古いものは件数サマリに集約する。
+ *   - 0% (no-traffic) は active より新しいものだけ対象にし、**最新 1 件だけ**行表示
+ *     (= 次に flip する候補)。残り件数は最新 0% 行の % セルに「(他N件)」併記
+ *   - active より古い 0% は非表示 (= 用済みの過去履歴)
+ * 行は created_on 降順 (新しい順) で並べる → 最新 0% が active(100%) より上に出る。
  * traffic 報告のある repo が 1 つも無ければ ""。
  */
 export function renderTrafficVersionsBlock(
@@ -251,11 +249,23 @@ export function renderTrafficVersionsBlock(
     .sort();
   if (list.length === 0) return "";
 
-  const versionRow = (repo: string, v: TrafficVersion, first: boolean): string => {
+  // 1 行 = 1 version。% セルに余剰件数 (extra) を「(他N件)」で併記する。
+  const versionRow = (
+    repo: string,
+    v: TrafficVersion,
+    first: boolean,
+    extra: number,
+  ): string => {
     // 100% = 緑 / 0% = 灰 / その他 (canary 等) = 黄。
     const color = v.percentage >= 100 ? GREEN : v.percentage <= 0 ? GRAY : AMBER;
-    const pctBadge = `<span class="badge" style="background:${color}">${v.percentage}%</span>`;
-    const vid = `<code title="${escapeHtml(v.version_id)}">${escapeHtml(shortId(v.version_id))}</code>`;
+    const more = extra > 0 ? ` <span class="meta">(他${extra}件)</span>` : "";
+    const pctBadge = `<span class="badge" style="background:${color}">${v.percentage}%</span>${more}`;
+    // Version セルは「git tag (upload 時点) + wrangler version id」。tag は
+    // 100% (deployed) と 0% (uploaded) で異なり得る。tag 不明なら id のみ。
+    const tagPart = v.tag
+      ? `<strong>${escapeHtml(v.tag)}</strong> `
+      : "";
+    const vid = `${tagPart}<code title="${escapeHtml(v.version_id)}">${escapeHtml(shortId(v.version_id))}</code>`;
     const when = `<span class="meta" title="${escapeHtml(v.created_on ?? "")}">${escapeHtml(shortWhen(v.created_on))}</span>`;
     return `
             <tr>
@@ -285,31 +295,34 @@ export function renderTrafficVersionsBlock(
           if (!v.created_on) return false; // 日時不明の古い 0% は落とす
           return v.created_on > activeNewest; // active より新しいものだけ
         });
-      // versions は既に percentage 降順 → created_on 降順。zero[0] が最新 0%。
+      // 表示する version = active 全件 + 最新 0% 1 件。残り 0% 件数は最新 0% 行の
+      // % セルに「(他N件)」で併記する (= 別行サマリは作らない)。
       const zeroShown = zero.slice(0, 1);
-      const zeroRest = zero.slice(1);
+      const zeroExtra = Math.max(0, zero.length - 1);
 
       const shown = [...active, ...zeroShown];
-      let out = shown
-        .map((v, i) => versionRow(repo, v, i === 0))
-        .join("");
+      // 日時降順 (新しい順) で並べる。created_on 無しは末尾。これで 0% (最新)
+      // が 100% (より古い active) の上に来る。
+      shown.sort((a, b) => {
+        const ca = a.created_on ?? "";
+        const cb = b.created_on ?? "";
+        if (ca === cb) return 0;
+        if (!ca) return 1;
+        if (!cb) return -1;
+        return ca < cb ? 1 : -1;
+      });
 
-      // active が 1 件も無い (= traffic 不明) 場合に repo 名が消えないよう、
-      // shown が空なら summary 行に repo 名を載せる。
-      if (zeroRest.length > 0) {
-        // 残り 0% は件数 + 期間サマリ。created_on 降順なので末尾が最古。
-        const newest = shortWhen(zeroRest[0]?.created_on);
-        const oldest = shortWhen(zeroRest[zeroRest.length - 1]?.created_on);
-        const span = newest === oldest ? newest : `${oldest}〜${newest}`;
-        out += `
-            <tr>
-              <td>${shown.length === 0 ? escapeHtml(repo) : ""}</td>
-              <td><span class="badge" style="background:${GRAY}">0%</span></td>
-              <td class="meta">他 ${zeroRest.length} 件 (no-traffic)</td>
-              <td><span class="meta">${escapeHtml(span)}</span></td>
-            </tr>`;
-      }
-      return out;
+      return shown
+        .map((v, i) =>
+          versionRow(
+            repo,
+            v,
+            i === 0,
+            // 余剰件数は最新 0% (= zeroShown) の行にだけ付ける。
+            v === zeroShown[0] ? zeroExtra : 0,
+          ),
+        )
+        .join("");
     })
     .join("");
 
@@ -317,7 +330,7 @@ export function renderTrafficVersionsBlock(
     <div style="margin-top:10px">
       <strong class="meta">Traffic (version split)</strong>
       <table style="margin-top:6px">
-        <thead><tr><th>Repo</th><th>%</th><th>Version</th><th>Deployed / Uploaded (UTC)</th></tr></thead>
+        <thead><tr><th>Repo</th><th>%</th><th>Tag / Version</th><th>Deployed / Uploaded (UTC)</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </div>`;

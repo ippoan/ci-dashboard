@@ -674,11 +674,13 @@ describe("handleTrafficReportWebhook", () => {
       version_id: "full-id",
       percentage: 100,
       created_on: "2026-05-28T11:00:00Z",
+      tag: null,
     });
     expect(rec!.versions[1]).toEqual({
       version_id: "zero-id",
       percentage: 0,
       created_on: "2026-05-29T07:00:00Z",
+      tag: null,
     });
   });
 
@@ -702,7 +704,27 @@ describe("handleTrafficReportWebhook", () => {
       version_id: "v",
       percentage: 100,
       created_on: null,
+      tag: null,
     });
+  });
+
+  it("stores the per-version tag and merges it across reports", async () => {
+    const kv = memKv();
+    const { env } = fakeEnv({ compatKv: kv });
+    const resp = await handleTrafficReportWebhook(
+      jsonRequest({
+        url: TRAFFIC_URL,
+        secret: "expected-secret",
+        body: {
+          repo: "ippoan/x",
+          versions: [{ version_id: "v1", percentage: 0, tag: "v0.2.43" }],
+        },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(200);
+    const rec = await getTraffic(kv, "ippoan/x");
+    expect(rec!.versions[0].tag).toBe("v0.2.43");
   });
 
   it("rejects an empty versions array with 400", async () => {

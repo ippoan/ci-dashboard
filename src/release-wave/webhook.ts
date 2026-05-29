@@ -461,6 +461,7 @@ const trafficReportSchema = z.object({
         version_id: z.string().min(1),
         percentage: z.number().min(0).max(100),
         created_on: z.string().min(1).optional(),
+        tag: z.string().min(1).optional(),
       }),
     )
     .min(1),
@@ -484,6 +485,7 @@ export async function handleTrafficReportWebhook(
       version_id: x.version_id,
       percentage: x.percentage,
       created_on: x.created_on ?? null,
+      tag: x.tag ?? null,
     })),
     now: new Date().toISOString(),
   });

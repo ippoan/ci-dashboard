@@ -284,18 +284,25 @@ caller repo (e.g. `rust-alc-api`) の migration deploy workflow に以下 step �
 ## Traffic (version split) — Compatibility グラフ下 (Refs #137)
 
 Compatibility グラフの直下に「Traffic (version split)」テーブルを出す。各 repo の
-worker version を `percentage / version_id / deploy(100%)・upload(0%) 日時` で
+worker version を `percentage / tag・version_id / deploy(100%)・upload(0%) 日時` で
 並べ、**「どの version が 100% (active) で、次の promote 候補 (0%) は何か」**を
-一目で確認できる (緑 = 100% / 灰 = 0% / 黄 = その他)。version id は先頭 12 文字
-短縮 (full は hover)、日時は UTC `MM-DD HH:mm`。
+一目で確認できる (緑 = 100% / 灰 = 0% / 黄 = その他)。
 
+- **git release tag**: 各 version が upload された時点の git tag (例 `v0.2.42`) を
+  version id の前に太字で出す。100% (deployed) と 0% (uploaded) で **別 tag**に
+  なり得る。tag は deploy CI (`v*` push) が「その回 upload した version」分だけ
+  報告するため、ci-dashboard は version_id 単位に tag を **merge 蓄積** する
+  (過去 version の tag を保持)。報告前の version は tag 無し (id のみ)。
+- version id は先頭 12 文字短縮 (full は hover)、日時は UTC `MM-DD HH:mm`。
+
+行は created_on 降順 (新しい順) で並べ、**最新 0% が active(100%) より上**に出る。
 0% (no-traffic) version は時間経過でいくらでも増える (= ノイズ) ため、表示を絞る:
 
 - traffic を受けている version (100% / canary 等、`percentage > 0`) は全行表示。
 - **active (100%) version より古い** deploy/upload の 0% version は非表示
   (= もう用済みの過去履歴で promote 候補ではない)。
 - active より新しい 0% のうち **最新 1 件だけ**行表示 (= 次の flip 候補)。
-- それ以外の 0% は「他 N 件 (no-traffic) `最古〜最新`」の 1 行サマリに畳む。
+  残り件数は最新 0% 行の % セルに「(他N件)」で併記する。
 
 並び順は percentage 降順 → 同率は created_on 降順 (新しい version が上)。
 
@@ -319,12 +326,12 @@ versions list の全 version に percentage を join (無ければ 0%) + created
 これで **0% (no-traffic / promote 待ち) の version も日時付きで** 報告できる。
 
 ```jsonc
-// body (created_on は任意)
+// body (created_on / tag は任意)。tag は「今 upload した version」にだけ付く。
 {
   "repo": "ippoan/auth-worker",
   "versions": [
     { "version_id": "6403c1dc-...", "percentage": 100, "created_on": "2026-05-28T11:37:33Z" },
-    { "version_id": "ac6841e4-...", "percentage": 0,   "created_on": "2026-05-29T07:02:27Z" }
+    { "version_id": "ac6841e4-...", "percentage": 0,   "created_on": "2026-05-29T07:02:27Z", "tag": "v0.2.43" }
   ]
 }
 ```
