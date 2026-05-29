@@ -296,21 +296,27 @@ describe("handleReleaseWaveListPage", () => {
           ],
         },
         "traffic::ippoan/auth-worker": {
-          schema_version: 2,
+          schema_version: 3,
           repo: "ippoan/auth-worker",
           versions: [
-            { version_id: "6403c1dc-full", percentage: 100, created_on: "2026-05-28T11:00:00Z" },
-            { version_id: "ac6841e4-zero", percentage: 0, created_on: "2026-05-29T07:00:00Z" },
+            { version_id: "6403c1dc-full", percentage: 100, created_on: "2026-05-28T11:00:00Z", tag: "v0.2.42" },
+            { version_id: "ac6841e4-zero", percentage: 0, created_on: "2026-05-29T07:00:00Z", tag: "v0.2.49" },
           ],
           reported_at: "2026-05-29T07:02:00Z",
         },
       }),
     });
     const html = await (await handleReleaseWaveListPage(env)).text();
-    // SVG node の <title> (hover) に traffic 行が出る。
+    // SVG node の可視ラベル: deployed tag (100% = v0.2.42) と latest tag
+    // (最新 created_on = v0.2.49)、traffic %。
+    expect(html).toContain("deploy v0.2.42");
+    expect(html).toContain("new v0.2.49");
+    expect(html).toContain("traffic 100%");
+    expect(html).toContain("0%×1");
+    // hover (title) には全 version の % / tag / id を列挙。
     expect(html).toContain("traffic:");
-    expect(html).toContain("100% 6403c1dc-full");
-    expect(html).toContain("0% ac6841e4-zero");
+    expect(html).toContain("100% v0.2.42 6403c1dc-full");
+    expect(html).toContain("0% v0.2.49 ac6841e4-zero");
   });
 });
 

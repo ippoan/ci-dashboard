@@ -306,11 +306,13 @@ worker version を `percentage / tag・version_id / deploy(100%)・upload(0%) �
 
 並び順は percentage 降順 → 同率は created_on 降順 (新しい version が上)。
 
-加えて Compatibility グラフの **frontend ノード hover (title)** にも、その repo の
-全 version の `% version_id` を列挙する (要望: グラフにも traffic)。
+加えて Compatibility グラフの **frontend ノード**にも traffic を出す (要望: グラフにも):
+- 2 行目: `deploy <deployed tag>`。直近 upload version が別なら `· new <latest tag>` も。
+  tag が無い version は short version id で代替。
+- 3 行目: `traffic <100% 等の %> · 0%×<件数>`。
+- hover (title): 全 version の `% tag version_id` を列挙。
 
-加えて Compatibility グラフの **frontend ノード hover (title)** にも、その repo の
-全 version の `% version_id` を列挙する (要望: グラフにも traffic)。
+(traffic 報告が無い repo のノードは従来どおり `prod version · vs @<tested image sha>`。)
 
 データソースは frontend CI からの webhook 報告:
 

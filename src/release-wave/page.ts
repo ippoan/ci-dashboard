@@ -912,7 +912,8 @@ function renderCompatibilitySvg(
 
   // ---- layout ----
   const boxW = 250;
-  const boxH = 38;
+  // 3 行 (repo / deployed・latest tag / traffic %) 入るよう高さを確保。
+  const boxH = 54;
   const vGap = 22;
   const topPad = 28; // legend 用
   const sidePad = 16;
@@ -961,14 +962,20 @@ function renderCompatibilitySvg(
     border: string,
     fullTitle: string,
     href?: string,
+    line3?: string,
   ): string => {
+    const line3Svg = line3
+      ? `<text x="${x + 10}" y="${y + 45}" font-family="monospace" font-size="10.5"
+        fill="${GRAY}">${escapeHtml(truncLabel(line3, 40))}</text>`
+      : "";
     const g = `<g><title>${escapeHtml(fullTitle)}</title>
       <rect x="${x}" y="${y}" width="${boxW}" height="${boxH}" rx="6"
         fill="#ffffff" stroke="${border}" stroke-width="1.5"/>
-      <text x="${x + 10}" y="${y + 15}" font-family="monospace" font-size="12"
+      <text x="${x + 10}" y="${y + 16}" font-family="monospace" font-size="12"
         fill="#202124">${escapeHtml(truncLabel(line1, 32))}</text>
-      <text x="${x + 10}" y="${y + 29}" font-family="monospace" font-size="10.5"
-        fill="${GRAY}">${escapeHtml(truncLabel(line2, 36))}</text>
+      <text x="${x + 10}" y="${y + 31}" font-family="monospace" font-size="10.5"
+        fill="${GRAY}">${escapeHtml(truncLabel(line2, 40))}</text>
+      ${line3Svg}
     </g>`;
     // active wave 中の frontend node は詳細ページへの link にする (node link 化)。
     return href
@@ -998,9 +1005,6 @@ function renderCompatibilitySvg(
       const verdictTxt = frontendHasRed.get(repo)
         ? "has untested edge(s)"
         : "all tested";
-      // line2 に突合 SHA を出して backend ノードの @<sha> と目視照合できるように
-      // する。tested 済 image が無ければ prod version に fallback。
-      const line2 = testedImg ? `${ver} · vs @${shortSha(testedImg)}` : `prod ${ver}`;
       const waveId = active?.waveOf.get(repo);
       const href = waveId
         ? `/release-wave/${encodeURIComponent(waveId)}`
@@ -1008,16 +1012,51 @@ function renderCompatibilitySvg(
       const previewNote = active?.preview.has(repo)
         ? `\npreview: ${active.preview.get(repo)!.url}`
         : "";
-      // traffic (version split) を hover (title) に出す。active(100%) / 0% の
-      // version id と % を、報告があれば列挙する (要望: ノードにも traffic)。
+
+      // traffic (version split) からノードに出す値を組む:
+      //   - deployed: 現在 traffic を受けている (percentage 最大) version の tag
+      //   - latest:   created_on が最新 (= 直近 upload) version の tag
+      //   - traffic %: 各 version の % を簡潔に (例 "100% / 0%×N")
       const traffic = trafficByRepo?.get(repo);
-      const trafficNote =
-        traffic && traffic.versions.length > 0
-          ? "\ntraffic:\n" +
-            traffic.versions
-              .map((v) => `  ${v.percentage}% ${v.version_id}`)
-              .join("\n")
-          : "";
+      const tv = traffic?.versions ?? [];
+      const labelOf = (v: TrafficRecord["versions"][number] | undefined): string =>
+        v ? (v.tag ?? shortSha(v.version_id)) : "—";
+      const deployed = tv.length
+        ? [...tv].sort((a, b) => b.percentage - a.percentage)[0]
+        : undefined;
+      const latest = tv.length
+        ? [...tv].sort((a, b) => (a.created_on ?? "") < (b.created_on ?? "") ? 1 : -1)[0]
+        : undefined;
+      // line2: deployed tag / latest tag (異なる時だけ latest も出す)。traffic が
+      // 無ければ従来どおり prod version + tested image SHA。
+      let line2: string;
+      let line3: string | undefined;
+      if (tv.length) {
+        const dep = labelOf(deployed);
+        const lat = labelOf(latest);
+        line2 =
+          deployed && latest && deployed.version_id !== latest.version_id
+            ? `deploy ${dep} · new ${lat}`
+            : `deploy ${dep}`;
+        // line3: traffic %。100% version と 0% の件数を簡潔に。
+        const pos = tv.filter((v) => v.percentage > 0);
+        const zero = tv.length - pos.length;
+        const posPart = pos.map((v) => `${v.percentage}%`).join("/") || "—";
+        line3 = zero > 0 ? `traffic ${posPart} · 0%×${zero}` : `traffic ${posPart}`;
+      } else {
+        line2 = testedImg ? `${ver} · vs @${shortSha(testedImg)}` : `prod ${ver}`;
+      }
+
+      // hover (title) には全 version の % / tag / id を列挙。
+      const trafficNote = tv.length
+        ? "\ntraffic:\n" +
+          tv
+            .map(
+              (v) =>
+                `  ${v.percentage}% ${v.tag ? v.tag + " " : ""}${v.version_id}`,
+            )
+            .join("\n")
+        : "";
       return node(
         rightX,
         fY(repo),
@@ -1026,6 +1065,7 @@ function renderCompatibilitySvg(
         border,
         `${repo}\nprod version: ${ver}\ntested vs image: ${testedImg ?? "—"}\n${verdictTxt}${previewNote}${trafficNote}`,
         href,
+        line3,
       );
     })
     .join("");
