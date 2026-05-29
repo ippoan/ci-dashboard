@@ -460,8 +460,9 @@ const trafficReportSchema = z.object({
       z.object({
         version_id: z.string().min(1),
         percentage: z.number().min(0).max(100),
-        created_on: z.string().min(1).optional(),
-        tag: z.string().min(1).optional(),
+        // null / undefined / 省略すべて許容 (送信側が null を載せても弾かない)。
+        created_on: z.string().min(1).nullish(),
+        tag: z.string().min(1).nullish(),
       }),
     )
     .min(1),
