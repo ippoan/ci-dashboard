@@ -24,7 +24,11 @@ import {
 } from "./repo-release-status";
 import { computeGlobalCompatibility } from "./compat";
 import { parseTaglessRepos } from "../tagless-repos";
-import { getTrafficForRepos, type TrafficRecord } from "./traffic";
+import {
+  getTrafficForRepos,
+  type TrafficRecord,
+  type TrafficVersion,
+} from "./traffic";
 
 function escapeHtml(s: string): string {
   return s
@@ -228,11 +232,14 @@ function shortWhen(iso: string | null | undefined): string {
 
 /**
  * Compatibility グラフに出ている repo の version traffic split を HTML で返す。
- * frontend CI が報告した `traffic::<repo>` を読み、repo ごとに各 version を
- * 「percentage / version_id / deploy(100%)・upload(0%) 日時」で 1 行ずつ並べる。
+ * frontend CI が報告した `traffic::<repo>` を読み、repo ごとに:
+ *   - traffic を受けている version (100% / canary 等、percentage > 0) は全行表示
+ *   - 0% (no-traffic) は **最新 1 件だけ**行表示 (= 次に flip する候補)
+ *   - 残りの 0% version は「他 N 件 0% (oldest 〜 newest)」の 1 行サマリに畳む
+ * version は percentage 降順 → 同率 created_on 降順で並んでいる前提 (recordTraffic)。
  *
- * これで「100% (active) がどの version / 0% (promote 待ち) がどの version で、
- * それぞれいつ deploy/upload されたか」が一目で分かる。
+ * 0% の version history は時間経過でいくらでも増える (= ノイズ) ため、active と
+ * 直近の promote 候補だけ出し、古いものは件数サマリに集約する。
  * traffic 報告のある repo が 1 つも無ければ ""。
  */
 export function renderTrafficVersionsBlock(
@@ -244,28 +251,65 @@ export function renderTrafficVersionsBlock(
     .sort();
   if (list.length === 0) return "";
 
-  // 各 repo の各 version を 1 行ずつ (repo 名は最初の version 行にだけ出す)。
-  const rows = list
-    .map((repo) => {
-      const rec = trafficByRepo.get(repo)!;
-      return rec.versions
-        .map((v, i) => {
-          // 100% = 緑 / 0% = 灰 / その他 (canary 等) = 黄。
-          const color =
-            v.percentage >= 100 ? GREEN : v.percentage <= 0 ? GRAY : AMBER;
-          const pctBadge = `<span class="badge" style="background:${color}">${v.percentage}%</span>`;
-          const vid = `<code title="${escapeHtml(v.version_id)}">${escapeHtml(shortId(v.version_id))}</code>`;
-          const when = `<span class="meta" title="${escapeHtml(v.created_on ?? "")}">${escapeHtml(shortWhen(v.created_on))}</span>`;
-          const repoCell = i === 0 ? escapeHtml(repo) : "";
-          return `
+  const versionRow = (repo: string, v: TrafficVersion, first: boolean): string => {
+    // 100% = 緑 / 0% = 灰 / その他 (canary 等) = 黄。
+    const color = v.percentage >= 100 ? GREEN : v.percentage <= 0 ? GRAY : AMBER;
+    const pctBadge = `<span class="badge" style="background:${color}">${v.percentage}%</span>`;
+    const vid = `<code title="${escapeHtml(v.version_id)}">${escapeHtml(shortId(v.version_id))}</code>`;
+    const when = `<span class="meta" title="${escapeHtml(v.created_on ?? "")}">${escapeHtml(shortWhen(v.created_on))}</span>`;
+    return `
             <tr>
-              <td>${repoCell}</td>
+              <td>${first ? escapeHtml(repo) : ""}</td>
               <td>${pctBadge}</td>
               <td>${vid}</td>
               <td>${when}</td>
             </tr>`;
-        })
+  };
+
+  const rows = list
+    .map((repo) => {
+      const rec = trafficByRepo.get(repo)!;
+      const active = rec.versions.filter((v) => v.percentage > 0);
+      // active (100%) version の最新 created_on。これより古い 0% は「もう用済みの
+      // 過去履歴」(promote 候補ではない) なので除外する。active に日時が無い /
+      // active が無い場合は比較できないので 0% は全件残す。
+      const activeNewest = active
+        .map((v) => v.created_on)
+        .filter((c): c is string => !!c)
+        .sort()
+        .at(-1);
+      const zero = rec.versions
+        .filter((v) => v.percentage <= 0)
+        .filter((v) => {
+          if (!activeNewest) return true; // 比較不能 → 残す
+          if (!v.created_on) return false; // 日時不明の古い 0% は落とす
+          return v.created_on > activeNewest; // active より新しいものだけ
+        });
+      // versions は既に percentage 降順 → created_on 降順。zero[0] が最新 0%。
+      const zeroShown = zero.slice(0, 1);
+      const zeroRest = zero.slice(1);
+
+      const shown = [...active, ...zeroShown];
+      let out = shown
+        .map((v, i) => versionRow(repo, v, i === 0))
         .join("");
+
+      // active が 1 件も無い (= traffic 不明) 場合に repo 名が消えないよう、
+      // shown が空なら summary 行に repo 名を載せる。
+      if (zeroRest.length > 0) {
+        // 残り 0% は件数 + 期間サマリ。created_on 降順なので末尾が最古。
+        const newest = shortWhen(zeroRest[0]?.created_on);
+        const oldest = shortWhen(zeroRest[zeroRest.length - 1]?.created_on);
+        const span = newest === oldest ? newest : `${oldest}〜${newest}`;
+        out += `
+            <tr>
+              <td>${shown.length === 0 ? escapeHtml(repo) : ""}</td>
+              <td><span class="badge" style="background:${GRAY}">0%</span></td>
+              <td class="meta">他 ${zeroRest.length} 件 (no-traffic)</td>
+              <td><span class="meta">${escapeHtml(span)}</span></td>
+            </tr>`;
+      }
+      return out;
     })
     .join("");
 

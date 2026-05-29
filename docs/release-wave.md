@@ -284,11 +284,23 @@ caller repo (e.g. `rust-alc-api`) の migration deploy workflow に以下 step �
 ## Traffic (version split) — Compatibility グラフ下 (Refs #137)
 
 Compatibility グラフの直下に「Traffic (version split)」テーブルを出す。各 repo の
-worker version を **1 行ずつ** `percentage / version_id / deploy(100%)・upload(0%)
-日時` で並べ、**「どの version が 100% (active) / 0% (promote 待ち) で、それぞれ
-いつ deploy/upload されたか」**を一目で確認できる (緑 = 100% / 灰 = 0% / 黄 = その他)。
-version id は先頭 12 文字短縮 (full は hover)、日時は UTC `MM-DD HH:mm`。
+worker version を `percentage / version_id / deploy(100%)・upload(0%) 日時` で
+並べ、**「どの version が 100% (active) で、次の promote 候補 (0%) は何か」**を
+一目で確認できる (緑 = 100% / 灰 = 0% / 黄 = その他)。version id は先頭 12 文字
+短縮 (full は hover)、日時は UTC `MM-DD HH:mm`。
+
+0% (no-traffic) version は時間経過でいくらでも増える (= ノイズ) ため、表示を絞る:
+
+- traffic を受けている version (100% / canary 等、`percentage > 0`) は全行表示。
+- **active (100%) version より古い** deploy/upload の 0% version は非表示
+  (= もう用済みの過去履歴で promote 候補ではない)。
+- active より新しい 0% のうち **最新 1 件だけ**行表示 (= 次の flip 候補)。
+- それ以外の 0% は「他 N 件 (no-traffic) `最古〜最新`」の 1 行サマリに畳む。
+
 並び順は percentage 降順 → 同率は created_on 降順 (新しい version が上)。
+
+加えて Compatibility グラフの **frontend ノード hover (title)** にも、その repo の
+全 version の `% version_id` を列挙する (要望: グラフにも traffic)。
 
 加えて Compatibility グラフの **frontend ノード hover (title)** にも、その repo の
 全 version の `% version_id` を列挙する (要望: グラフにも traffic)。
