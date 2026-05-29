@@ -45,6 +45,7 @@ src/
 | `remove_label` | issues | write | Remove a single label from an issue or PR. |
 | `close_issue` | issues | write | Close an issue with optional `state_reason`. |
 | `reopen_issue` | issues | write | Reopen a closed issue. |
+| `delete_issue` | issues | write | Permanently delete an issue (irreversible; GraphQL `deleteIssue`). |
 | `get_job_logs` | logs | read | Get logs for a workflow job (tail or line range). |
 | `grep_job_logs` | logs | read | Search job logs with regex pattern. |
 | `list_pull_requests` | pulls | read | List pull requests for a repository. |
