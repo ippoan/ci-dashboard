@@ -367,8 +367,10 @@ describe("handleReleaseWaveListPageWithRepoStatus", () => {
     // Compatibility の下、Pending releases の上に置かれる。
     expect(compatIdx).toBeLessThan(repoIdx);
     expect(repoIdx).toBeLessThan(pendingIdx);
-    // discovery では repo が見つからないので空一覧コピー。
-    expect(html).toContain("リリース対象の repo はありません");
+    // compat グラフの repo (rust-alc-api) は discovery の (d) ソースで拾われ、
+    // 「Repo リリース状況」テーブルにも出る (= 空一覧ではない)。
+    expect(html).toContain("ippoan/rust-alc-api");
+    expect(html).not.toContain("リリース対象の repo はありません");
 
     // CSP header は injection 後も維持される。
     expect(res.headers.get("Content-Security-Policy")).toContain(

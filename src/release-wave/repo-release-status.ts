@@ -32,7 +32,7 @@ export interface RepoReleaseStatus {
   tagless: boolean;
 }
 
-/** 監視対象 repo の集合と tagless set を /releases と同じ 3 ソースから組む。 */
+/** 監視対象 repo の集合と tagless set を 4 ソースから組む。 */
 async function discoverRepos(
   env: Env,
 ): Promise<{ repos: string[]; tagless: Set<string> }> {
@@ -63,6 +63,20 @@ async function discoverRepos(
   // (c) TAGLESS_REPOS wrangler var。
   const tagless = parseTaglessRepos(env.TAGLESS_REPOS);
   for (const r of tagless) watched.add(r);
+
+  // (d) Compatibility (all consumers) グラフに出る repo (backend + frontend)。
+  // compat グラフにしか出ない consumer frontend (nuxt-notify 等) を取りこぼさない。
+  if (env.COMPAT_KV) {
+    try {
+      const compat = await computeGlobalCompatibility(env.COMPAT_KV);
+      for (const b of compat.backends) {
+        watched.add(b.backend_repo);
+        for (const m of b.matrix) watched.add(m.frontend);
+      }
+    } catch {
+      // compat 取得失敗 → 他ソースに委ねる
+    }
+  }
 
   return { repos: [...watched].sort(), tagless };
 }
