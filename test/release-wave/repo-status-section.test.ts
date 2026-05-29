@@ -59,7 +59,9 @@ describe("renderRepoReleaseStatusSection", () => {
     ]);
     expect(html).toContain("v2.1.0");
     expect(html).toContain("最新");
-    expect(html).not.toContain("Tag Release");
+    // legend には "直接 Tag Release できる" の文言があるので、ボタンの有無は
+    // form の action (= 実際の発火経路) で判定する。
+    expect(html).not.toContain('action="/api/release-wave/tag-release"');
   });
 
   it("shows behind repo as 要リリース summary + button", () => {
@@ -76,7 +78,7 @@ describe("renderRepoReleaseStatusSection", () => {
       status({ repo: "ippoan/ci-dashboard", tagless: true }),
     ]);
     expect(html).toContain("tagless");
-    expect(html).not.toContain("Tag Release");
+    expect(html).not.toContain('action="/api/release-wave/tag-release"');
   });
 
   it("shows errored repo as 取得失敗 with no button", () => {
@@ -85,7 +87,7 @@ describe("renderRepoReleaseStatusSection", () => {
     ]);
     expect(html).toContain("取得失敗");
     expect(html).toContain("error 1");
-    expect(html).not.toContain("Tag Release");
+    expect(html).not.toContain('action="/api/release-wave/tag-release"');
   });
 
   it("escapes repo names", () => {
