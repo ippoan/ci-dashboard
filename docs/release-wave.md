@@ -257,3 +257,25 @@ caller repo (e.g. `rust-alc-api`) の migration deploy workflow に以下 step �
 | 通知 webhook が 401 | secret 不一致 / 古い rotation 値 | secrets-rotate-pipe で 3 所同期再投入 |
 | preview-*.ippoan.org が 403 | CF Access policy 未追加 / email allowlist 外 | 本ドキュメントの "preview-* wildcard" セクション参照 |
 | flip 後 rollback が refuse | contract migration 適用済 | Admin UI の警告を確認、必要なら force 押下 (DB 手動復旧前提) |
+
+## Repo リリース状況 / 直接 Tag Release (Refs #137)
+
+`/release-wave` ページ上部の「Repo リリース状況」セクションで、監視対象 repo の
+tag 状況を一覧する。
+
+- **tag あり / なしを明示**: 最新 tag を緑 badge、未tag (= main しか無い repo) を
+  赤 badge で表示。行頭の左帯色でも状態が分かる (緑 = 最新 / 黄 = 要リリース /
+  赤 = 未tag / 灰 = tagless・取得失敗)。
+- 上部サマリに「未tag N / 要リリース N / 最新 N / tagless N」を表示。
+- **直接 Tag Release**: 未tag、または tag が default branch から離れている
+  (commits 未リリース) repo には `Tag Release` ボタンが出る。押すと
+  `POST /api/release-wave/tag-release` 経由で各 repo の `tag-release.yml`
+  workflow を `main` で `workflow_dispatch` する (tag 採番 + GitHub Release 作成は
+  workflow 側に委譲)。`/release-wave` は strict CSP (JS 無効) のため、素の
+  `<form method="post">` + Post/Redirect/Get (303 → `/release-wave`) で動く。
+- `TAGLESS_REPOS` 指定 repo は `tagless` 表示でボタンを出さない
+  (merge into default branch が release event 扱いのため)。
+
+repo 一覧の出所は `/releases` と同じ 3 ソース (Hub status / direct-push
+allowlist / `TAGLESS_REPOS`)。tag / compare / repo-meta の GitHub 呼び出しは
+release-cache の KV キャッシュ層を共用する。
