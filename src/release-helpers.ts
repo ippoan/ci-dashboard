@@ -69,6 +69,16 @@ export function sortSemverDesc(tags: readonly string[]): string[] {
 
 const SEMVER_RE = /^v?(\d+)\.(\d+)\.(\d+)/;
 
+// True for release-shaped tags ("v1.2.3" / "1.2.3"). Non-semver tags
+// (e.g. `installer-2026.05.15-…` install stamps) return false so callers can
+// drop them before treating a repo as "has release tags" — otherwise a
+// tag-less repo carrying a non-semver stamp tag is wrongly routed into the
+// tag-compare path instead of the synthetic (direct-push) path, and its open
+// Refs never surface on /releases. Refs #199.
+export function isSemverTag(tag: string): boolean {
+  return SEMVER_RE.test(tag);
+}
+
 function compareTagsDesc(a: string, b: string): number {
   const ma = a.match(SEMVER_RE);
   const mb = b.match(SEMVER_RE);

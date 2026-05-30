@@ -28,6 +28,7 @@ import {
   extractPrNumber,
   extractBranchIssue,
   sortSemverDesc,
+  isSemverTag,
   previousTag,
 } from "./release-helpers";
 import {
@@ -128,7 +129,9 @@ export async function computeReleaseAlert(
   const token = await tokenForOrg(env, owner);
 
   const tags = await cachedTags(token, kv, owner, name, 30);
-  const tagNames = tags.map((t) => t.name);
+  // Drop non-semver stamp tags (e.g. `installer-*`) so a tag-less repo isn't
+  // treated as having release tags and routed into the tag-compare path. Refs #199.
+  const tagNames = tags.map((t) => t.name).filter(isSemverTag);
   if (tagNames.length === 0) return null;
 
   const sorted = sortSemverDesc(tagNames);

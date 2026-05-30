@@ -4,6 +4,7 @@ import {
   extractPrNumber,
   extractBranchIssue,
   sortSemverDesc,
+  isSemverTag,
   previousTag,
   computeWarnings,
 } from "../src/release-helpers";
@@ -108,6 +109,24 @@ describe("sortSemverDesc", () => {
     expect(out[0]).toBe("v1.0.0");
     expect(out[1]).toBe("v0.9.0");
     expect(out[2]).toBe("release-candidate");
+  });
+});
+
+describe("isSemverTag", () => {
+  it("accepts vX.Y.Z and X.Y.Z release tags", () => {
+    expect(isSemverTag("v1.2.3")).toBe(true);
+    expect(isSemverTag("1.2.3")).toBe(true);
+    expect(isSemverTag("v0.0.1")).toBe(true);
+    expect(isSemverTag("v1.2.3-rc.1")).toBe(true); // prefix match, suffix allowed
+  });
+
+  it("rejects non-semver stamp / arbitrary tags", () => {
+    // The regression that hid claude-md from /releases: install-stamp tags
+    // counted as "tags present" and forced the stale tag-compare path. Refs #199.
+    expect(isSemverTag("installer-2026.05.15-090249-05848fc")).toBe(false);
+    expect(isSemverTag("release-candidate")).toBe(false);
+    expect(isSemverTag("dev-0.0.1")).toBe(false); // not anchored at start
+    expect(isSemverTag("")).toBe(false);
   });
 });
 

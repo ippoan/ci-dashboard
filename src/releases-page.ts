@@ -3,6 +3,7 @@ import type { AuthClientWorkerEnv } from "@ippoan/auth-client-worker";
 import {
   extractRefIssues,
   sortSemverDesc,
+  isSemverTag,
   previousTag,
   computeWarnings,
 } from "./release-helpers";
@@ -226,7 +227,11 @@ async function loadRepoView(
   // 1. Recent semver tags. 10 gives us 5 inline + room for the predecessor
   //    pairing on the oldest of those 5 + a small "older" strip.
   const allTags = await cachedTags(token, kv, owner, name, 10);
-  const sorted = sortSemverDesc(allTags.map((t) => t.name));
+  // Non-semver tags (e.g. `installer-*` install stamps) are not release tags;
+  // keep them out of topTags so a repo whose only tags are stamps still takes
+  // the synthetic (direct-push) path below instead of the stale tag-compare
+  // path — otherwise its open Refs never surface here. Refs #199.
+  const sorted = sortSemverDesc(allTags.map((t) => t.name).filter(isSemverTag));
   const topTags = sorted.slice(0, TOP_TAGS_INLINE);
   if (topTags.length === 0) {
     // Tag-less repos opted into synthetic-block rendering (either via the
