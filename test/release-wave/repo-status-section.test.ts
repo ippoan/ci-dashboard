@@ -399,6 +399,38 @@ describe("renderTrafficVersionsBlock", () => {
     const html = renderTrafficVersionsBlock(["ippoan/x"], new Map([["ippoan/x", r]]));
     expect(html).not.toContain("/api/release-wave/traffic-rollback");
   });
+
+  it("shows a reason (not a hidden row) when only no-traffic 0% versions exist (Refs #196)", () => {
+    // 現 active 1 つ + 0% no-traffic のみ。deploy_history は現 active だけなので
+    // rollback 候補は 0 件。従来は行ごと消えて理由が分からなかったが、候補外
+    // version を「rollback 先になりません」と理由付きで併記する。
+    const r: TrafficRecord = {
+      schema_version: 4,
+      repo: "ippoan/auth-worker",
+      versions: [
+        { version_id: "active-id", percentage: 100, created_on: "2026-05-28T11:37:00Z", tag: "v0.2.48" },
+        { version_id: "pending-id", percentage: 0, created_on: "2026-05-29T09:07:00Z", tag: "v0.2.49" },
+      ],
+      deploy_history: [
+        { version_id: "active-id", tag: "v0.2.48", became_active_at: "2026-05-28T11:37:00Z" },
+      ],
+      reported_at: "t",
+    };
+    const html = renderTrafficVersionsBlock(
+      ["ippoan/auth-worker"],
+      new Map([["ippoan/auth-worker", r]]),
+    );
+    // 行は黙って消えない。
+    expect(html).toContain("Rollback to (過去の deployed version):");
+    // 候補ゼロの理由が出る。
+    expect(html).toContain("戻せる先がありません");
+    // 候補外 version が理由付きで出る。
+    expect(html).toContain("候補外 (rollback 先になりません)");
+    expect(html).toContain("v0.2.49");
+    expect(html).toContain("一度も active になっていない");
+    // 実 rollback ボタン (dispatch) は出さない。
+    expect(html).not.toContain('action="/api/release-wave/traffic-rollback"');
+  });
 });
 
 describe("renderBackendRollbackBlock", () => {

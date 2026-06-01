@@ -339,19 +339,47 @@ export function renderTrafficVersionsBlock(
 }
 
 /**
- * 1 repo の Traffic 行に続けて、過去に active だった version への rollback ボタン
- * 行を返す (Refs #196)。`deploy_history` から「現 active 以外」を rollback 先候補
- * とし、各候補に `Rollback to <tag/id>` ボタンを出す。候補が無ければ ""。
+ * 1 repo の Traffic 行に続けて、rollback 行を返す (Refs #196)。
+ *
+ * - rollback **候補** = `deploy_history` のうち「現 active 以外」(= 過去に active
+ *   だった version)。各候補に `Rollback to <tag/id>` ボタンを出す。
+ * - rollback **候補外** = `versions` のうち 0% (no-traffic) でまだ一度も active に
+ *   なっていない version (= deploy_history に載っていない)。rollback 先になれない
+ *   が、「なぜボタンが無いか」を画面で分かるよう理由付きで併記する。
+ * - 候補も候補外も無ければ "" (Traffic 行が 1 version だけ等)。
  *
  * 現 active は traffic の最大 percentage version。deploy_history[0] が現 active と
  * 一致する想定だが、念のため active version_id を除いて候補を作る。
  */
 function renderTrafficRollbackRow(repo: string, rec: TrafficRecord): string {
+  const versions = rec.versions ?? [];
   const history = rec.deploy_history ?? [];
-  if (history.length === 0) return "";
-  const activeId = rec.versions.find((v) => v.percentage > 0)?.version_id ?? null;
+  const activeId = versions.find((v) => v.percentage > 0)?.version_id ?? null;
+
+  // 候補: 過去に active だった (deploy_history) が現 active でないもの。
   const candidates = history.filter((e) => e.version_id !== activeId);
-  if (candidates.length === 0) return "";
+
+  // 候補外: 現存する 0% (no-traffic) で、まだ一度も active になっていない
+  // (= deploy_history に過去 active として載っていない) version。新しい順。
+  const historyIds = new Set(history.map((e) => e.version_id));
+  const nonActive = versions
+    .filter(
+      (v) =>
+        v.percentage <= 0 &&
+        v.version_id !== activeId &&
+        !historyIds.has(v.version_id),
+    )
+    .sort((a, b) => {
+      const ca = a.created_on ?? "";
+      const cb = b.created_on ?? "";
+      if (ca === cb) return 0;
+      if (!ca) return 1;
+      if (!cb) return -1;
+      return ca < cb ? 1 : -1; // 新しい順
+    });
+
+  // 候補も候補外も無ければ従来どおり行を出さない。
+  if (candidates.length === 0 && nonActive.length === 0) return "";
 
   const buttons = candidates
     .map((e) => {
@@ -369,12 +397,32 @@ function renderTrafficRollbackRow(repo: string, rec: TrafficRecord): string {
     })
     .join("");
 
+  // 候補が 1 件も無いとき、行が黙って消える挙動をやめて理由を出す (Refs #196)。
+  const noCandidateNote =
+    candidates.length === 0
+      ? `<div class="meta" style="margin-top:4px">過去に active だった version がまだないため、戻せる先がありません。</div>`
+      : "";
+
+  // 候補外 (0% / 一度も active になっていない) version を理由付きで併記する。
+  // 最新 1 件を代表表示し、残りは「他N件」で件数だけ示す。
+  let nonActiveNote = "";
+  if (nonActive.length > 0) {
+    const head = nonActive[0]!;
+    const label = head.tag
+      ? escapeHtml(head.tag)
+      : escapeHtml(shortId(head.version_id));
+    const more = nonActive.length > 1 ? ` 他${nonActive.length - 1}件` : "";
+    nonActiveNote = `<div class="meta" style="margin-top:4px">候補外 (rollback 先になりません): ${label} (0% · 一度も active になっていない)${more}</div>`;
+  }
+
   return `
             <tr>
               <td></td>
               <td colspan="3">
                 <span class="meta">Rollback to (過去の deployed version):</span>
-                <div style="margin-top:4px">${buttons}</div>
+                ${noCandidateNote}
+                ${buttons ? `<div style="margin-top:4px">${buttons}</div>` : ""}
+                ${nonActiveNote}
               </td>
             </tr>`;
 }
