@@ -158,7 +158,7 @@ export function registerRepositoryTools(server: McpServer, env: AuthClientWorker
   // symbol 検索はローカル (smart-read skill / session 内 LSP) で行う方が速く、
   // MCP 往復が要らない。symbol index の D1 は残すが、用途は MCP query ではなく
   // (1) skills/map の鮮度比較 (repos.src_hash) と (2) 人間向け view 生成。
-  // 投入は POST /internal/symbol-index (src/symbol-index.ts)。
+  // 投入は POST /webhooks/symbol-index (src/symbol-index.ts)。
   // 設計: ippoan/claude-skills の cross-repo-symbol-index skill。
 }
 
