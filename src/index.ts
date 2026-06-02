@@ -19,6 +19,7 @@ import { handleTagRelease } from "./tag-release";
 import { handleReleaseWaveTagRelease } from "./release-wave/tag-release-action";
 import { handleReleaseWaveListPageWithRepoStatus } from "./release-wave/repo-status-section";
 import { handleMcpRequest } from "./mcp/server";
+import { handleSymbolIndexIngest } from "./symbol-index";
 import {
   handleContractAppliedWebhook,
   handleStageReportWebhook,
@@ -79,6 +80,15 @@ export interface Env extends AuthClientWorkerEnv {
    * Refs #157 / #158、shape は docs/release-wave-compatibility-kv.md。
    */
   COMPAT_KV: KVNamespace;
+  /**
+   * cross-repo symbol index (D1)。CI (ci-workflows symbol-index.yml) が LSP
+   * 抽出した symbol を `/internal/symbol-index` 経由で投入し、MCP の
+   * `search_symbols` が読む。未投入時は search_symbols が GitHub code-search に
+   * fallback するため optional。設計: claude-skills の cross-repo-symbol-index skill。
+   */
+  SYMBOL_INDEX?: D1Database;
+  /** symbol index generator の認証用 shared secret (Secrets Store)。 */
+  SYMBOL_INDEX_INGEST_SECRET?: SecretsStoreSecret;
 }
 
 // OAuth flow config — shared between /oauth/login, /oauth/callback, and the
@@ -214,6 +224,11 @@ app.get("/oauth/callback", (c) => handleOAuthCallback(c.req.raw, c.env, OAUTH_OP
 
 // MCP endpoint (Streamable HTTP)
 app.all("/mcp", (c) => handleMcpRequest(c.req.raw, c.env));
+
+// cross-repo symbol index: CI generator (ci-workflows symbol-index.yml) が
+// LSP 抽出した symbol を投入する internal endpoint。Bearer 認証
+// (SYMBOL_INDEX_INGEST_SECRET)。設計: claude-skills cross-repo-symbol-index。
+app.post("/internal/symbol-index", (c) => handleSymbolIndexIngest(c.req.raw, c.env));
 
 // Release Wave: GitHub Actions step が叩く HTTP webhook 3 本 (Refs #137
 // Phase 3d + Phase 4)。MCP 経路と機能等価だが OAuth 不要の shared secret

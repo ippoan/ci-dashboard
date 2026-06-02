@@ -2,8 +2,13 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { githubApi, parseRepo, tokenForOrg } from "../../github-api";
 import type { AuthClientWorkerEnv } from "@ippoan/auth-client-worker";
+import { searchSymbolsInD1, formatSymbolResults } from "../../symbol-index";
 
-export function registerRepositoryTools(server: McpServer, env: AuthClientWorkerEnv): void {
+// search_symbols は optional な D1 backend (cross-repo symbol index) を使う。
+// binding が無い / 未投入の repo では従来の GitHub code-search に fallback する。
+type RepositoryToolsEnv = AuthClientWorkerEnv & { SYMBOL_INDEX?: D1Database };
+
+export function registerRepositoryTools(server: McpServer, env: RepositoryToolsEnv): void {
   server.registerTool(
     "get_file_tree",
     {
@@ -170,6 +175,17 @@ export function registerRepositoryTools(server: McpServer, env: AuthClientWorker
     },
     async ({ repo, symbol, kind, language, per_page }) => {
       const { owner, repo: name } = parseRepo(repo);
+
+      // D1 (LSP 抽出済み index) を優先。ヒットすれば行範囲付きで返す。
+      // binding 無し / 未投入 / ヒット無しのときは GitHub code-search に fallback。
+      if (env.SYMBOL_INDEX) {
+        const q = { repo: name, name: symbol, kind, language, perPage: per_page };
+        const rows = await searchSymbolsInD1(env.SYMBOL_INDEX, q);
+        if (rows.length > 0) {
+          return { content: [{ type: "text" as const, text: formatSymbolResults(rows, q) }] };
+        }
+      }
+
       const token = await tokenForOrg(env, owner);
 
       const keyword = kind ? symbolKeyword(kind, language) : "";
