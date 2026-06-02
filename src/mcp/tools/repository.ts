@@ -2,13 +2,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { githubApi, parseRepo, tokenForOrg } from "../../github-api";
 import type { AuthClientWorkerEnv } from "@ippoan/auth-client-worker";
-import { searchSymbolsInD1, formatSymbolResults } from "../../symbol-index";
 
-// search_symbols は optional な D1 backend (cross-repo symbol index) を使う。
-// binding が無い / 未投入の repo では従来の GitHub code-search に fallback する。
-type RepositoryToolsEnv = AuthClientWorkerEnv & { SYMBOL_INDEX?: D1Database };
-
-export function registerRepositoryTools(server: McpServer, env: RepositoryToolsEnv): void {
+export function registerRepositoryTools(server: McpServer, env: AuthClientWorkerEnv): void {
   server.registerTool(
     "get_file_tree",
     {
@@ -159,75 +154,12 @@ export function registerRepositoryTools(server: McpServer, env: RepositoryToolsE
     },
   );
 
-  server.registerTool(
-    "search_symbols",
-    {
-      description: "Search for symbol definitions (functions, classes, structs, types) in a repository. LSP-like definition finder.",
-      inputSchema: {
-        repo: z.string().describe("Repository (e.g. 'rust-alc-api')"),
-        symbol: z.string().describe("Symbol name to search for"),
-        kind: z.enum(["function", "class", "struct", "interface", "type", "enum", "trait", "mod"]).optional()
-          .describe("Symbol kind — builds language-aware query (e.g. 'fn' for Rust function)"),
-        language: z.string().optional().describe("Language filter (e.g. 'rust', 'typescript')"),
-        per_page: z.number().min(1).max(50).default(10).describe("Results per page (default 10)"),
-      },
-      annotations: { readOnlyHint: true },
-    },
-    async ({ repo, symbol, kind, language, per_page }) => {
-      const { owner, repo: name } = parseRepo(repo);
-
-      // D1 (LSP 抽出済み index) を優先。ヒットすれば行範囲付きで返す。
-      // binding 無し / 未投入 / ヒット無しのときは GitHub code-search に fallback。
-      if (env.SYMBOL_INDEX) {
-        const q = { repo: name, name: symbol, kind, language, perPage: per_page };
-        const rows = await searchSymbolsInD1(env.SYMBOL_INDEX, q);
-        if (rows.length > 0) {
-          return { content: [{ type: "text" as const, text: formatSymbolResults(rows, q) }] };
-        }
-      }
-
-      const token = await tokenForOrg(env, owner);
-
-      const keyword = kind ? symbolKeyword(kind, language) : "";
-      const quotedSymbol = keyword ? `"${keyword} ${symbol}"` : `"${symbol}"`;
-
-      let q = `${quotedSymbol} repo:${owner}/${name}`;
-      if (language) q += ` language:${language}`;
-
-      const data = await githubApi<SearchCodeResponse>(
-        token, "GET", "/search/code", undefined,
-        { q, per_page: String(per_page) },
-        { Accept: "application/vnd.github.text-match+json" },
-      );
-
-      const results = data.items.map((item) => {
-        const fragments = (item.text_matches ?? [])
-          .map((m) => m.fragment)
-          .join("\n---\n");
-        return `## ${item.path}\n${fragments || "(no text preview)"}`;
-      });
-
-      const header = `${data.total_count} matches for ${kind ?? "symbol"} "${symbol}"`;
-      return { content: [{ type: "text" as const, text: `${header}\n\n${results.join("\n\n")}` }] };
-    },
-  );
-}
-
-function symbolKeyword(kind: string, language?: string): string {
-  const lang = language?.toLowerCase();
-  const keywords: Record<string, Record<string, string>> = {
-    function: { rust: "fn", python: "def", go: "func", _default: "function" },
-    class: { _default: "class" },
-    struct: { _default: "struct" },
-    interface: { go: "type", _default: "interface" },
-    type: { rust: "type", go: "type", _default: "type" },
-    enum: { _default: "enum" },
-    trait: { _default: "trait" },
-    mod: { rust: "mod", python: "import", _default: "module" },
-  };
-  const kindMap = keywords[kind];
-  if (!kindMap) return kind;
-  return (lang && kindMap[lang]) || kindMap._default || kind;
+  // search_symbols は MCP tool から外した。CCoW では repo が clone 済みなので
+  // symbol 検索はローカル (smart-read skill / session 内 LSP) で行う方が速く、
+  // MCP 往復が要らない。symbol index の D1 は残すが、用途は MCP query ではなく
+  // (1) skills/map の鮮度比較 (repos.src_hash) と (2) 人間向け view 生成。
+  // 投入は POST /internal/symbol-index (src/symbol-index.ts)。
+  // 設計: ippoan/claude-skills の cross-repo-symbol-index skill。
 }
 
 interface GitTree {
