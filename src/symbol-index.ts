@@ -224,7 +224,7 @@ function clampPerPage(n: number | undefined): number {
   return Math.max(1, Math.min(50, Math.floor(n)));
 }
 
-// --- ingest endpoint (generator → POST /internal/symbol-index) ---
+// --- ingest endpoint (generator → POST /webhooks/symbol-index) ---
 
 export interface SymbolIndexEnv {
   /** cross-repo symbol index (optional)。未投入なら ingest は 503。 */
