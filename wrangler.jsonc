@@ -96,6 +96,15 @@
       "binding": "RELEASE_WAVE_WEBHOOK_SECRET",
       "store_id": "bd7bc91a3e5f4111add4acf6cb4b8733",
       "secret_name": "release-wave-webhook-secret"
+    },
+    // cross-repo symbol index の generator (ci-workflows symbol-index.yml) が
+    // POST /internal/symbol-index を叩く際の Bearer secret。GCP Secret Manager
+    // `SYMBOL_INDEX_INGEST_SECRET` を SoT とし CF/GitHub org secret に同値投入
+    // (secret-inject skill 経由)。caller repo は同名 org secret を持つ。
+    {
+      "binding": "SYMBOL_INDEX_INGEST_SECRET",
+      "store_id": "bd7bc91a3e5f4111add4acf6cb4b8733",
+      "secret_name": "SYMBOL_INDEX_INGEST_SECRET"
     }
   ],
   // ci-workflows/secret-verify-gcp.yml が読む宣言。GCP Secret Manager 上に
@@ -107,7 +116,8 @@
     "required": [
       "JWT_FOR_CI_DASHBOARD",
       "webhook-secret-ci-dashboard",
-      "release-wave-webhook-secret"
+      "release-wave-webhook-secret",
+      "SYMBOL_INDEX_INGEST_SECRET"
     ]
   },
   // staging を実運用 env として扱う (secrets-inventory と同じパターン)。
@@ -192,6 +202,11 @@
           "binding": "WEBHOOK_SECRET",
           "store_id": "bd7bc91a3e5f4111add4acf6cb4b8733",
           "secret_name": "webhook-secret-ci-dashboard"
+        },
+        {
+          "binding": "SYMBOL_INDEX_INGEST_SECRET",
+          "store_id": "bd7bc91a3e5f4111add4acf6cb4b8733",
+          "secret_name": "SYMBOL_INDEX_INGEST_SECRET"
         }
       ]
     }
