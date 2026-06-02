@@ -116,8 +116,7 @@
     "required": [
       "JWT_FOR_CI_DASHBOARD",
       "webhook-secret-ci-dashboard",
-      "release-wave-webhook-secret",
-      "SYMBOL_INDEX_INGEST_SECRET"
+      "release-wave-webhook-secret"
     ]
   },
   // staging を実運用 env として扱う (secrets-inventory と同じパターン)。
