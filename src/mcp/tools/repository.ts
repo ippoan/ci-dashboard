@@ -155,10 +155,9 @@ export function registerRepositoryTools(server: McpServer, env: AuthClientWorker
   );
 
   // search_symbols は MCP tool から外した。CCoW では repo が clone 済みなので
-  // symbol 検索はローカル (smart-read skill / session 内 LSP) で行う方が速く、
-  // MCP 往復が要らない。symbol index の D1 は残すが、用途は MCP query ではなく
-  // (1) skills/map の鮮度比較 (repos.src_hash) と (2) 人間向け view 生成。
-  // 投入は POST /webhooks/symbol-index (src/symbol-index.ts)。
+  // symbol 検索はローカル (smart-read / その場 ctags、~4秒/全 repo) の方が速く、
+  // MCP 往復も index 保存も要らない。横断 symbol index (D1/ingest/CI) は過剰だった
+  // ため撤去済み。skill が code と乖離してないかは SessionStart hook で検知する。
   // 設計: ippoan/claude-skills の cross-repo-symbol-index skill。
 }
 
