@@ -19,8 +19,6 @@ import { handleTagRelease } from "./tag-release";
 import { handleReleaseWaveTagRelease } from "./release-wave/tag-release-action";
 import { handleReleaseWaveListPageWithRepoStatus } from "./release-wave/repo-status-section";
 import { handleMcpRequest } from "./mcp/server";
-import { handleSymbolIndexIngest } from "./symbol-index";
-import { handleFreshness, handleRepoHead } from "./symbol-freshness";
 import {
   handleContractAppliedWebhook,
   handleStageReportWebhook,
@@ -81,15 +79,6 @@ export interface Env extends AuthClientWorkerEnv {
    * Refs #157 / #158、shape は docs/release-wave-compatibility-kv.md。
    */
   COMPAT_KV: KVNamespace;
-  /**
-   * cross-repo symbol index (D1)。CI (ci-workflows symbol-index.yml) が ctags
-   * 抽出した symbol を `/webhooks/symbol-index` 経由で投入し、鮮度比較 / 横断 query
-   * に使う (symbol 検索自体はローカル)。未投入時 read は空を返すため optional。
-   * 設計: claude-skills の cross-repo-symbol-index skill。
-   */
-  SYMBOL_INDEX?: D1Database;
-  /** symbol index generator の認証用 shared secret (Secrets Store)。 */
-  SYMBOL_INDEX_INGEST_SECRET?: SecretsStoreSecret;
 }
 
 // OAuth flow config — shared between /oauth/login, /oauth/callback, and the
@@ -225,19 +214,6 @@ app.get("/oauth/callback", (c) => handleOAuthCallback(c.req.raw, c.env, OAUTH_OP
 
 // MCP endpoint (Streamable HTTP)
 app.all("/mcp", (c) => handleMcpRequest(c.req.raw, c.env));
-
-// cross-repo symbol index: CI generator (ci-workflows symbol-index.yml) が
-// ctags 抽出した symbol を投入する endpoint。Bearer 認証 (SYMBOL_INDEX_INGEST_SECRET)。
-// ★ `/webhooks/*` 配下に置く: この prefix は CF Access が bypass するため外部 (CI)
-//   から到達できる。`/internal/*` は CF Access の裏で 302 になり generator が
-//   到達不能だった (index.ts の /webhook 注記参照)。設計: claude-skills cross-repo-symbol-index。
-app.post("/webhooks/symbol-index", (c) => handleSymbolIndexIngest(c.req.raw, c.env));
-
-// 鮮度比較: D1 の baseline (repos.src_hash) と各 repo の現在の main tree hash を
-// 比較し stale な repo を返す (open read、hash は機微でない)。hook が叩いて警告する。
-app.get("/webhooks/symbol-index/freshness", (c) => handleFreshness(c.req.raw, c.env));
-// generator が incremental 差分の基点 (前回 head_sha) を取る read。
-app.get("/webhooks/symbol-index/head/:repo", (c) => handleRepoHead(c.req.param("repo"), c.env));
 
 // Release Wave: GitHub Actions step が叩く HTTP webhook 3 本 (Refs #137
 // Phase 3d + Phase 4)。MCP 経路と機能等価だが OAuth 不要の shared secret

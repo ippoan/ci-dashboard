@@ -50,18 +50,6 @@
       "new_sqlite_classes": ["ReleaseWaveHub"]
     }
   ],
-  // cross-repo symbol index (D1)。CI (ci-workflows symbol-index.yml) が ctags/LSP
-  // 抽出した symbol を `/internal/symbol-index` 経由で投入し、MCP の search_symbols
-  // が読む。schema は migrations/0001_symbol_index.sql。未投入/空のときは
-  // search_symbols が GitHub code-search に fallback する。設計は claude-skills の
-  // cross-repo-symbol-index skill。
-  "d1_databases": [
-    {
-      "binding": "SYMBOL_INDEX",
-      "database_name": "symbol-index",
-      "database_id": "fcc78c58-d1fd-4e3c-8548-eb07c87755c0"
-    }
-  ],
   // GitHub auth は @ippoan/auth-client-worker 経由で auth-worker に delegate
   // (issue #118)。`/oauth/login` ブラウザフロー (Auth Code + PKCE) でログイン後、
   // access_token + refresh_token は CI_STATUS KV に SDK が保存する。
@@ -96,15 +84,6 @@
       "binding": "RELEASE_WAVE_WEBHOOK_SECRET",
       "store_id": "bd7bc91a3e5f4111add4acf6cb4b8733",
       "secret_name": "release-wave-webhook-secret"
-    },
-    // cross-repo symbol index の generator (ci-workflows symbol-index.yml) が
-    // POST /internal/symbol-index を叩く際の Bearer secret。GCP Secret Manager
-    // `SYMBOL_INDEX_INGEST_SECRET` を SoT とし CF/GitHub org secret に同値投入
-    // (secret-inject skill 経由)。caller repo は同名 org secret を持つ。
-    {
-      "binding": "SYMBOL_INDEX_INGEST_SECRET",
-      "store_id": "bd7bc91a3e5f4111add4acf6cb4b8733",
-      "secret_name": "SYMBOL_INDEX_INGEST_SECRET"
     }
   ],
   // ci-workflows/secret-verify-gcp.yml が読む宣言。GCP Secret Manager 上に
@@ -179,13 +158,6 @@
           "new_sqlite_classes": ["ReleaseWaveHub"]
         }
       ],
-      "d1_databases": [
-        {
-          "binding": "SYMBOL_INDEX",
-          "database_name": "symbol-index",
-          "database_id": "fcc78c58-d1fd-4e3c-8548-eb07c87755c0"
-        }
-      ],
       "secrets_store_secrets": [
         {
           "binding": "RELEASE_WAVE_WEBHOOK_SECRET",
@@ -201,11 +173,6 @@
           "binding": "WEBHOOK_SECRET",
           "store_id": "bd7bc91a3e5f4111add4acf6cb4b8733",
           "secret_name": "webhook-secret-ci-dashboard"
-        },
-        {
-          "binding": "SYMBOL_INDEX_INGEST_SECRET",
-          "store_id": "bd7bc91a3e5f4111add4acf6cb4b8733",
-          "secret_name": "SYMBOL_INDEX_INGEST_SECRET"
         }
       ]
     }
