@@ -50,6 +50,18 @@
       "new_sqlite_classes": ["ReleaseWaveHub"]
     }
   ],
+  // cross-repo symbol index (D1)。CI (ci-workflows symbol-index.yml) が ctags/LSP
+  // 抽出した symbol を `/internal/symbol-index` 経由で投入し、MCP の search_symbols
+  // が読む。schema は migrations/0001_symbol_index.sql。未投入/空のときは
+  // search_symbols が GitHub code-search に fallback する。設計は claude-skills の
+  // cross-repo-symbol-index skill。
+  "d1_databases": [
+    {
+      "binding": "SYMBOL_INDEX",
+      "database_name": "symbol-index",
+      "database_id": "fcc78c58-d1fd-4e3c-8548-eb07c87755c0"
+    }
+  ],
   // GitHub auth は @ippoan/auth-client-worker 経由で auth-worker に delegate
   // (issue #118)。`/oauth/login` ブラウザフロー (Auth Code + PKCE) でログイン後、
   // access_token + refresh_token は CI_STATUS KV に SDK が保存する。
@@ -156,6 +168,13 @@
         {
           "tag": "v2",
           "new_sqlite_classes": ["ReleaseWaveHub"]
+        }
+      ],
+      "d1_databases": [
+        {
+          "binding": "SYMBOL_INDEX",
+          "database_name": "symbol-index",
+          "database_id": "fcc78c58-d1fd-4e3c-8548-eb07c87755c0"
         }
       ],
       "secrets_store_secrets": [
