@@ -54,7 +54,11 @@ const ALL_REPOS = [
   "ippoan/ippoan-drift",
 ];
 
-const REPO_RE = /^[^/\s,]+\/[^/\s,]+$/;
+// Restrict to GitHub's actual valid owner/repo characters (alphanumeric, `-`,
+// `_`, `.`). This is the security boundary: a looser pattern (e.g. "anything
+// but `/ , space`") would let a token contain `&` / `=` and inject extra query
+// params into the reconstructed claude.ai/code URL (e.g. a forged `&prompt=`).
+const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
 // `r` is either a preset keyword (no `/` → full set) or a comma-separated
 // explicit `owner/repo` list (filtered to valid tokens).
@@ -88,10 +92,15 @@ export function handleLaunch(req: Request): Response {
     url.searchParams.get("p")?.trim() ||
     `${issue} を read してチェックリストを順に処理。全 repo default branch。`;
 
-  // Build the query by hand: commas in `repositories` must stay raw (claude.ai
-  // /code expects unescaped `,`), only `prompt` is percent-encoded.
+  // Build the query by hand: commas between repos must stay raw (claude.ai/code
+  // expects unescaped `,`), but each `owner/repo` component is percent-encoded
+  // so no token can break out of the `repositories` parameter context (defence
+  // in depth on top of REPO_RE). `prompt` is percent-encoded as a whole.
+  const encodedRepos = repos
+    .map((r) => r.split("/").map(encodeURIComponent).join("/"))
+    .join(",");
   const target =
-    `${LAUNCH_BASE}?repositories=${repos.join(",")}` +
+    `${LAUNCH_BASE}?repositories=${encodedRepos}` +
     `&prompt=${encodeURIComponent(prompt)}`;
 
   return new Response(null, { status: 302, headers: { Location: target } });
