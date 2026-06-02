@@ -20,6 +20,7 @@ import { handleReleaseWaveTagRelease } from "./release-wave/tag-release-action";
 import { handleReleaseWaveListPageWithRepoStatus } from "./release-wave/repo-status-section";
 import { handleMcpRequest } from "./mcp/server";
 import { handleSymbolIndexIngest } from "./symbol-index";
+import { handleFreshness, handleRepoHead } from "./symbol-freshness";
 import {
   handleContractAppliedWebhook,
   handleStageReportWebhook,
@@ -229,6 +230,12 @@ app.all("/mcp", (c) => handleMcpRequest(c.req.raw, c.env));
 // LSP 抽出した symbol を投入する internal endpoint。Bearer 認証
 // (SYMBOL_INDEX_INGEST_SECRET)。設計: claude-skills cross-repo-symbol-index。
 app.post("/internal/symbol-index", (c) => handleSymbolIndexIngest(c.req.raw, c.env));
+
+// 鮮度比較: D1 の baseline (repos.src_hash) と各 repo の現在の main tree hash を
+// 比較し stale な repo を返す (open read、hash は機微でない)。hook が叩いて警告する。
+app.get("/symbol-index/freshness", (c) => handleFreshness(c.req.raw, c.env));
+// generator が incremental 差分の基点 (前回 head_sha) を取る read。
+app.get("/symbol-index/head/:repo", (c) => handleRepoHead(c.req.param("repo"), c.env));
 
 // Release Wave: GitHub Actions step が叩く HTTP webhook 3 本 (Refs #137
 // Phase 3d + Phase 4)。MCP 経路と機能等価だが OAuth 不要の shared secret

@@ -76,6 +76,50 @@ export function formatSymbolResults(rows: SymbolRow[], q: SymbolQuery): string {
   return body ? `${header}\n\n${body}` : header;
 }
 
+// --- 鮮度比較 (skills/map staleness) ---
+
+/** repos テーブルの行 (鮮度比較に使う最小列)。 */
+export interface RepoState {
+  repo: string;
+  src_hash: string | null;
+  updated_at: number | null;
+}
+
+/** D1 に index 済みの全 repo の baseline (src_hash) を読む。 */
+export async function readRepos(db: D1Like): Promise<RepoState[]> {
+  const { results } = await db
+    .prepare(`SELECT repo, src_hash, updated_at FROM repos ORDER BY repo`)
+    .bind()
+    .all<RepoState>();
+  return results ?? [];
+}
+
+/**
+ * baseline (index した時の tree hash) と現在の tree hash を比べて stale 判定。
+ * 内容ハッシュ比較なので squash merge / pull 未済をまたいでも壊れない
+ * (cross-repo-symbol-index skill の設計参照)。current が不明 (null) のときは
+ * 判定不能として false (= stale 扱いしない。「不明」を「あり」に倒さない)。
+ */
+export function isStale(baseline: string | null, current: string | null): boolean {
+  if (!baseline || !current) return false;
+  return baseline !== current;
+}
+
+/**
+ * generator が incremental 差分の基点に使う、前回 index 時の head_sha / src_hash。
+ * 未 index (初回) は null を返す → generator はフルスキャンに倒す。
+ */
+export async function readRepoHead(
+  db: D1Like,
+  repo: string,
+): Promise<{ head_sha: string | null; src_hash: string | null } | null> {
+  const { results } = await db
+    .prepare(`SELECT head_sha, src_hash FROM repos WHERE repo = ? LIMIT 1`)
+    .bind(repo)
+    .all<{ head_sha: string | null; src_hash: string | null }>();
+  return results?.[0] ?? null;
+}
+
 /** 抽出済み symbol を D1 に投入する payload (generator → ingest endpoint)。 */
 export interface IngestPayload {
   repo: string;
@@ -83,6 +127,19 @@ export interface IngestPayload {
   head_sha?: string;
   summary?: string;
   lang?: string;
+  /**
+   * full  = repo 全体を ctags し直した (初回 / baseline 不明 / 大改修)。
+   * incremental = 前回 head_sha からの git 差分のみ再 ctags した。
+   * 省略時は full (後方互換)。
+   */
+  mode?: "full" | "incremental";
+  /**
+   * incremental 時、再 ctags した file path 群 (symbol が 0 になった file も含む)。
+   * これらの既存 symbol を file 単位で消してから symbols を入れ直す。
+   */
+  changed_files?: string[];
+  /** incremental 時、git diff で削除された file path 群。symbol を file 単位で消す。 */
+  deleted_files?: string[];
   symbols: Array<{
     name: string;
     kind: string;
@@ -95,12 +152,24 @@ export interface IngestPayload {
 }
 
 /**
- * generator から受けた payload を D1 に反映する。repo 単位の置き換え
- * (古い symbol を消してから入れ直す) — incremental の file 単位差分は
- * generator 側で file_hash を見て払い出す payload を絞る前提。
+ * generator から受けた payload を D1 に反映する。
+ * - full: repo 全 symbol を消してから入れ直す。
+ * - incremental: changed_files ∪ deleted_files ∪ symbols の file_path だけを
+ *   file 単位で消してから、changed の symbols を入れ直す (初回フル→以後 git 差分)。
  */
 export async function ingestSymbols(db: D1Like, p: IngestPayload): Promise<number> {
-  await db.prepare(`DELETE FROM symbols WHERE repo = ?`).bind(p.repo).run();
+  if (p.mode === "incremental") {
+    const clear = new Set<string>([
+      ...(p.changed_files ?? []),
+      ...(p.deleted_files ?? []),
+      ...p.symbols.map((s) => s.file_path),
+    ]);
+    for (const fp of clear) {
+      await db.prepare(`DELETE FROM symbols WHERE repo = ? AND file_path = ?`).bind(p.repo, fp).run();
+    }
+  } else {
+    await db.prepare(`DELETE FROM symbols WHERE repo = ?`).bind(p.repo).run();
+  }
   for (const s of p.symbols) {
     await db
       .prepare(
