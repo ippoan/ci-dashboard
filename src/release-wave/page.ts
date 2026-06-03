@@ -603,10 +603,19 @@ function renderFlipGroupRollback(flipGroup: FlipGroupRecord | null): string {
   const rollbackable = flipGroup.items.filter((it) => it.rollback_to);
   const repoList = flipGroup.items
     .map((it) => {
-      const to = it.rollback_to
-        ? `→ ${escapeHtml((it.rollback_tag ?? it.rollback_to).slice(0, 16))}`
+      // 単一 rollback: repo を指定して flip-group-rollback に POST (= その repo
+      // だけ flip 直前の version へ戻す)。戻し先未記録の repo はボタンを出さない。
+      const single = it.rollback_to
+        ? `→ ${escapeHtml((it.rollback_tag ?? it.rollback_to).slice(0, 16))}
+           <form method="post" action="/api/release-wave/pending-release/flip-group-rollback"
+                 style="display:inline;margin-left:6px"
+                 onsubmit="return confirm('${escapeHtml(it.repo)} を flip 直前の version へ rollback します。よろしいですか？');">
+             <input type="hidden" name="repo" value="${escapeHtml(it.repo)}">
+             <button type="submit"
+               title="この repo だけ flip 直前の version へ rollback">↩ Rollback</button>
+           </form>`
         : `<span class="meta">(戻し先不明)</span>`;
-      return `<li>${escapeHtml(it.repo)} <span class="meta">${escapeHtml(it.flipped_tag)}</span> ${to}</li>`;
+      return `<li>${escapeHtml(it.repo)} <span class="meta">${escapeHtml(it.flipped_tag)}</span> ${single}</li>`;
     })
     .join("");
   const btn =
