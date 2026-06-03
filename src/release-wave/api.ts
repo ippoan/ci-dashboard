@@ -396,23 +396,6 @@ function buildTrafficRollbackDispatch(
   };
 }
 
-/**
- * traffic record から「現在 active な version」(= flip 前の戻し先候補) を返す。
- * deploy_history の先頭 (index 0 = 現 active) を最優先。無ければ versions[] の
- * 100% / 最大 traffic から拾う。判定できなければ null。
- */
-function currentActiveVersion(
-  traffic: TrafficRecord | null,
-): { version_id: string; tag: string | null } | null {
-  if (!traffic) return null;
-  const hist = traffic.deploy_history ?? [];
-  if (hist[0]) return { version_id: hist[0].version_id, tag: hist[0].tag ?? null };
-  const active =
-    traffic.versions.find((v) => v.percentage === 100) ??
-    traffic.versions.find((v) => v.percentage > 0);
-  return active ? { version_id: active.version_id, tag: active.tag ?? null } : null;
-}
-
 // ----------------------------------------------------------------------------
 // POST /api/release-wave/pending-release/flip  (Refs #181 / #174)
 // ----------------------------------------------------------------------------
@@ -525,7 +508,8 @@ export async function handleReleaseWavePendingReleaseFlipAll(
   // source 別に dispatch を組む:
   //  - traffic (workers): traffic-rollback (wrangler versions deploy <id>@100%)
   //  - pending (cloudrun 等): release-wave-flip (handler が platform routing)
-  // 戻し先 (rollback_to) は traffic 由来のみ取れる (computeUnifiedPending が控える)。
+  // 戻し先 (rollback_to) は computeUnifiedPending が traffic:: record から控える
+  // (traffic source / pending source どちらも、traffic:: があれば現 active)。
   const dispatches = unified.map((u) =>
     u.source === "traffic"
       ? buildTrafficRollbackDispatch(u.repo, u.version_id, u.tag)
@@ -584,23 +568,32 @@ function unifiedToRecord(u: UnifiedPending): PendingReleaseRecord {
  */
 async function loadUnifiedPending(env: Env): Promise<UnifiedPending[]> {
   if (!env.COMPAT_KV) return [];
-  let trafficByRepo = new Map<string, TrafficRecord>();
-  try {
-    const compat = await computeGlobalCompatibility(env.COMPAT_KV);
-    const repos = new Set<string>();
-    for (const b of compat.backends) {
-      repos.add(b.backend_repo);
-      for (const m of b.matrix) repos.add(m.frontend);
-    }
-    trafficByRepo = await getTrafficForRepos(env.COMPAT_KV, repos);
-  } catch {
-    // traffic 取得失敗時は pending-release:: のみで degrade。
-  }
   let pending: PendingReleaseRecord[] = [];
   try {
     pending = await listPendingReleases(env.COMPAT_KV);
   } catch {
     pending = [];
+  }
+  // traffic を引く repo = compat グラフ (backend + frontend) ∪ pending repo。
+  // pending repo も含めることで、pending source (cloudrun 等で compat グラフに
+  // 出ていない repo) でも現 active を rollback 先として控えられる
+  // (= 一括 flip → flip-group rollback の戻し先確保、Refs #241)。
+  const repos = new Set<string>();
+  try {
+    const compat = await computeGlobalCompatibility(env.COMPAT_KV);
+    for (const b of compat.backends) {
+      repos.add(b.backend_repo);
+      for (const m of b.matrix) repos.add(m.frontend);
+    }
+  } catch {
+    // compat 取得失敗時は pending repo のみで degrade。
+  }
+  for (const r of pending) repos.add(r.repo);
+  let trafficByRepo = new Map<string, TrafficRecord>();
+  try {
+    trafficByRepo = await getTrafficForRepos(env.COMPAT_KV, repos);
+  } catch {
+    // traffic 取得失敗時は pending-release:: のみで degrade。
   }
   return computeUnifiedPending(trafficByRepo, pending);
 }

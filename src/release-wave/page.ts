@@ -172,29 +172,11 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
       globalCompat = null;
     }
   }
-  // compat グラフに出る repo (backend + frontend) の version traffic を引く。
-  // グラフの frontend ノード hover に「現 active version の % / id」を出す用。
-  let trafficByRepo: Map<string, TrafficRecord> = new Map();
-  if (env.COMPAT_KV && globalCompat) {
-    const repos = new Set<string>();
-    for (const b of globalCompat.backends) {
-      repos.add(b.backend_repo);
-      for (const m of b.matrix) repos.add(m.frontend);
-    }
-    try {
-      trafficByRepo = await getTrafficForRepos(env.COMPAT_KV, repos);
-    } catch {
-      trafficByRepo = new Map();
-    }
-  }
-  const compatSection = renderGlobalCompatibilitySection(
-    globalCompat,
-    buildActiveWaveInfo(waves),
-    trafficByRepo,
-  );
-
   // 単独 v* リリースで upload された no-traffic version の一覧 (Refs #181)。
   // + 直近の一括 flip (flip-group) — 一括 rollback 用 (Refs #237)。
+  // traffic fetch より先に引く: pending repo の traffic も併せて取得して、
+  // computeUnifiedPending が pending source の rollback 先を埋められるようにする
+  // (= flip-all / flip-group rollback と表示を揃える、Refs #241)。
   let pendingReleases: PendingReleaseRecord[] = [];
   let flipGroup: FlipGroupRecord | null = null;
   if (env.COMPAT_KV) {
@@ -209,6 +191,32 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
       flipGroup = null;
     }
   }
+
+  // compat グラフに出る repo (backend + frontend) + pending repo の version
+  // traffic を引く。グラフの frontend ノード hover に「現 active version の
+  // % / id」を出す用 + Pending releases の単一真実導出用 (Refs #237)。
+  let trafficByRepo: Map<string, TrafficRecord> = new Map();
+  if (env.COMPAT_KV) {
+    const repos = new Set<string>();
+    if (globalCompat) {
+      for (const b of globalCompat.backends) {
+        repos.add(b.backend_repo);
+        for (const m of b.matrix) repos.add(m.frontend);
+      }
+    }
+    for (const r of pendingReleases) repos.add(r.repo);
+    try {
+      trafficByRepo = await getTrafficForRepos(env.COMPAT_KV, repos);
+    } catch {
+      trafficByRepo = new Map();
+    }
+  }
+  const compatSection = renderGlobalCompatibilitySection(
+    globalCompat,
+    buildActiveWaveInfo(waves),
+    trafficByRepo,
+  );
+
   // Pending releases は単一真実 (Refs #237): workers=traffic:: の no-traffic
   // version / cloudrun=pending-release:: を統合し、Traffic セクションと一致させる。
   const unifiedPending = computeUnifiedPending(trafficByRepo, pendingReleases);

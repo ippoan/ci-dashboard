@@ -400,11 +400,11 @@ describe("renderTrafficVersionsBlock", () => {
     expect(html).not.toContain("/api/release-wave/traffic-rollback");
   });
 
-  it("offers a Flip-to-100% button for no-traffic 0% versions (Refs #196 / #237)", () => {
+  it("no longer renders a Flip button in the Traffic section for no-traffic 0% versions (moved to Pending releases, Refs #237)", () => {
     // 現 active 1 つ + 0% no-traffic のみ。deploy_history は現 active だけなので
-    // rollback (過去 active への戻し) 候補は 0 件。だが 0% no-traffic version は
-    // 「Flip to 100%」で再 flip できるようにする (#237: flip→rollback で戻った
-    // no-traffic version の救済)。
+    // 過去 active への rollback 候補は 0 件。0% no-traffic version の flip は
+    // 「Pending releases」セクションに一本化した (#237) ので、Traffic セクションの
+    // 本ブロックには flip ボタンも、戻し先ゼロの rollback 行も出ない。
     const r: TrafficRecord = {
       schema_version: 4,
       repo: "ippoan/auth-worker",
@@ -421,15 +421,15 @@ describe("renderTrafficVersionsBlock", () => {
       ["ippoan/auth-worker"],
       new Map([["ippoan/auth-worker", r]]),
     );
-    // 行は黙って消えない。
-    expect(html).toContain("Rollback to (過去の deployed version):");
-    // 過去 active への rollback 候補ゼロの理由は出る。
-    expect(html).toContain("戻せる先がありません");
-    // 0% no-traffic version は「Flip to 100%」ボタンで再 flip できる。
-    expect(html).toContain("no-traffic version を 100% に flip:");
+    // 0% no-traffic version は version split の行としては引き続き表示される。
+    expect(html).toContain("pending-id");
     expect(html).toContain("v0.2.49");
-    expect(html).toContain('action="/api/release-wave/traffic-rollback"');
-    expect(html).toContain('value="pending-id"');
+    // が、Traffic セクションからの flip 経路 (二重表示の片割れ) は撤去された。
+    expect(html).not.toContain("no-traffic version を 100% に flip:");
+    expect(html).not.toContain('action="/api/release-wave/traffic-rollback"');
+    expect(html).not.toContain('value="pending-id"');
+    // 過去 active への rollback 候補が無いので rollback 行自体も出ない。
+    expect(html).not.toContain("Rollback to (過去の deployed version):");
   });
 });
 

@@ -265,7 +265,13 @@ export function computeUnifiedPending(
     seen.add(repo);
   }
   for (const r of pendingRecords) {
-    if (seen.has(r.repo)) continue; // traffic:: を持つ repo は traffic:: 優先
+    if (seen.has(r.repo)) continue; // traffic:: の no-traffic version を持つ repo は traffic:: 優先
+    // pending source (cloudrun 等) でも traffic:: record があれば現 active を
+    // rollback 先として控える (= 一括 flip → flip-group rollback の戻し先確保、
+    // Refs ippoan/ci-dashboard#241)。traffic:: が無ければ null (戻し先不明)。
+    const active = trafficByRepo.has(r.repo)
+      ? currentActiveOf(trafficByRepo.get(r.repo)!)
+      : null;
     out.push({
       repo: r.repo,
       version_id: r.version_id,
@@ -273,8 +279,8 @@ export function computeUnifiedPending(
       uploaded_at: r.uploaded_at,
       preview_url: r.preview_url ?? null,
       source: "pending",
-      rollback_to: null,
-      rollback_tag: null,
+      rollback_to: active?.version_id ?? null,
+      rollback_tag: active?.tag ?? null,
     });
   }
   out.sort((a, b) => (a.uploaded_at < b.uploaded_at ? 1 : -1));
