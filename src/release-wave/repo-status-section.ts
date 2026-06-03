@@ -323,9 +323,9 @@ export function renderTrafficVersionsBlock(
           ),
         )
         .join("");
-      // 直前以前の active version への rollback ボタン + 表示中 no-traffic
-      // (zeroShown) の Flip ボタン行を続ける。
-      return versionRows + renderTrafficRollbackRow(repo, rec, zeroShown);
+      // 直前以前の active version への rollback ボタン行を続ける
+      // (no-traffic version の flip は Pending releases に一本化、Refs #237)。
+      return versionRows + renderTrafficRollbackRow(repo, rec);
     })
     .join("");
 
@@ -352,11 +352,7 @@ export function renderTrafficVersionsBlock(
  * 現 active は traffic の最大 percentage version。deploy_history[0] が現 active と
  * 一致する想定だが、念のため active version_id を除いて候補を作る。
  */
-function renderTrafficRollbackRow(
-  repo: string,
-  rec: TrafficRecord,
-  promotable: TrafficVersion[],
-): string {
+function renderTrafficRollbackRow(repo: string, rec: TrafficRecord): string {
   const versions = rec.versions ?? [];
   const history = rec.deploy_history ?? [];
   const activeId = versions.find((v) => v.percentage > 0)?.version_id ?? null;
@@ -364,14 +360,10 @@ function renderTrafficRollbackRow(
   // 候補: 過去に active だった (deploy_history) が現 active でないもの。
   const candidates = history.filter((e) => e.version_id !== activeId);
 
-  // promotable = renderTrafficVersionsBlock が「行として表示する no-traffic
-  // version」(= active より新しい最新 0% = zeroShown)。flip ボタンの対象を
-  // これに揃えることで、行表示と flip ボタンの対象がずれない (古い / 隠した
-  // 0% を勝手にボタン化しない)。active 自身は念のため除く。Refs ippoan/ci-dashboard#237。
-  const noTraffic = promotable.filter((v) => v.version_id !== activeId);
-
-  // 候補も no-traffic も無ければ従来どおり行を出さない。
-  if (candidates.length === 0 && noTraffic.length === 0) return "";
+  // no-traffic (0%) version の flip は「Pending releases」セクションに一本化した
+  // (Refs ippoan/ci-dashboard#237)。Traffic セクションの本行は「過去に active
+  // だった version へ戻す」rollback 専用。戻し先が無ければ行を出さない。
+  if (candidates.length === 0) return "";
 
   const buttons = candidates
     .map((e) => {
@@ -389,47 +381,12 @@ function renderTrafficRollbackRow(
     })
     .join("");
 
-  // 候補が 1 件も無いとき、行が黙って消える挙動をやめて理由を出す (Refs #196)。
-  const noCandidateNote =
-    candidates.length === 0
-      ? `<div class="meta" style="margin-top:4px">過去に active だった version がまだないため、戻せる先がありません。</div>`
-      : "";
-
-  // 表示中の no-traffic (0%) version に「Flip to 100%」を出す (Refs ippoan/ci-dashboard#237)。
-  // flip → rollback で no-traffic に戻った version が Pending releases にも rollback
-  // 候補にも出ず再 flip できなくなる事故の救済経路。traffic-rollback endpoint は
-  // versions[] にある version をそのまま `wrangler versions deploy <id>@100%` する。
-  const flipButtons = noTraffic
-    .map((v) => {
-      const label = v.tag ? escapeHtml(v.tag) : escapeHtml(shortId(v.version_id));
-      const when = escapeHtml(shortWhen(v.created_on));
-      return `
-            <form method="post" action="/api/release-wave/traffic-rollback" style="margin:0 6px 4px 0;display:inline-block">
-              <input type="hidden" name="repo" value="${escapeHtml(repo)}">
-              <input type="hidden" name="version_id" value="${escapeHtml(v.version_id)}">
-              <button type="submit"
-                title="${escapeHtml(repo)} の no-traffic version ${escapeHtml(v.version_id)} を即 100% に flip (wrangler versions deploy ${escapeHtml(v.version_id)}@100%)">
-                Flip to ${label} <span class="meta">(0% · ${when})</span>
-              </button>
-            </form>`;
-    })
-    .join("");
-  const nonActiveBlock =
-    noTraffic.length > 0
-      ? `<div style="margin-top:6px">
-                <span class="meta">no-traffic version を 100% に flip:</span>
-                <div style="margin-top:4px">${flipButtons}</div>
-              </div>`
-      : "";
-
   return `
             <tr>
               <td></td>
               <td colspan="3">
                 <span class="meta">Rollback to (過去の deployed version):</span>
-                ${noCandidateNote}
-                ${buttons ? `<div style="margin-top:4px">${buttons}</div>` : ""}
-                ${nonActiveBlock}
+                <div style="margin-top:4px">${buttons}</div>
               </td>
             </tr>`;
 }
