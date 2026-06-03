@@ -3,6 +3,7 @@ import {
   handleReleaseWaveApprove,
   handleReleaseWaveRollback,
   handleReleaseWaveAbort,
+  handleReleaseWaveForceFail,
   handleReleaseWaveRetest,
   handleReleaseWaveRetestConsumer,
   handleReleaseWavePendingReleaseFlip,
@@ -26,6 +27,7 @@ function fakeEnv(spyOverrides: Partial<Record<string, ReturnType<typeof vi.fn>>>
     approve: spyOverrides.approve ?? vi.fn().mockResolvedValue({ ok: true, data: { wave_id: "w1" } }),
     rollback: spyOverrides.rollback ?? vi.fn().mockResolvedValue({ ok: true, data: { wave_id: "w1" } }),
     abort: spyOverrides.abort ?? vi.fn().mockResolvedValue({ ok: true, data: { wave_id: "w1" } }),
+    fail: spyOverrides.fail ?? vi.fn().mockResolvedValue({ ok: true, data: { wave_id: "w1" } }),
   };
   const hub = spies as unknown as ReleaseWaveHub;
   const env = {
@@ -268,6 +270,73 @@ describe("handleReleaseWaveAbort", () => {
     });
     const resp = await handleReleaseWaveAbort(req, env, "w1");
     expect(resp.status).toBe(409);
+  });
+});
+
+describe("handleReleaseWaveForceFail", () => {
+  it("calls hub.fail with default reason + actor and redirects", async () => {
+    const { env, spies } = fakeEnv();
+    const req = postRequest("/api/release-wave/w1/fail", { actorEmail: "ops@x" });
+    const resp = await handleReleaseWaveForceFail(req, env, "w1");
+    expect(resp.status).toBe(303);
+    expect(spies.fail).toHaveBeenCalledWith({
+      wave_id: "w1",
+      reason: "force-failed via admin UI (stuck wave clear) [by ops@x]",
+    });
+  });
+
+  it("uses provided reason (actor still appended)", async () => {
+    const { env, spies } = fakeEnv();
+    const req = postRequest("/api/release-wave/w1/fail", {
+      actorEmail: "ops@x",
+      formBody: { reason: "stuck in flipping" },
+    });
+    await handleReleaseWaveForceFail(req, env, "w1");
+    expect(spies.fail).toHaveBeenCalledWith({
+      wave_id: "w1",
+      reason: "stuck in flipping [by ops@x]",
+    });
+  });
+
+  it("returns 405 on GET", async () => {
+    const { env } = fakeEnv();
+    const req = new Request("https://ci-dashboard.ippoan.org/api/release-wave/w1/fail", {
+      method: "GET",
+    });
+    const resp = await handleReleaseWaveForceFail(req, env, "w1");
+    expect(resp.status).toBe(405);
+  });
+
+  it("maps INVALID_TRANSITION to 409 (e.g. force-fail on flipped)", async () => {
+    const { env } = fakeEnv({
+      fail: vi.fn().mockResolvedValue({
+        ok: false,
+        code: "INVALID_TRANSITION",
+        error: "fail invalid on 'flipped' state, use rollback instead",
+      }),
+    });
+    const resp = await handleReleaseWaveForceFail(
+      postRequest("/api/release-wave/w1/fail", { actorEmail: "ops@x" }),
+      env,
+      "w1",
+    );
+    expect(resp.status).toBe(409);
+  });
+
+  it("maps NOT_FOUND to 404", async () => {
+    const { env } = fakeEnv({
+      fail: vi.fn().mockResolvedValue({
+        ok: false,
+        code: "NOT_FOUND",
+        error: "no wave",
+      }),
+    });
+    const resp = await handleReleaseWaveForceFail(
+      postRequest("/api/release-wave/ghost/fail", { actorEmail: "ops@x" }),
+      env,
+      "ghost",
+    );
+    expect(resp.status).toBe(404);
   });
 });
 

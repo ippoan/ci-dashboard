@@ -1,12 +1,13 @@
 /**
- * Release Wave 機構の MCP tools (6 個)。
+ * Release Wave 機構の MCP tools (7 個)。
  *
  * 設計の親 issue: ippoan/ci-dashboard#137
  *
  * 注: stage phase 撤去 (Refs ippoan/ci-workflows#96①) に伴い
  * `release_wave_start` / `release_wave_stage` tool は削除した。wave は Pending
  * releases / flip-all 経路で driven され、本 tool 群は status/approve/flip/
- * rollback/abort/contract_applied の 6 個。
+ * rollback/abort/fail/contract_applied の 7 個。
+ * (`release_wave_fail` = stuck wave を terminal failed に落とす force-clear 経路)
  *
  * 各 tool は ReleaseWaveHub DO の RPC を 1:1 で呼び出す薄い wrapper。
  * 認証は MCP server 側 (auth-worker introspect) で済んでいる前提。
@@ -228,6 +229,26 @@ export function registerReleaseWaveTools(server: McpServer, env: Env): void {
     },
     async ({ wave_id, aborted_by, reason }) => {
       const result = await hubStub(env).abort({ wave_id, aborted_by, reason });
+      return formatRpcResult(result);
+    },
+  );
+
+  // ============================================================
+  // release_wave_fail  (force-clear a stuck wave)
+  // ============================================================
+  server.registerTool(
+    "release_wave_fail",
+    {
+      description:
+        "Force-fail an in-progress wave to the terminal 'failed' state. Use to clear a stuck wave (e.g. a 'flipping' wave whose flip-report callback never arrived). Valid in staging / pending-approval / flipping; on a 'flipped' wave use rollback instead.",
+      inputSchema: {
+        wave_id: z.string().min(1),
+        reason: z.string().min(1).describe("Free-form reason recorded in audit"),
+      },
+      annotations: { readOnlyHint: false },
+    },
+    async ({ wave_id, reason }) => {
+      const result = await hubStub(env).fail({ wave_id, reason });
       return formatRpcResult(result);
     },
   );

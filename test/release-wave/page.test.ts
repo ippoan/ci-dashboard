@@ -464,6 +464,30 @@ describe("handleReleaseWaveDetailPage", () => {
     }
   });
 
+  it("force-fail (clear) button enabled in-progress (staging/pending-approval/flipping), disabled on flipped/terminal", async () => {
+    for (const state of ["staging", "pending-approval", "flipping"] as const) {
+      const r = await handleReleaseWaveDetailPage(
+        fakeEnv({ getReturn: { ok: true, data: makeWave({ state }) } }),
+        "w1",
+      );
+      const html = await r.text();
+      const m = html.match(/<form[^>]*\/fail[^>]*>[\s\S]*?<\/form>/);
+      expect(m).toBeTruthy();
+      expect(m![0]).toContain("Force-fail");
+      expect(m![0]).not.toContain("disabled");
+    }
+    // flipped は rollback を使う想定なので force-fail は disabled。terminal も不可。
+    for (const state of ["flipped", "rolled-back", "failed", "aborted"] as const) {
+      const r = await handleReleaseWaveDetailPage(
+        fakeEnv({ getReturn: { ok: true, data: makeWave({ state }) } }),
+        "w1",
+      );
+      const html = await r.text();
+      const m = html.match(/<form[^>]*\/fail[^>]*>[\s\S]*?<\/form>/);
+      expect(m![0]).toContain("disabled");
+    }
+  });
+
   it("renders rollback safety status correctly", async () => {
     // safe=true
     const r1 = await handleReleaseWaveDetailPage(

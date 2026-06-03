@@ -122,13 +122,14 @@ const STUB_ERR = {
 // ----------------------------------------------------------------------------
 
 describe("registerReleaseWaveTools registration", () => {
-  it("registers exactly 6 tools with expected names", () => {
+  it("registers exactly 7 tools with expected names", () => {
     const { tools } = setup();
     expect(Array.from(tools.keys()).sort()).toEqual(
       [
         "release_wave_abort",
         "release_wave_approve",
         "release_wave_contract_applied",
+        "release_wave_fail",
         "release_wave_flip",
         "release_wave_rollback",
         "release_wave_status",
@@ -289,6 +290,21 @@ describe("release_wave_abort", () => {
       wave_id: "w1",
       aborted_by: "ops",
       reason: "smoke broken",
+    });
+  });
+});
+
+describe("release_wave_fail", () => {
+  it("forwards wave_id + reason to hub.fail", async () => {
+    const { tools, spies } = setup();
+    spies.fail.mockResolvedValue(STUB_OK);
+    await tools.get("release_wave_fail")!.handler({
+      wave_id: "w1",
+      reason: "stuck in flipping",
+    });
+    expect(spies.fail).toHaveBeenCalledWith({
+      wave_id: "w1",
+      reason: "stuck in flipping",
     });
   });
 });
