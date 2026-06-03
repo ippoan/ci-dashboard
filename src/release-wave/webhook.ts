@@ -352,14 +352,15 @@ export async function handleBackendDeployReportWebhook(
  */
 const pendingReleaseSchema = z.object({
   repo: z.string().min(1),
-  // version_id は wrangler の version id (UUID)。flip 時に
-  // `wrangler versions deploy <id>@100%` に渡るため UUID 形式を強制する。
-  version_id: z
-    .string()
-    .regex(
-      /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/,
-      "version_id must be a UUID",
-    ),
+  // version_id:
+  //   - cloudflare-workers: wrangler の version id (UUID)。flip 時に
+  //     `wrangler versions deploy <id>@100%` に渡る。
+  //   - cloudrun: 単一 version id が無いので revision tag (例 `pending-v0-0-79`)
+  //     を入れる。flip-cloudrun は target_tag から `pending-<tag>` を再計算し
+  //     previewed_version_id は使わないため UUID でなくてよい。
+  // よって UUID 強制はやめ非空のみ要求する (flip 側が platform ごとに検証/無視)。
+  // Refs ippoan/ci-dashboard#237。
+  version_id: z.string().min(1),
   tag: z.string().min(1),
   preview_url: z.string().url().optional(),
 });
