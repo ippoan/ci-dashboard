@@ -17,6 +17,7 @@ import {
   cachedCommits,
   cachedRepoMeta,
   cachedIssue,
+  TTL_MOVING_COMPARE,
 } from "./release-cache";
 import { loadDirectPushAllowlist } from "./direct-push-allowlist";
 import { parseTaglessRepos } from "./tagless-repos";
@@ -371,7 +372,13 @@ async function loadSyntheticBlock(
   let commits: RawCommit[] = [];
   try {
     if (sinceTag) {
-      const cmp = await cachedCompare(token, kv, owner, name, sinceTag, defaultBranch);
+      // `sinceTag...defaultBranch` is a moving range — HEAD advances on every
+      // merge — so cap the compare cache at the short moving-head TTL. The
+      // default 24h would hide just-merged Refs (e.g. open issues referenced by
+      // a PR merged minutes ago), making the repo look "all closed". Refs #228.
+      const cmp = await cachedCompare(
+        token, kv, owner, name, sinceTag, defaultBranch, TTL_MOVING_COMPARE,
+      );
       commits = cmp.commits;
     } else {
       commits = await cachedCommits(token, kv, owner, name, defaultBranch, SYNTHETIC_COMMIT_WINDOW);

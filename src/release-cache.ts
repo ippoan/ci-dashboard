@@ -34,6 +34,12 @@ const TTL_REPO_META = 3600;
 const TTL_PR = 86400;
 const TTL_ISSUE = 60;
 
+// Short TTL for compares whose HEAD is a moving ref (e.g. the "Unreleased"
+// zone's `tag...<defaultBranch>`). Just-merged Refs must surface promptly, so
+// we cap freshness at the KV minimum rather than the 24h immutable-range TTL.
+// Refs #228.
+export const TTL_MOVING_COMPARE = 60;
+
 // Minimum KV expirationTtl is 60s; everything above respects that.
 
 interface TagListItem { name: string; commit: { sha: string } }
@@ -98,9 +104,15 @@ export async function cachedCompare(
   name: string,
   prev: string,
   curr: string,
+  // TTL override. The default (TTL_COMPARE = 24h) is only safe when BOTH ends
+  // are immutable refs (tag...tag) — that range never changes. The "Unreleased"
+  // zone compares `tag...<defaultBranch>`, whose HEAD moves on every merge, so
+  // a 24h cache would hide just-merged Refs for up to a day (Refs #228). Such
+  // callers must pass a short TTL (e.g. TTL_MOVING_COMPARE).
+  ttlSec: number = TTL_COMPARE,
 ): Promise<CompareResponse> {
   const key = `${PREFIX}cmp:${owner}/${name}:${prev}..${curr}`;
-  return kvCached(kv, key, TTL_COMPARE, () =>
+  return kvCached(kv, key, ttlSec, () =>
     githubApi<CompareResponse>(
       token, "GET", `/repos/${owner}/${name}/compare/${prev}...${curr}`,
     ),
