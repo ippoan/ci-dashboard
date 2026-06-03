@@ -90,7 +90,9 @@ describe("ReleaseWaveHub.start", () => {
   it("allows new wave once previous is rolled-back / failed / aborted", async () => {
     const hub = freshHub();
     await runInDurableObject(hub, async (i) => {
-      await i.start({ wave_id: "w1", flip_policy: "auto", repos: REPOS });
+      // abort は flip 前 (pending-approval) のみ有効。manual-approval で開始して
+      // pending-approval から abort → aborted (terminal) に落とす。
+      await i.start({ wave_id: "w1", flip_policy: "manual-approval", repos: REPOS });
       await i.abort({ wave_id: "w1", aborted_by: "ops", reason: "test" });
 
       const w2 = await i.start({ wave_id: "w2", flip_policy: "auto", repos: REPOS });
@@ -220,10 +222,11 @@ describe("ReleaseWaveHub.rollback / contractApplied", () => {
 });
 
 describe("ReleaseWaveHub.abort / fail", () => {
-  it("aborts a staging wave", async () => {
+  it("aborts a pending-approval wave", async () => {
     const hub = freshHub();
     await runInDurableObject(hub, async (i) => {
-      await i.start({ wave_id: "w1", flip_policy: "auto", repos: REPOS });
+      // abort は flip 前 (pending-approval) のみ有効。
+      await i.start({ wave_id: "w1", flip_policy: "manual-approval", repos: REPOS });
       const r = await i.abort({
         wave_id: "w1",
         aborted_by: "ops",
@@ -234,9 +237,10 @@ describe("ReleaseWaveHub.abort / fail", () => {
     });
   });
 
-  it("fails a staging wave via fail event", async () => {
+  it("fails an in-progress wave via fail event", async () => {
     const hub = freshHub();
     await runInDurableObject(hub, async (i) => {
+      // auto policy は flipping で開始。fail は in-progress (flipping) で有効。
       await i.start({ wave_id: "w1", flip_policy: "auto", repos: REPOS });
       const r = await i.fail({ wave_id: "w1", reason: "ci crashed" });
       expect(r.ok).toBe(true);
