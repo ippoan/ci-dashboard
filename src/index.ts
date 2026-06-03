@@ -44,6 +44,8 @@ import {
   handleReleaseWaveRetest,
   handleReleaseWaveRetestConsumer,
   handleReleaseWavePendingReleaseFlip,
+  handleReleaseWavePendingReleaseFlipAll,
+  handleReleaseWaveFlipGroupRollback,
   handleReleaseWaveTrafficRollback,
   handleReleaseWaveBackendRollback,
 } from "./release-wave/api";
@@ -315,6 +317,16 @@ app.post("/api/release-wave/retest-consumer", (c) =>
 // で区別されるため衝突しない。
 app.post("/api/release-wave/pending-release/flip", (c) =>
   handleReleaseWavePendingReleaseFlip(c.req.raw, c.env),
+);
+// wave = 複数 repo の pending release を一括 flip (Refs #237)。flip 直前の
+// active version を flip-group に控え、下の flip-group-rollback で一括復旧可能。
+app.post("/api/release-wave/pending-release/flip-all", (c) =>
+  handleReleaseWavePendingReleaseFlipAll(c.req.raw, c.env),
+);
+// 直近の一括 flip (flip-group) を一括 rollback (Refs #237)。各 repo を flip
+// 直前の active version へ release-wave-traffic-rollback で戻す。
+app.post("/api/release-wave/pending-release/flip-group-rollback", (c) =>
+  handleReleaseWaveFlipGroupRollback(c.req.raw, c.env),
 );
 // frontend worker の traffic を任意の過去 version に即 100% で戻す (Refs #196)。
 // form field `repo` + `version_id`。release-wave-traffic-rollback を dispatch。

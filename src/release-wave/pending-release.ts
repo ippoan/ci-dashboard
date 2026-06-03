@@ -95,3 +95,69 @@ export async function clearPendingRelease(
 ): Promise<void> {
   await kv.delete(pendingReleaseKey(repo));
 }
+
+// ----------------------------------------------------------------------------
+// Flip group (= wave 一括 flip / 一括 rollback の単位) — Refs #237 / #96
+// ----------------------------------------------------------------------------
+//
+// 「wave = 複数 repo の pending release を一括 flip する箱」。一括 flip 時に
+// 各 repo の「直前の active version (= 戻し先)」を控えて 1 件の flip-group として
+// 保存し、後から同じ set を一括 rollback できるようにする。最新 1 件のみ保持
+// (= 直近の一括 flip を rollback する用途)。
+
+const FLIP_GROUP_KEY = "flip-group::latest";
+const FLIP_GROUP_SCHEMA = 1 as const;
+
+/** flip-group に含まれる repo 1 件分。 */
+export interface FlipGroupItem {
+  /** "owner/name"。 */
+  repo: string;
+  /** 今回 100% に flip した version id。 */
+  flipped_version_id: string;
+  /** flip した version の release tag。 */
+  flipped_tag: string;
+  /** flip 直前に active だった version id (= 一括 rollback の戻し先)。不明なら null。 */
+  rollback_to: string | null;
+  /** 戻し先 version の release tag (不明なら null)。 */
+  rollback_tag: string | null;
+}
+
+/** 直近の一括 flip の record (最新 1 件のみ KV 保持)。 */
+export interface FlipGroupRecord {
+  schema_version: typeof FLIP_GROUP_SCHEMA;
+  /** 一括 flip を実行した UTC ISO。 */
+  flipped_at: string;
+  /** 実行者 email (audit)。 */
+  actor: string;
+  /** 一括 flip した repo 群。 */
+  items: FlipGroupItem[];
+}
+
+/** 一括 flip 実行時に flip-group を保存する (最新で上書き)。 */
+export async function recordFlipGroup(
+  kv: KVNamespace,
+  input: { flipped_at: string; actor: string; items: FlipGroupItem[] },
+): Promise<FlipGroupRecord> {
+  const record: FlipGroupRecord = {
+    schema_version: FLIP_GROUP_SCHEMA,
+    flipped_at: input.flipped_at,
+    actor: input.actor,
+    items: input.items,
+  };
+  await kv.put(FLIP_GROUP_KEY, JSON.stringify(record));
+  return record;
+}
+
+/** 直近の flip-group を取得 (無ければ null)。 */
+export async function getFlipGroup(
+  kv: KVNamespace,
+): Promise<FlipGroupRecord | null> {
+  const v = await kv.get<FlipGroupRecord>(FLIP_GROUP_KEY, "json");
+  if (!v || v.schema_version !== FLIP_GROUP_SCHEMA) return null;
+  return v;
+}
+
+/** 一括 rollback 完了後に flip-group を消す。 */
+export async function clearFlipGroup(kv: KVNamespace): Promise<void> {
+  await kv.delete(FLIP_GROUP_KEY);
+}
