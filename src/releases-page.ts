@@ -329,10 +329,11 @@ async function loadRepoView(
 // Build a synthetic block for tag-less direct-push-OK repos (#57).
 //
 // We scan the most recent SYNTHETIC_COMMIT_WINDOW commits on the default
-// branch for `Refs #N`, hydrate the referenced issues, and keep only the ones
-// still `open`. Closed issues drop out entirely (no <details>): the alternative
-// view's case for collapsing them is "they got auto-closed by `Closes #N` in a
-// PR merge", which can't happen on direct-push-OK repos by construction.
+// branch for `Refs #N` and hydrate the referenced issues. Both open and
+// closed issues are kept (Refs #224): the operator wants tag-less / direct-
+// push repos to keep showing their card even after every ref is closed.
+// renderTagBlock collapses the closed rows into a <details>, mirroring the
+// tag-compare path, so the card stays low-noise.
 //
 // The "tag" identity is `<branch>@<sha7>` so the post-close comment
 // ("Closed by release main@e8e90a4") stays traceable even though the synthetic
@@ -392,8 +393,11 @@ async function loadSyntheticBlock(
   }
 
   const issues = await fetchIssuesByNumbers(token, owner, name, refs, kv);
-  const openRows: IssueRow[] = issues
-    .filter((i) => !i.pull_request && i.state === "open")
+  // Keep both open and closed referenced issues (was open-only): a tag-less /
+  // direct-push repo whose refs are all closed should still surface its card
+  // with the closed history collapsed into a <details>. Refs #224.
+  const rows: IssueRow[] = issues
+    .filter((i) => !i.pull_request)
     .map((i) => {
       const labels = i.labels.map((l) => l.name);
       return {
@@ -409,7 +413,7 @@ async function loadSyntheticBlock(
     })
     .sort((a, b) => a.number - b.number);
 
-  if (openRows.length === 0) return null;
+  if (rows.length === 0) return null;
 
   // commits の並び順:
   //   - 通常 (sinceTag 無し): cachedCommits は最新 first (GitHub /commits API 既定)
@@ -423,7 +427,7 @@ async function loadSyntheticBlock(
   return {
     tag: tagLabel,
     prevTag: sinceTag ?? null,
-    issues: openRows,
+    issues: rows,
     synthetic: true,
   };
 }
@@ -751,15 +755,15 @@ function renderIndex(
   failedReasons: Map<number, string>,
   flashRepo: string | null,
 ): string {
-  // Show repos with at least one referenced issue in their displayed tag
-  // window; repos that haven't had a Refs-bearing release yet would just
-  // be a noise card.
-  const populated = views.filter((v) =>
-    v.tagBlocks.some((b) => b.issues.length > 0),
-  );
-  const body = populated.length === 0
+  // Show every watched repo as a card — including ones with no referenced
+  // issues yet or whose refs are all closed. The operator asked for the full
+  // roster always-on (Refs #224); empty/closed repos render as a passive card
+  // with a "no referenced issues" note (see renderIndexRepo) instead of being
+  // dropped as noise. The bottom empty-state copy only kicks in when nothing
+  // is watched at all (views is empty), so a fresh env still reads cleanly.
+  const body = views.length === 0
     ? `<div class="empty">🤷 No releases with referenced issues in the recent window. Look one up below.</div>`
-    : populated.map(renderIndexRepo).join("\n");
+    : views.map(renderIndexRepo).join("\n");
 
   // Banner sits above the cards so a successful batch close redirect always
   // lands the operator on the list with confirmation of what got closed.
@@ -815,6 +819,14 @@ function renderIndexRepo(view: RepoView): string {
       </div>`
     : "";
 
+  // No tag block carried a referenced issue (no semver tags, no Refs in the
+  // recent range, or the synthetic path found nothing). The repo is still
+  // shown — operator wants the full roster (Refs #224) — with a passive note
+  // standing in for the table/actions so an empty card doesn't read as broken.
+  const noRefsNote = tagSections === ""
+    ? `<div class="no-refs">No referenced issues in the recent release window.</div>`
+    : "";
+
   // Whole repo card is one form so the operator can tick across tags and
   // close them in one shot; the POST handler groups by tag for comment
   // attribution.
@@ -823,6 +835,7 @@ function renderIndexRepo(view: RepoView): string {
     <form method="POST" action="/api/release-close-batch" class="batch-close-form">
       <input type="hidden" name="repo" value="${escapeHtml(view.repo)}">
       ${tagSections}
+      ${noRefsNote}
       ${actions}
     </form>
     ${olderHtml}
@@ -1002,6 +1015,10 @@ const STYLES = `
   .repo-card > h2 a { color: #c9d1d9; text-decoration: none; }
   .repo-card > h2 a:hover { color: #58a6ff; }
   .batch-close-form { display: block; }
+  .no-refs {
+    font-size: 12px; color: #8b949e;
+    padding: 4px 0 2px 0;
+  }
   .tag-block { margin-bottom: 14px; }
   .tag-block-header {
     display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap;
