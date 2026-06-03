@@ -152,16 +152,14 @@ export async function handleIssuesPage(env: AuthClientWorkerEnv): Promise<Respon
 
   const cached = await listCachedOpenIssues(env.CI_STATUS);
 
-  // observability (#217 診断): reconcile の結果と KV cache の実態を 1 行で
-  // 出す。repo section が欠ける問題が「reconcile が走っていない (fetched=
-  // false)」「fetch したが KV list に反映されない」「表示段で除外」の
-  // どこで起きているかを wrangler tail で切り分けるため。
+  // observability: reconcile が GitHub を引いたか (fetched) / 何件 upsert・
+  // evict したか (patched/removed) と KV cache 件数。/issues の表示が古い時に
+  // reconcile が走っているかを wrangler tail で確認できる (Refs #217)。
   console.log(JSON.stringify({
     msg: "issues-page",
     reconcile: reconcileResult,
     reconcileError,
     cachedCount: cached.length,
-    cachedRepos: [...new Set(cached.map((i) => i.repo))].sort(),
   }));
   // KV には過去設定の repo が残っている可能性があるので allowlist で
   // filter。mainOrgs 配下は全 repo 許可、yhonda-ohishi は YHONDA_REPOS のみ。
@@ -205,21 +203,6 @@ export async function handleIssuesPage(env: AuthClientWorkerEnv): Promise<Respon
     if (refs && refs.length > 0) projectTagged.push({ issue: item, projects: refs });
     else ungrouped.push(item);
   }
-
-  // observability (#217 診断 2nd): project 振り分け結果。KV には 4 repo 在る
-  // のに per-repo section から消える件で、各 repo が projectTagged (Project
-  // 付き section) と ungrouped (repo 別 section) のどちらに流れたか、projectMap
-  // のサイズ / fetch error を出す。ci-dashboard だけ repo 別に出る = 残り 3 repo
-  // が projectMap に居て Project 付きに吸われている、を確認する。
-  console.log(JSON.stringify({
-    msg: "issues-page-split",
-    projectTaggedRepos: [...new Set(projectTagged.map((p) => p.issue.repo))].sort(),
-    ungroupedRepos: [...new Set(ungrouped.map((i) => i.repo))].sort(),
-    projectMapSize: projectMap.size,
-    projectError: project.error,
-    projectStale: project.stale,
-  }));
-
   // Top section is one flat list ordered by recency across repos.
   projectTagged.sort((a, b) => b.issue.updated_at.localeCompare(a.issue.updated_at));
 
