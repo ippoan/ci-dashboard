@@ -113,7 +113,7 @@ describe("issue-cache", () => {
       expect(fetchSpy).not.toHaveBeenCalled();
     });
 
-    it("cold start で全件 fetch + watermark セット", async () => {
+    it("watermark 無し (初回) は full snapshot で fetch + watermark セット", async () => {
       vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
         const url = typeof input === "string" ? input : (input as Request).url;
         // auth-worker token 取得呼び出しは skip して mock 値返す
@@ -139,6 +139,65 @@ describe("issue-cache", () => {
       const wm = await env.CI_STATUS.get(__testing.KEY_WATERMARK);
       expect(wm).toBeTruthy();
       expect(Date.parse(wm!)).toBeLessThanOrEqual(Date.now());
+    });
+
+    it("full snapshot で GitHub の open 集合に無い KV entry を削除する (stale eviction)", async () => {
+      // KV に「もう open でない」古い issue を仕込む (= 旧実装ではこれが永久に
+      // 残り続け、section が消える原因だった)。
+      await upsertIssue(env.CI_STATUS, makeIssue({ number: 99 }));
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : (input as Request).url;
+        if (url.includes("auth-worker") || url.includes("/mcp/token")) {
+          return Response.json({ access_token: "tok" });
+        }
+        if (url.includes("/search/issues")) {
+          // GitHub の現 open 集合に #99 は含まれない (= 既に closed)
+          return mockSearchResponse([makeIssue({ number: 10 })]);
+        }
+        return new Response("ignored", { status: 404 });
+      });
+
+      const result = await reconcileIssues(env, { mainOrgs: ["ippoan"], yhondaRepos: [] });
+      expect(result.fetched).toBe(true);
+      expect(result.removed).toBeGreaterThanOrEqual(1);
+
+      // #99 は evict され、#10 (現 open) は残る
+      const gone = await env.CI_STATUS.get(issueKey("ippoan/ci-dashboard", 99));
+      expect(gone).toBeNull();
+      const kept = await env.CI_STATUS.get(issueKey("ippoan/ci-dashboard", 10), "json");
+      expect(kept).toBeTruthy();
+    });
+
+    it("incomplete snapshot (search truncated) の時は削除を skip する", async () => {
+      await upsertIssue(env.CI_STATUS, makeIssue({ number: 99 }));
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : (input as Request).url;
+        if (url.includes("auth-worker") || url.includes("/mcp/token")) {
+          return Response.json({ access_token: "tok" });
+        }
+        if (url.includes("/search/issues")) {
+          // 不完全な snapshot (truncated)。削除すると誤 evict になるので skip 期待。
+          return Response.json({
+            total_count: 1000,
+            incomplete_results: true,
+            items: [{
+              number: 10, title: "t", state: "open", user: { login: "y" },
+              labels: [], assignees: [], comments: 0,
+              created_at: "2026-05-27T00:00:00Z", updated_at: "2026-05-27T00:00:00Z",
+              html_url: "https://github.com/ippoan/ci-dashboard/issues/10",
+              repository_url: "https://api.github.com/repos/ippoan/ci-dashboard",
+            }],
+          });
+        }
+        return new Response("ignored", { status: 404 });
+      });
+
+      const result = await reconcileIssues(env, { mainOrgs: ["ippoan"], yhondaRepos: [] });
+      expect(result.fetched).toBe(true);
+      expect(result.removed).toBe(0);
+      // incomplete なので #99 は誤 evict しない
+      const still = await env.CI_STATUS.get(issueKey("ippoan/ci-dashboard", 99));
+      expect(still).not.toBeNull();
     });
   });
 
