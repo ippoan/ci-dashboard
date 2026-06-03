@@ -184,6 +184,51 @@ export async function handleReleaseWaveAbort(
 }
 
 // ----------------------------------------------------------------------------
+// POST /api/release-wave/:wave_id/fail  (force-clear a stuck wave)
+// ----------------------------------------------------------------------------
+
+/**
+ * in-progress な wave を terminal `failed` へ強制遷移させる (force-clear)。
+ *
+ * abort は flip 前 (staging / pending-approval) のみ、rollback は flipped のみ
+ * 有効なので、flip 途中で callback が来ず `flipping` のまま hang した wave は
+ * どちらでも片付けられなかった (= 「失敗してるのに進んでる」stuck 状態)。
+ * `fail` event は staging / pending-approval / flipping で有効なので、これを
+ * operator 経路として公開して stuck wave を terminal に落とす。`flipped` wave は
+ * applyFail が INVALID_TRANSITION で弾く (= rollback を使う)。
+ */
+export async function handleReleaseWaveForceFail(
+  req: Request,
+  env: Env,
+  wave_id: string,
+): Promise<Response> {
+  if (req.method !== "POST") {
+    return jsonResponse(405, { code: "METHOD_NOT_ALLOWED", error: "use POST" });
+  }
+  let reason = "force-failed via admin UI (stuck wave clear)";
+  try {
+    const form = await req.formData();
+    const r = String(form.get("reason") ?? "").trim();
+    if (r) reason = r;
+  } catch {
+    // form-data 以外は default reason
+  }
+  // audit: 操作者を reason に併記 (FailInput は actor field を持たないため)
+  reason = `${reason} [by ${actorEmail(req)}]`;
+  const result = (await hubStub(env).fail({
+    wave_id,
+    reason,
+  })) as RpcResult<WaveState>;
+  if (!result.ok) {
+    return jsonResponse(rpcErrorToHttpStatus(result.code), {
+      code: result.code,
+      error: result.error,
+    });
+  }
+  return redirectToDetail(wave_id);
+}
+
+// ----------------------------------------------------------------------------
 // POST /api/release-wave/:wave_id/retest  (Refs #157 Phase B)
 // ----------------------------------------------------------------------------
 

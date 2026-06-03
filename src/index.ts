@@ -40,6 +40,7 @@ import {
   handleReleaseWaveApprove,
   handleReleaseWaveRollback,
   handleReleaseWaveAbort,
+  handleReleaseWaveForceFail,
   handleReleaseWaveRetest,
   handleReleaseWaveRetestConsumer,
   handleReleaseWavePendingReleaseFlip,
@@ -282,6 +283,10 @@ app.post("/api/release-wave/:wave_id/rollback", (c) =>
 );
 app.post("/api/release-wave/:wave_id/abort", (c) =>
   handleReleaseWaveAbort(c.req.raw, c.env, c.req.param("wave_id")),
+);
+// stuck wave (flipping のまま hang 等) を terminal failed に落とす force-clear。
+app.post("/api/release-wave/:wave_id/fail", (c) =>
+  handleReleaseWaveForceFail(c.req.raw, c.env, c.req.param("wave_id")),
 );
 // compatibility matrix の赤 frontend に release-wave-retest を fan-out
 // (Refs #157 Phase B)。form field `frontend` で 1 件指定可、無ければ全 red。

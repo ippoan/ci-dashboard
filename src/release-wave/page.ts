@@ -343,6 +343,12 @@ export async function handleReleaseWaveDetailPage(
   const canApprove = w.state === "pending-approval";
   const canRollback = w.state === "flipped";
   const canAbort = w.state === "staging" || w.state === "pending-approval";
+  // force-fail (stuck wave clear): in-progress (staging / pending-approval /
+  // flipping) で有効。flipped は rollback を使うので対象外、terminal は不可。
+  const canForceFail =
+    w.state === "staging" ||
+    w.state === "pending-approval" ||
+    w.state === "flipping";
 
   const rollbackDisabledNote = !w.rollback.safe
     ? `<div class="unsafe">
@@ -383,6 +389,12 @@ export async function handleReleaseWaveDetailPage(
         <button type="submit" class="warn" ${canAbort ? "" : "disabled"}
           title="Abort before flip (valid in staging / pending-approval only)">
           Abort
+        </button>
+      </form>
+      <form method="post" action="/api/release-wave/${encodeURIComponent(w.wave_id)}/fail">
+        <button type="submit" class="danger" ${canForceFail ? "" : "disabled"}
+          title="Force-fail a stuck wave to terminal 'failed' (valid in staging / pending-approval / flipping). Use when a flip hung without a callback. For a flipped wave use Rollback instead.">
+          Force-fail (clear)
         </button>
       </form>
     </div>
