@@ -4,7 +4,7 @@ import { fetchAllOpenPrsByIssue, type IssuePrRef } from "./issue-prs";
 import type { AuthClientWorkerEnv } from "@ippoan/auth-client-worker";
 import { renderTabs, TAB_STYLES } from "./nav-tabs";
 import { PWA_HEAD_TAGS, PWA_REGISTER_SCRIPT } from "./pwa";
-import { listCachedOpenIssues, reconcileIssues } from "./issue-cache";
+import { listCachedOpenIssues, reconcileIssues, type ReconcileResult } from "./issue-cache";
 import {
   getOrFetchProjectIssueMap,
   type ProjectIssueMapResult,
@@ -136,8 +136,9 @@ export async function handleIssuesPage(env: AuthClientWorkerEnv): Promise<Respon
   // だけ走り、それ以外は KV read で完結する (= GitHub API 0 call)。
   // reconcile 失敗時も cache が空でなければ stale banner 付きで render する。
   let reconcileError: string | null = null;
+  let reconcileResult: ReconcileResult | null = null;
   try {
-    await reconcileIssues(env, { mainOrgs: ORGS, yhondaRepos: YHONDA_REPOS });
+    reconcileResult = await reconcileIssues(env, { mainOrgs: ORGS, yhondaRepos: YHONDA_REPOS });
   } catch (err) {
     if (isAuthError(err)) {
       // 認証失効: GitHub 同意画面 → /oauth/callback → return_to で /issues に戻る
@@ -150,6 +151,18 @@ export async function handleIssuesPage(env: AuthClientWorkerEnv): Promise<Respon
   }
 
   const cached = await listCachedOpenIssues(env.CI_STATUS);
+
+  // observability (#217 診断): reconcile の結果と KV cache の実態を 1 行で
+  // 出す。repo section が欠ける問題が「reconcile が走っていない (fetched=
+  // false)」「fetch したが KV list に反映されない」「表示段で除外」の
+  // どこで起きているかを wrangler tail で切り分けるため。
+  console.log(JSON.stringify({
+    msg: "issues-page",
+    reconcile: reconcileResult,
+    reconcileError,
+    cachedCount: cached.length,
+    cachedRepos: [...new Set(cached.map((i) => i.repo))].sort(),
+  }));
   // KV には過去設定の repo が残っている可能性があるので allowlist で
   // filter。mainOrgs 配下は全 repo 許可、yhonda-ohishi は YHONDA_REPOS のみ。
   const mainOrgSet = new Set(ORGS);
