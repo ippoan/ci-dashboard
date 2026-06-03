@@ -635,10 +635,62 @@ function renderGlobalCompatibilitySection(
       <h2>Compatibility (all consumers) — ${verdict}</h2>
       <p class="meta">全 backend の<strong>現 production image</strong>を既 deploy
         frontend が integration test 済みか (wave 横断)。緑 = tested / 赤 = untested。
-        個別 wave の retest 操作は各 wave 詳細ページで。
+        赤 (untested) の consumer は下のボタンから直接 retest できる。
         Refs <a href="https://github.com/ippoan/ci-dashboard/issues/157">#157</a>.</p>
       ${body}
+      ${renderGlobalRetestButtons(compat)}
       ${renderActiveWaveOverlay(active)}
+    </div>`;
+}
+
+/**
+ * global (wave 非依存) Compatibility グラフの直下に、untested edge
+ * (backend × frontend) ごとの "Re-test" ボタングリッドを描画する (Refs #157)。
+ *
+ * 各 backend の `wave_id` を使って既存 `/api/release-wave/<wave_id>/retest` に
+ * `frontend` を POST する (= 新 endpoint を作らず wave 詳細ページと同じ
+ * handler / dispatch 経路を流用する)。`wave_id` を持たない backend
+ * (= 単独 deploy で wave 未紐付け) の edge は disabled ボタンにし、
+ * tooltip で理由を示す。
+ *
+ * JS 不使用 (form POST のみ) なので strict CSP `default-src 'none'` のまま動く。
+ */
+function renderGlobalRetestButtons(compat: WaveCompatibility): string {
+  const groups: string[] = [];
+  for (const b of compat.backends) {
+    const reds = b.matrix.filter((m) => !m.tested_against_target);
+    if (reds.length === 0) continue;
+    const buttons = reds
+      .map((m) => {
+        if (!b.wave_id) {
+          // wave 未紐付けの backend は既存 retest endpoint を呼べない。
+          return `<button type="button" class="warn" disabled
+              title="${escapeHtml(b.backend_repo)} は wave に紐付いていないため (単独 deploy)、ここからの retest 不可。該当 wave で再実行するか backend を wave 経由で deploy してください。">
+              Re-test ${escapeHtml(m.frontend)}
+            </button>`;
+        }
+        const action = encodeURIComponent(b.wave_id);
+        return `<form method="post" action="/api/release-wave/${action}/retest" style="display:inline; margin:0">
+            <input type="hidden" name="frontend" value="${escapeHtml(m.frontend)}">
+            <button type="submit" class="warn"
+              title="Re-test ${escapeHtml(m.frontend)} against ${escapeHtml(b.backend_repo)} の現 image (wave ${escapeHtml(b.wave_id)})">
+              Re-test ${escapeHtml(m.frontend)}
+            </button>
+          </form>`;
+      })
+      .join(" ");
+    groups.push(`
+      <div style="margin-top:8px">
+        <strong class="meta">${escapeHtml(b.backend_repo)}
+          ${b.wave_id ? `<span class="meta">(wave ${escapeHtml(b.wave_id)})</span>` : `<span class="meta">(no wave)</span>`}</strong>
+        <div class="actions" style="margin-top:4px">${buttons}</div>
+      </div>`);
+  }
+  if (groups.length === 0) return "";
+  return `
+    <div style="margin-top:10px">
+      <strong class="meta">Re-test untested consumers</strong>
+      ${groups.join("")}
     </div>`;
 }
 
