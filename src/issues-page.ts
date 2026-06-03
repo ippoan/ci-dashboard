@@ -205,6 +205,21 @@ export async function handleIssuesPage(env: AuthClientWorkerEnv): Promise<Respon
     if (refs && refs.length > 0) projectTagged.push({ issue: item, projects: refs });
     else ungrouped.push(item);
   }
+
+  // observability (#217 診断 2nd): project 振り分け結果。KV には 4 repo 在る
+  // のに per-repo section から消える件で、各 repo が projectTagged (Project
+  // 付き section) と ungrouped (repo 別 section) のどちらに流れたか、projectMap
+  // のサイズ / fetch error を出す。ci-dashboard だけ repo 別に出る = 残り 3 repo
+  // が projectMap に居て Project 付きに吸われている、を確認する。
+  console.log(JSON.stringify({
+    msg: "issues-page-split",
+    projectTaggedRepos: [...new Set(projectTagged.map((p) => p.issue.repo))].sort(),
+    ungroupedRepos: [...new Set(ungrouped.map((i) => i.repo))].sort(),
+    projectMapSize: projectMap.size,
+    projectError: project.error,
+    projectStale: project.stale,
+  }));
+
   // Top section is one flat list ordered by recency across repos.
   projectTagged.sort((a, b) => b.issue.updated_at.localeCompare(a.issue.updated_at));
 
