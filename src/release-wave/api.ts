@@ -543,8 +543,8 @@ export async function handleReleaseWavePendingReleaseFlipAll(
   }
 
   if (items.length === 0) {
-    const err =
-      results.find((r) => !r.ok && r.error)?.error ?? "dispatch failed";
+    const failed = results.find((r) => !r.ok);
+    const err = failed && !failed.ok ? failed.error : "dispatch failed";
     return jsonResponse(502, {
       code: "DISPATCH_FAILED",
       error: `failed to dispatch flip for all ${records.length} pending release(s): ${err}`,
@@ -615,8 +615,8 @@ export async function handleReleaseWaveFlipGroupRollback(
   const results = await dispatchAll(env, dispatches);
 
   if (!results.some((r) => r.ok)) {
-    const err =
-      results.find((r) => !r.ok && r.error)?.error ?? "dispatch failed";
+    const failed = results.find((r) => !r.ok);
+    const err = failed && !failed.ok ? failed.error : "dispatch failed";
     return jsonResponse(502, {
       code: "DISPATCH_FAILED",
       error: `failed to dispatch rollback for flip group (${targets.length} repo(s)): ${err}`,
