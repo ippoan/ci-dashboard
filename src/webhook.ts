@@ -17,6 +17,7 @@ import {
   invalidateIssue as invalidateReleaseCacheIssue,
   invalidateRepoTags,
   invalidateRepoCommits,
+  invalidateRepoCompare,
 } from "./release-cache";
 
 interface ReleaseWebhookPayload {
@@ -207,16 +208,27 @@ export async function handleWebhook(
       payload.action === "closed" &&
       payload.pull_request.merged === true &&
       payload.pull_request.base.ref === payload.repository.default_branch;
-    if (isMergeToDefault && parseTaglessRepos(env.TAGLESS_REPOS).has(repo)) {
-      await hub.fetch(new Request("http://hub/release-alert-detect-pr", {
-        method: "POST",
-        body: JSON.stringify({
-          repo,
-          prNumber: payload.pull_request.number,
-          mergeSha: payload.pull_request.merge_commit_sha,
-          defaultBranch: payload.repository.default_branch,
-        }),
-      }));
+    if (isMergeToDefault) {
+      // /releases の "Unreleased" ゾーンを即時更新。merge で main HEAD が動き、
+      // `<tag>...<defaultBranch>` の compare 内容 (= 直近 merge が参照した
+      // open issue) が変わるので、compare + commits cache を flush して 60s
+      // TTL を待たずに次ロードで refetch させる。Refs #231。
+      const [owner, name] = repo.split("/");
+      if (owner && name) {
+        await invalidateRepoCompare(env.CI_STATUS, owner, name);
+        await invalidateRepoCommits(env.CI_STATUS, owner, name);
+      }
+      if (parseTaglessRepos(env.TAGLESS_REPOS).has(repo)) {
+        await hub.fetch(new Request("http://hub/release-alert-detect-pr", {
+          method: "POST",
+          body: JSON.stringify({
+            repo,
+            prNumber: payload.pull_request.number,
+            mergeSha: payload.pull_request.merge_commit_sha,
+            defaultBranch: payload.repository.default_branch,
+          }),
+        }));
+      }
     }
     return new Response("OK", { status: 200 });
   }
@@ -293,6 +305,10 @@ export async function handleWebhook(
           await invalidateRepoTags(env.CI_STATUS, owner, name);
         } else if (defaultBranch && ref === `refs/heads/${defaultBranch}`) {
           await invalidateRepoCommits(env.CI_STATUS, owner, name);
+          // "Unreleased" ゾーンの `<tag>...<defaultBranch>` compare も flush。
+          // squash merge は default branch への push として届くので、これで
+          // merge 単位の即時反映になる (60s TTL を待たない)。Refs #231。
+          await invalidateRepoCompare(env.CI_STATUS, owner, name);
         }
       }
     }

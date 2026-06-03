@@ -624,6 +624,52 @@ describe("POST /webhook", () => {
     expect(hubCalls.filter((c) => c.path === "/release-alert-detect-pr")).toHaveLength(0);
   });
 
+  // #231: a PR merged into the default branch flushes the repo's compare +
+  // commits cache so /releases' "Unreleased" zone reflects the just-merged
+  // Refs immediately (not after the 60s TTL). Ungated by TAGLESS so any
+  // watched repo benefits.
+  it("merged PR into default branch flushes compare + commits cache", async () => {
+    await env.CI_STATUS.put("rcache:v1:cmp:ippoan/foo:v1.0.0..main", "{}", { expirationTtl: 60 });
+    await env.CI_STATUS.put("rcache:v1:commits:ippoan/foo:main:100", "[]", { expirationTtl: 60 });
+    const body = JSON.stringify({
+      action: "closed",
+      pull_request: { number: 12, merged: true, merge_commit_sha: "cafef00d", base: { ref: "main" } },
+      repository: { full_name: "ippoan/foo", default_branch: "main" },
+    });
+    const sig = await sign(body, WEBHOOK_SECRET);
+    const ctx = createExecutionContext();
+    await worker.fetch(
+      new Request("http://localhost/webhook", {
+        method: "POST", body,
+        headers: { "X-Hub-Signature-256": sig, "X-GitHub-Event": "pull_request" },
+      }),
+      testEnv(), ctx,
+    );
+    await waitOnExecutionContext(ctx);
+    expect(await env.CI_STATUS.get("rcache:v1:cmp:ippoan/foo:v1.0.0..main")).toBeNull();
+    expect(await env.CI_STATUS.get("rcache:v1:commits:ippoan/foo:main:100")).toBeNull();
+  });
+
+  it("PR merged into a non-default branch does NOT flush compare cache", async () => {
+    await env.CI_STATUS.put("rcache:v1:cmp:ippoan/foo:v1.0.0..main", "{}", { expirationTtl: 60 });
+    const body = JSON.stringify({
+      action: "closed",
+      pull_request: { number: 13, merged: true, merge_commit_sha: "abc", base: { ref: "develop" } },
+      repository: { full_name: "ippoan/foo", default_branch: "main" },
+    });
+    const sig = await sign(body, WEBHOOK_SECRET);
+    const ctx = createExecutionContext();
+    await worker.fetch(
+      new Request("http://localhost/webhook", {
+        method: "POST", body,
+        headers: { "X-Hub-Signature-256": sig, "X-GitHub-Event": "pull_request" },
+      }),
+      testEnv(), ctx,
+    );
+    await waitOnExecutionContext(ctx);
+    expect(await env.CI_STATUS.get("rcache:v1:cmp:ippoan/foo:v1.0.0..main")).toBe("{}");
+  });
+
   // Regression guard for issue #51: Tag Release directly must NOT fire — the
   // Hub it would reach is still on the previous version's deploy.
   it("does NOT trigger release-alert-detect on a Tag Release workflow completion", async () => {
@@ -705,9 +751,11 @@ describe("POST /webhook", () => {
     expect(await env.CI_STATUS.get("rcache:v1:tags:ippoan/foo:10")).toBeNull();
   });
 
-  it("push to default branch flushes commits cache (not tags)", async () => {
+  it("push to default branch flushes commits + compare cache (not tags)", async () => {
     await env.CI_STATUS.put("rcache:v1:tags:ippoan/foo:10", "[]", { expirationTtl: 300 });
     await env.CI_STATUS.put("rcache:v1:commits:ippoan/foo:main:50", "[]", { expirationTtl: 60 });
+    // "Unreleased" ゾーンの tag...main compare key (Refs #231)
+    await env.CI_STATUS.put("rcache:v1:cmp:ippoan/foo:v1.0.0..main", "{}", { expirationTtl: 60 });
     const body = JSON.stringify({
       ref: "refs/heads/main",
       repository: { full_name: "ippoan/foo", default_branch: "main" },
@@ -725,12 +773,15 @@ describe("POST /webhook", () => {
     );
     await waitOnExecutionContext(ctx);
     expect(await env.CI_STATUS.get("rcache:v1:commits:ippoan/foo:main:50")).toBeNull();
+    // merge で main HEAD が動くと compare 内容が変わるので flush される (#231)
+    expect(await env.CI_STATUS.get("rcache:v1:cmp:ippoan/foo:v1.0.0..main")).toBeNull();
     // tags cache は触らない (push が tag じゃないので)
     expect(await env.CI_STATUS.get("rcache:v1:tags:ippoan/foo:10")).toBe("[]");
   });
 
   it("push to feature branch is noop for release-cache", async () => {
     await env.CI_STATUS.put("rcache:v1:commits:ippoan/foo:main:50", "[]", { expirationTtl: 60 });
+    await env.CI_STATUS.put("rcache:v1:cmp:ippoan/foo:v1.0.0..main", "{}", { expirationTtl: 60 });
     const body = JSON.stringify({
       ref: "refs/heads/feature-x",
       repository: { full_name: "ippoan/foo", default_branch: "main" },
@@ -749,6 +800,7 @@ describe("POST /webhook", () => {
     await waitOnExecutionContext(ctx);
     // 触らない
     expect(await env.CI_STATUS.get("rcache:v1:commits:ippoan/foo:main:50")).toBe("[]");
+    expect(await env.CI_STATUS.get("rcache:v1:cmp:ippoan/foo:v1.0.0..main")).toBe("{}");
   });
 
   it("issues event also invalidates release-cache issue key (close immediately reflects on /releases)", async () => {

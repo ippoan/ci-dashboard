@@ -8,6 +8,7 @@ import {
   invalidateIssue,
   invalidateRepoTags,
   invalidateRepoCommits,
+  invalidateRepoCompare,
   invalidateRepoMeta,
   clearReleaseCache,
   TTL_MOVING_COMPARE,
@@ -153,6 +154,29 @@ describe("release-cache", () => {
     expect(calls).toBe(3); // 該当 repo 再 fetch
     await cachedCommits("tok", env.CI_STATUS, "ippoan", "other", "main", 50);
     expect(calls).toBe(3); // 別 repo は hit
+  });
+
+  it("invalidateRepoCompare: 該当 repo の全 compare range を flush する (#231)", async () => {
+    let calls = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      calls++;
+      return Response.json({ commits: [] });
+    });
+    // immutable tag...tag と moving tag...main の両方を populate
+    await cachedCompare("tok", env.CI_STATUS, "ippoan", "ci-dashboard", "v1.0.0", "v1.1.0");
+    await cachedCompare("tok", env.CI_STATUS, "ippoan", "ci-dashboard", "v1.1.0", "main", TTL_MOVING_COMPARE);
+    await cachedCompare("tok", env.CI_STATUS, "ippoan", "other", "v1.0.0", "main", TTL_MOVING_COMPARE);
+    expect(calls).toBe(3);
+
+    await invalidateRepoCompare(env.CI_STATUS, "ippoan", "ci-dashboard");
+
+    // 該当 repo の compare は全部 (tag...tag も tag...main も) 再 fetch
+    await cachedCompare("tok", env.CI_STATUS, "ippoan", "ci-dashboard", "v1.0.0", "v1.1.0");
+    await cachedCompare("tok", env.CI_STATUS, "ippoan", "ci-dashboard", "v1.1.0", "main", TTL_MOVING_COMPARE);
+    expect(calls).toBe(5);
+    // 別 repo は hit のまま
+    await cachedCompare("tok", env.CI_STATUS, "ippoan", "other", "v1.0.0", "main", TTL_MOVING_COMPARE);
+    expect(calls).toBe(5);
   });
 
   it("invalidateRepoMeta: 該当 repo の repo-meta key だけ消す", async () => {
