@@ -159,21 +159,34 @@ describe("renderStartWaveSection", () => {
     expect(html).toContain("&quot;");
   });
 
-  it("prefills target_tag value with latest stable tag patch-bumped", () => {
+  it("prefills target_tag value with the existing latest stable tag (NOT bumped) — Refs #237", () => {
     const html = renderStartWaveSection([
       status("ippoan/rust-alc-api", { latestTag: "v0.0.76" }),
       status("ippoan/alc-app", { latestTag: "v0.2.51" }),
     ]);
-    // value (not just placeholder) is the latest tag with patch +1
+    // wave は実在 tag を flip するだけ。latest+1 の合成はしない (= 実在 tag そのまま)。
     expect(html).toContain(
-      'name="target_tag__ippoan/rust-alc-api"\n              value="v0.0.77"',
+      'name="target_tag__ippoan/rust-alc-api"\n              value="v0.0.76"',
     );
     expect(html).toContain(
-      'name="target_tag__ippoan/alc-app"\n              value="v0.2.52"',
+      'name="target_tag__ippoan/alc-app"\n              value="v0.2.51"',
     );
-    // placeholder still shows the current latest tag
+    // placeholder も現 latest tag
     expect(html).toContain('placeholder="v0.0.76"');
     expect(html).toContain('placeholder="v0.2.51"');
+  });
+
+  it("prefers the pending release tag over latest when one exists — Refs #237", () => {
+    const html = renderStartWaveSection(
+      [status("ippoan/auth-worker", { latestTag: "v0.2.51" })],
+      new Date(),
+      new Map([["ippoan/auth-worker", "v0.2.51"]]),
+    );
+    // 実在の no-traffic version の tag を value に出す + hint も pending 表示。
+    expect(html).toContain(
+      'name="target_tag__ippoan/auth-worker"\n              value="v0.2.51"',
+    );
+    expect(html).toContain("pending: v0.2.51 (no-traffic)");
   });
 
   it("leaves prefill value empty when latest tag is a prerelease", () => {
