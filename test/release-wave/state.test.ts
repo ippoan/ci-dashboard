@@ -42,9 +42,11 @@ function assertOk<T extends { ok: boolean }>(r: T): Extract<T, { ok: true }> {
 // ----------------------------------------------------------------------------
 
 describe("createWave", () => {
-  it("creates initial state with all repos pending", () => {
+  it("creates initial pending-approval state (manual policy) with all repos pending", () => {
     const w = makeWave();
-    expect(w.state).toBe("staging");
+    // stage phase 撤去後 (Refs ippoan/ci-workflows#96①): manual-approval は
+    // approve 待ちの pending-approval で開始する (staging は経由しない)。
+    expect(w.state).toBe("pending-approval");
     expect(w.wave_id).toBe("wave_test_01");
     expect(w.repos).toHaveLength(2);
     expect(w.repos[0]!.stage_status).toBe("pending");
@@ -55,9 +57,16 @@ describe("createWave", () => {
     expect(w.rollback.safe).toBe(true);
     expect(w.rollback.unsafe_reason).toBeNull();
     expect(w.started_at).toBe(T0);
+    // stage phase 撤去後、staged_at は常に null のまま。
     expect(w.staged_at).toBeNull();
     expect(w.events).toHaveLength(1);
     expect(w.events[0]!.kind).toBe("start");
+  });
+
+  it("starts directly in flipping for auto policy", () => {
+    const w = makeWave({ flip_policy: "auto" });
+    expect(w.state).toBe("flipping");
+    expect(w.staged_at).toBeNull();
   });
 });
 
@@ -95,193 +104,13 @@ describe("transition: start", () => {
 });
 
 // ----------------------------------------------------------------------------
-// stage_report
-// ----------------------------------------------------------------------------
-
-describe("transition: stage_report", () => {
-  it("marks single repo as done, stays in staging until all done", () => {
-    const w = makeWave();
-    const r = assertOk(
-      transition(w, {
-        kind: "stage_report",
-        now: T1,
-        repo: "ippoan/rust-alc-api",
-        ok: true,
-        preview_url: "https://preview-rust-alc-api.ippoan.org",
-        flip_from_revision: "rust-alc-api-00041-zzz",
-        previewed_version_id: "11111111-2222-3333-4444-555555555555",
-      }),
-    );
-    expect(r.state.state).toBe("staging");
-    expect(r.state.repos[0]!.stage_status).toBe("done");
-    expect(r.state.repos[0]!.preview_url).toBe(
-      "https://preview-rust-alc-api.ippoan.org",
-    );
-    expect(r.state.repos[0]!.flip_from_revision).toBe("rust-alc-api-00041-zzz");
-    expect(r.state.repos[0]!.previewed_version_id).toBe(
-      "11111111-2222-3333-4444-555555555555",
-    );
-    expect(r.state.repos[1]!.stage_status).toBe("pending");
-    expect(r.state.staged_at).toBeNull();
-  });
-
-  it("transitions to pending-approval when all done (manual policy)", () => {
-    let s = makeWave({ flip_policy: "manual-approval" });
-    s = assertOk(
-      transition(s, { kind: "stage_report", now: T1, repo: "ippoan/rust-alc-api", ok: true }),
-    ).state;
-    s = assertOk(
-      transition(s, { kind: "stage_report", now: T2, repo: "ippoan/auth-worker", ok: true }),
-    ).state;
-    expect(s.state).toBe("pending-approval");
-    expect(s.staged_at).toBe(T2);
-  });
-
-  it("transitions to flipping when all done (auto policy)", () => {
-    let s = makeWave({ flip_policy: "auto" });
-    s = assertOk(
-      transition(s, { kind: "stage_report", now: T1, repo: "ippoan/rust-alc-api", ok: true }),
-    ).state;
-    s = assertOk(
-      transition(s, { kind: "stage_report", now: T2, repo: "ippoan/auth-worker", ok: true }),
-    ).state;
-    expect(s.state).toBe("flipping");
-    expect(s.staged_at).toBe(T2);
-  });
-
-  it("transitions to failed on any stage fail (does not wait for others)", () => {
-    let s = makeWave();
-    s = assertOk(
-      transition(s, {
-        kind: "stage_report",
-        now: T1,
-        repo: "ippoan/rust-alc-api",
-        ok: false,
-        error: "build failed",
-      }),
-    ).state;
-    expect(s.state).toBe("failed");
-    expect(s.failed_at).toBe(T1);
-    expect(s.repos[0]!.stage_status).toBe("failed");
-    expect(s.repos[0]!.stage_error).toBe("build failed");
-    // The other repo stays pending (= barrier wasn't passed)
-    expect(s.repos[1]!.stage_status).toBe("pending");
-  });
-
-  it("refuses re-report on already-failed repo (permanent)", () => {
-    let s = makeWave();
-    s = assertOk(
-      transition(s, {
-        kind: "stage_report",
-        now: T1,
-        repo: "ippoan/rust-alc-api",
-        ok: false,
-        error: "boom",
-      }),
-    ).state;
-    // wave is in failed state now, but even if it weren't, re-reporting failed repo should reject.
-    // Let's also test the early-state branch: construct another wave with 1 failed + 1 pending,
-    // skipping the wave-level transition to failed.
-    // Easier: directly test on the failed state, expecting TERMINAL_STATE.
-    const r = transition(s, {
-      kind: "stage_report",
-      now: T2,
-      repo: "ippoan/auth-worker",
-      ok: true,
-    });
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.code).toBe("TERMINAL_STATE");
-  });
-
-  it("rejects stage_report outside staging state", () => {
-    const s = makeWave({ flip_policy: "manual-approval" });
-    let s1 = assertOk(
-      transition(s, { kind: "stage_report", now: T1, repo: "ippoan/rust-alc-api", ok: true }),
-    ).state;
-    s1 = assertOk(
-      transition(s1, { kind: "stage_report", now: T2, repo: "ippoan/auth-worker", ok: true }),
-    ).state;
-    // now pending-approval
-    const r = transition(s1, {
-      kind: "stage_report",
-      now: T3,
-      repo: "ippoan/rust-alc-api",
-      ok: true,
-    });
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.code).toBe("INVALID_TRANSITION");
-  });
-
-  it("rejects unknown repo (REPO_NOT_IN_WAVE)", () => {
-    const s = makeWave();
-    const r = transition(s, {
-      kind: "stage_report",
-      now: T1,
-      repo: "ippoan/unrelated",
-      ok: true,
-    });
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.code).toBe("REPO_NOT_IN_WAVE");
-  });
-
-  it("preserves nullable fields when missing optional inputs", () => {
-    const s = makeWave();
-    const r = assertOk(
-      transition(s, {
-        kind: "stage_report",
-        now: T1,
-        repo: "ippoan/rust-alc-api",
-        ok: true,
-        // omit preview_url / flip_from_revision
-      }),
-    );
-    expect(r.state.repos[0]!.preview_url).toBeNull();
-    expect(r.state.repos[0]!.flip_from_revision).toBeNull();
-  });
-
-  it("attempts to re-report failed repo before wave-fail propagates (permanent guard)", () => {
-    // Manually build a wave where 1 repo is failed but state is still staging — the wave
-    // transition normally moves to "failed" immediately, but cover the permanent-guard
-    // branch by constructing the intermediate state directly.
-    const s = makeWave({
-      repos: [
-        { repo: "ippoan/a", target_tag: "v1", head_sha: "1" },
-        { repo: "ippoan/b", target_tag: "v1", head_sha: "2" },
-        { repo: "ippoan/c", target_tag: "v1", head_sha: "3" },
-      ],
-    });
-    // Mutate a copy: mark only "a" failed without propagating to wave state.
-    const tweaked: WaveState = {
-      ...s,
-      repos: s.repos.map((r, i) =>
-        i === 0 ? { ...r, stage_status: "failed" as const, stage_error: "x" } : { ...r },
-      ),
-    };
-    const r = transition(tweaked, {
-      kind: "stage_report",
-      now: T1,
-      repo: "ippoan/a",
-      ok: true,
-    });
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.code).toBe("INVALID_TRANSITION");
-  });
-});
-
-// ----------------------------------------------------------------------------
 // approve
 // ----------------------------------------------------------------------------
 
 describe("transition: approve", () => {
   function pendingApprovalWave(): WaveState {
-    let s = makeWave({ flip_policy: "manual-approval" });
-    s = assertOk(
-      transition(s, { kind: "stage_report", now: T1, repo: "ippoan/rust-alc-api", ok: true }),
-    ).state;
-    s = assertOk(
-      transition(s, { kind: "stage_report", now: T2, repo: "ippoan/auth-worker", ok: true }),
-    ).state;
-    return s;
+    // manual-approval policy は createWave 直後に pending-approval で開始する。
+    return makeWave({ flip_policy: "manual-approval" });
   }
 
   it("advances pending-approval -> flipping with actor recorded", () => {
@@ -294,8 +123,8 @@ describe("transition: approve", () => {
     expect(r.state.approved_by).toBe("ops@example.com");
   });
 
-  it("rejects approve from staging state", () => {
-    const s = makeWave();
+  it("rejects approve from flipping state (auto policy starts flipping)", () => {
+    const s = makeWave({ flip_policy: "auto" });
     const r = transition(s, { kind: "approve", now: T1, approved_by: "ops" });
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.code).toBe("INVALID_TRANSITION");
@@ -308,14 +137,8 @@ describe("transition: approve", () => {
 
 describe("transition: flip_report", () => {
   function flippingWave(): WaveState {
-    let s = makeWave({ flip_policy: "auto" });
-    s = assertOk(
-      transition(s, { kind: "stage_report", now: T1, repo: "ippoan/rust-alc-api", ok: true }),
-    ).state;
-    s = assertOk(
-      transition(s, { kind: "stage_report", now: T2, repo: "ippoan/auth-worker", ok: true }),
-    ).state;
-    return s;
+    // auto policy は createWave 直後に flipping で開始する。
+    return makeWave({ flip_policy: "auto" });
   }
 
   it("marks single repo done, stays flipping until all done", () => {
@@ -416,19 +239,6 @@ describe("transition: flip_report", () => {
     );
     expect(r.state.repos[0]!.flip_error).toBe("flip failed (no detail)");
   });
-
-  it("uses default error message for stage when error missing", () => {
-    const s = makeWave();
-    const r = assertOk(
-      transition(s, {
-        kind: "stage_report",
-        now: T1,
-        repo: "ippoan/rust-alc-api",
-        ok: false,
-      }),
-    );
-    expect(r.state.repos[0]!.stage_error).toBe("stage failed (no detail)");
-  });
 });
 
 // ----------------------------------------------------------------------------
@@ -437,13 +247,8 @@ describe("transition: flip_report", () => {
 
 describe("transition: rollback", () => {
   function flippedWave(): WaveState {
+    // auto policy は flipping で開始するので flip_report 2 件で flipped に進める。
     let s = makeWave({ flip_policy: "auto" });
-    s = assertOk(
-      transition(s, { kind: "stage_report", now: T1, repo: "ippoan/rust-alc-api", ok: true }),
-    ).state;
-    s = assertOk(
-      transition(s, { kind: "stage_report", now: T2, repo: "ippoan/auth-worker", ok: true }),
-    ).state;
     s = assertOk(
       transition(s, { kind: "flip_report", now: T2, repo: "ippoan/rust-alc-api", ok: true }),
     ).state;
@@ -528,8 +333,10 @@ describe("transition: rollback", () => {
 // ----------------------------------------------------------------------------
 
 describe("transition: abort", () => {
-  it("aborts from staging", () => {
-    const s = makeWave();
+  it("aborts from legacy staging record (back-compat)", () => {
+    // staging は createWave からは生成されないが、disk 上の legacy record 互換
+    // のため abort は引き続き staging から許容する (Refs ippoan/ci-workflows#96①)。
+    const s: WaveState = { ...makeWave(), state: "staging" };
     const r = assertOk(
       transition(s, {
         kind: "abort",
@@ -543,13 +350,7 @@ describe("transition: abort", () => {
   });
 
   it("aborts from pending-approval", () => {
-    let s = makeWave({ flip_policy: "manual-approval" });
-    s = assertOk(
-      transition(s, { kind: "stage_report", now: T1, repo: "ippoan/rust-alc-api", ok: true }),
-    ).state;
-    s = assertOk(
-      transition(s, { kind: "stage_report", now: T2, repo: "ippoan/auth-worker", ok: true }),
-    ).state;
+    const s = makeWave({ flip_policy: "manual-approval" });
     const r = assertOk(
       transition(s, {
         kind: "abort",
@@ -562,14 +363,8 @@ describe("transition: abort", () => {
   });
 
   it("rejects abort from flipping", () => {
-    let s = makeWave({ flip_policy: "auto" });
-    s = assertOk(
-      transition(s, { kind: "stage_report", now: T1, repo: "ippoan/rust-alc-api", ok: true }),
-    ).state;
-    s = assertOk(
-      transition(s, { kind: "stage_report", now: T2, repo: "ippoan/auth-worker", ok: true }),
-    ).state;
-    // now flipping
+    // auto policy は flipping で開始する。
+    const s = makeWave({ flip_policy: "auto" });
     const r = transition(s, {
       kind: "abort",
       now: T3,
@@ -609,12 +404,6 @@ describe("transition: fail", () => {
 describe("transition: contract_applied", () => {
   function flippedWave(): WaveState {
     let s = makeWave({ flip_policy: "auto" });
-    s = assertOk(
-      transition(s, { kind: "stage_report", now: T1, repo: "ippoan/rust-alc-api", ok: true }),
-    ).state;
-    s = assertOk(
-      transition(s, { kind: "stage_report", now: T2, repo: "ippoan/auth-worker", ok: true }),
-    ).state;
     s = assertOk(
       transition(s, { kind: "flip_report", now: T2, repo: "ippoan/rust-alc-api", ok: true }),
     ).state;
@@ -714,12 +503,6 @@ describe("transition: fail (flipped guard)", () => {
   function flippedWave(): WaveState {
     let s = makeWave({ flip_policy: "auto" });
     s = assertOk(
-      transition(s, { kind: "stage_report", now: T1, repo: "ippoan/rust-alc-api", ok: true }),
-    ).state;
-    s = assertOk(
-      transition(s, { kind: "stage_report", now: T2, repo: "ippoan/auth-worker", ok: true }),
-    ).state;
-    s = assertOk(
       transition(s, { kind: "flip_report", now: T2, repo: "ippoan/rust-alc-api", ok: true }),
     ).state;
     s = assertOk(
@@ -745,32 +528,32 @@ describe("transition: fail (flipped guard)", () => {
 
 describe("immutability and events", () => {
   it("does not mutate the input state object", () => {
-    const s = makeWave();
-    const beforeRepos = s.repos[0]!.stage_status;
+    const s = makeWave({ flip_policy: "manual-approval" });
+    const beforeState = s.state;
     const beforeEvents = s.events.length;
-    transition(s, { kind: "stage_report", now: T1, repo: "ippoan/rust-alc-api", ok: true });
-    expect(s.repos[0]!.stage_status).toBe(beforeRepos);
+    transition(s, { kind: "approve", now: T1, approved_by: "ops" });
+    expect(s.state).toBe(beforeState);
     expect(s.events.length).toBe(beforeEvents);
   });
 
   it("appends an event record per accepted transition", () => {
-    let s = makeWave();
+    let s = makeWave({ flip_policy: "manual-approval" });
     const before = s.events.length;
     s = assertOk(
-      transition(s, { kind: "stage_report", now: T1, repo: "ippoan/rust-alc-api", ok: true }),
+      transition(s, { kind: "approve", now: T1, approved_by: "ops" }),
     ).state;
     expect(s.events.length).toBe(before + 1);
-    expect(s.events[s.events.length - 1]!.kind).toBe("stage_report");
+    expect(s.events[s.events.length - 1]!.kind).toBe("approve");
   });
 
   it("does not append events on rejected transitions", () => {
-    const s = makeWave();
+    // auto policy は flipping で開始するので approve は INVALID_TRANSITION。
+    const s = makeWave({ flip_policy: "auto" });
     const before = s.events.length;
     const r = transition(s, {
-      kind: "stage_report",
+      kind: "approve",
       now: T1,
-      repo: "ippoan/unrelated",
-      ok: true,
+      approved_by: "ops",
     });
     expect(r.ok).toBe(false);
     expect(s.events.length).toBe(before);

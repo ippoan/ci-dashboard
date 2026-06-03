@@ -541,8 +541,8 @@ describe("handleReleaseWaveDetailPage", () => {
     const wave = makeWave({
       events: [
         { at: "2026-01-01T00:00:00Z", kind: "start", summary: "first" },
-        { at: "2026-01-02T00:00:00Z", kind: "stage_report", summary: "second" },
-        { at: "2026-01-03T00:00:00Z", kind: "approve", summary: "third" },
+        { at: "2026-01-02T00:00:00Z", kind: "approve", summary: "second" },
+        { at: "2026-01-03T00:00:00Z", kind: "flip_report", summary: "third" },
       ],
     });
     const env = fakeEnv({ getReturn: { ok: true, data: wave } });
@@ -561,8 +561,8 @@ describe("handleReleaseWaveDetailPage", () => {
           target_tag: "v1",
           head_sha: "x",
           stage_status: "done",
-          // attacker-controlled preview_url (= release_wave_stage MCP callback
-          // from a compromised handler). safeHttpUrl で reject 必須。
+          // attacker-controlled preview_url (= pending-release / handler callback
+          // from a compromised source). safeHttpUrl で reject 必須。
           preview_url: "javascript:alert(1)",
           stage_error: null,
           flip_status: "done",

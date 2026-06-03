@@ -1,7 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   handleContractAppliedWebhook,
-  handleStageReportWebhook,
   handleFlipReportWebhook,
   handlePendingReleaseWebhook,
   handleTrafficReportWebhook,
@@ -43,7 +42,6 @@ function memKv(seed: Record<string, unknown> = {}): KVNamespace {
 
 type FakeSpies = {
   contractApplied: ReturnType<typeof vi.fn>;
-  stageReport: ReturnType<typeof vi.fn>;
   flipReport: ReturnType<typeof vi.fn>;
 };
 
@@ -52,22 +50,16 @@ function fakeEnv(opts: {
   contractAppliedReturn?:
     | { ok: true; data: unknown }
     | { ok: false; code: string; error: string };
-  stageReportReturn?:
-    | { ok: true; data: unknown }
-    | { ok: false; code: string; error: string };
   flipReportReturn?:
     | { ok: true; data: unknown }
     | { ok: false; code: string; error: string };
   compatKv?: KVNamespace;
 } = {}): { env: Env; spies: FakeSpies } {
-  const okState = { wave_id: "w1", state: "staging" };
+  const okState = { wave_id: "w1", state: "flipping" };
   const spies: FakeSpies = {
     contractApplied: vi
       .fn()
       .mockResolvedValue(opts.contractAppliedReturn ?? { ok: true, data: okState }),
-    stageReport: vi
-      .fn()
-      .mockResolvedValue(opts.stageReportReturn ?? { ok: true, data: okState }),
     flipReport: vi
       .fn()
       .mockResolvedValue(opts.flipReportReturn ?? { ok: true, data: okState }),
@@ -268,180 +260,6 @@ describe("handleContractAppliedWebhook", () => {
       env,
     );
     expect(resp.status).toBe(404);
-  });
-});
-
-// ============================================================================
-// /webhooks/release-wave/stage-report
-// ============================================================================
-
-const STAGE_URL =
-  "https://ci-dashboard.ippoan.org/webhooks/release-wave/stage-report";
-
-describe("handleStageReportWebhook", () => {
-  it("returns 405 on GET", async () => {
-    const { env } = fakeEnv();
-    const resp = await handleStageReportWebhook(
-      jsonRequest({ url: STAGE_URL, method: "GET", secret: "expected-secret" }),
-      env,
-    );
-    expect(resp.status).toBe(405);
-  });
-
-  it("returns 401 on wrong secret", async () => {
-    const { env } = fakeEnv();
-    const resp = await handleStageReportWebhook(
-      jsonRequest({
-        url: STAGE_URL,
-        secret: "wrong",
-        body: { wave_id: "w1", repo: "ippoan/a", ok: true },
-      }),
-      env,
-    );
-    expect(resp.status).toBe(401);
-  });
-
-  it("returns 400 on missing fields", async () => {
-    const { env } = fakeEnv();
-    const resp = await handleStageReportWebhook(
-      jsonRequest({
-        url: STAGE_URL,
-        secret: "expected-secret",
-        body: { wave_id: "w1" },
-      }),
-      env,
-    );
-    expect(resp.status).toBe(400);
-    const body = (await resp.json()) as { error: string };
-    expect(body.error).toContain("repo");
-    expect(body.error).toContain("ok");
-  });
-
-  it("returns 400 on invalid preview_url (non-URL)", async () => {
-    const { env } = fakeEnv();
-    const resp = await handleStageReportWebhook(
-      jsonRequest({
-        url: STAGE_URL,
-        secret: "expected-secret",
-        body: {
-          wave_id: "w1",
-          repo: "ippoan/a",
-          ok: true,
-          preview_url: "not a url",
-        },
-      }),
-      env,
-    );
-    expect(resp.status).toBe(400);
-  });
-
-  it("succeeds with full payload (ok=true)", async () => {
-    const { env, spies } = fakeEnv();
-    const resp = await handleStageReportWebhook(
-      jsonRequest({
-        url: STAGE_URL,
-        secret: "expected-secret",
-        body: {
-          wave_id: "w1",
-          repo: "ippoan/a",
-          ok: true,
-          preview_url: "https://preview-a.ippoan.org/",
-          flip_from_revision: "a-old-rev",
-          previewed_version_id: "11111111-2222-3333-4444-555555555555",
-        },
-      }),
-      env,
-    );
-    expect(resp.status).toBe(200);
-    expect(spies.stageReport).toHaveBeenCalledWith({
-      wave_id: "w1",
-      repo: "ippoan/a",
-      ok: true,
-      preview_url: "https://preview-a.ippoan.org/",
-      flip_from_revision: "a-old-rev",
-      previewed_version_id: "11111111-2222-3333-4444-555555555555",
-      error: null,
-    });
-  });
-
-  it("succeeds with failure payload (ok=false, error)", async () => {
-    const { env, spies } = fakeEnv();
-    const resp = await handleStageReportWebhook(
-      jsonRequest({
-        url: STAGE_URL,
-        secret: "expected-secret",
-        body: {
-          wave_id: "w1",
-          repo: "ippoan/a",
-          ok: false,
-          error: "build broke",
-        },
-      }),
-      env,
-    );
-    expect(resp.status).toBe(200);
-    expect(spies.stageReport).toHaveBeenCalledWith(
-      expect.objectContaining({
-        ok: false,
-        error: "build broke",
-        preview_url: null,
-        flip_from_revision: null,
-      }),
-    );
-  });
-
-  it("nullifies omitted optional fields", async () => {
-    const { env, spies } = fakeEnv();
-    await handleStageReportWebhook(
-      jsonRequest({
-        url: STAGE_URL,
-        secret: "expected-secret",
-        body: { wave_id: "w1", repo: "ippoan/a", ok: true },
-      }),
-      env,
-    );
-    expect(spies.stageReport).toHaveBeenCalledWith(
-      expect.objectContaining({
-        preview_url: null,
-        flip_from_revision: null,
-        previewed_version_id: null,
-        error: null,
-      }),
-    );
-  });
-
-  it("maps NOT_FOUND to 404", async () => {
-    const { env } = fakeEnv({
-      stageReportReturn: { ok: false, code: "NOT_FOUND", error: "no wave" },
-    });
-    const resp = await handleStageReportWebhook(
-      jsonRequest({
-        url: STAGE_URL,
-        secret: "expected-secret",
-        body: { wave_id: "ghost", repo: "ippoan/a", ok: true },
-      }),
-      env,
-    );
-    expect(resp.status).toBe(404);
-  });
-
-  it("maps INVALID_TRANSITION to 409", async () => {
-    const { env } = fakeEnv({
-      stageReportReturn: {
-        ok: false,
-        code: "INVALID_TRANSITION",
-        error: "wave is flipping",
-      },
-    });
-    const resp = await handleStageReportWebhook(
-      jsonRequest({
-        url: STAGE_URL,
-        secret: "expected-secret",
-        body: { wave_id: "w1", repo: "ippoan/a", ok: true },
-      }),
-      env,
-    );
-    expect(resp.status).toBe(409);
   });
 });
 

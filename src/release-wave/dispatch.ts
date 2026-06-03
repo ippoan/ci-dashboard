@@ -25,7 +25,6 @@ import type { WaveCompatibility } from "./compat";
 // ----------------------------------------------------------------------------
 
 export type DispatchEventType =
-  | "release-wave-stage"
   | "release-wave-flip"
   | "release-wave-rollback"
   | "release-wave-retest"
@@ -48,14 +47,16 @@ export interface Dispatch {
 /**
  * prev/next state を比べて発火すべき dispatch を返す。
  *
+ * stage phase は撤去済み (Refs ippoan/ci-workflows#96①)。wave は最初から
+ * flippable な state (auto → flipping / manual → pending-approval) で始まり、
+ * start 時点では dispatch を発火しない。flip / rollback のみが dispatch を生む。
+ *
  * 発火条件:
- *   prev=null            && next.state="staging"   → 全 repo に stage
  *   prev.state="pending-approval" && next.state="flipping" → 全 repo に flip
- *   prev.state="staging" && next.state="flipping"  → 全 repo に flip (auto policy)
+ *   (prev=null/auto policy で createWave が直接 flipping を作る場合も flip)
  *   prev.state="flipped" && next.state="rolled-back" → 全 repo に rollback
  *
- * それ以外 (failed / aborted / stage_report 完了 / contract_applied 等) は
- * 発火しない。空配列を返す。
+ * それ以外 (failed / aborted / contract_applied 等) は発火しない。空配列を返す。
  *
  * @param prev 直前の state。`createWave` 直後は null。
  * @param next 遷移後の state。
@@ -64,26 +65,9 @@ export function decideDispatches(
   prev: WaveState | null,
   next: WaveState,
 ): Dispatch[] {
-  // start: null → staging
-  if (prev === null && next.state === "staging") {
-    return next.repos.map((r) => ({
-      repo: r.repo,
-      event_type: "release-wave-stage" as const,
-      client_payload: {
-        wave_id: next.wave_id,
-        target_tag: r.target_tag,
-        head_sha: r.head_sha,
-      },
-    }));
-  }
-
   // flip: pending-approval → flipping (manual approve)
-  //       staging          → flipping (auto policy)
-  if (
-    prev !== null &&
-    next.state === "flipping" &&
-    prev.state !== "flipping"
-  ) {
+  //       null → flipping  (auto policy: createWave が直接 flipping を作る)
+  if (next.state === "flipping" && (prev === null || prev.state !== "flipping")) {
     return next.repos.map((r) => ({
       repo: r.repo,
       event_type: "release-wave-flip" as const,

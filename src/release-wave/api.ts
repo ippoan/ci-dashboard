@@ -401,9 +401,9 @@ function buildTrafficRollbackDispatch(
 // ----------------------------------------------------------------------------
 
 /**
- * 単独 v* リリースの no-traffic version を 100% へ flip する。release-wave
- * (stage→approve→flip) を起こさずに、frontend-ci が report した pending release
- * を `release-wave-flip` dispatch で promote する。
+ * 単独 v* リリースの no-traffic version を 100% へ flip する。release-wave の
+ * state machine (approve→flip) を起こさずに、frontend-ci が report した pending
+ * release を `release-wave-flip` dispatch で promote する。
  *
  * - form field `repo` ("owner/name") を受け、KV の pending-release record を引く。
  *   record が無い repo は 404 (= flip 対象が存在しない)。

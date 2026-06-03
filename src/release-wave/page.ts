@@ -52,8 +52,8 @@ function escapeHtml(s: string): string {
  * `javascript:alert(1)` には HTML 特殊文字が無いため escape 後も生のまま
  * `<a href="...">` に乗り、クリックすると script 実行される。
  *
- * preview_url は repo 側 release-wave handler が `release_wave_stage`
- * MCP tool で報告する値 = handler が compromise されれば任意値を入れられる
+ * preview_url は repo 側 release-wave handler / pending-release webhook が
+ * 報告する値 = handler が compromise されれば任意値を入れられる
  * = trust boundary を越える input なので必ず scheme check を入れる。
  */
 function safeHttpUrl(u: string | null | undefined): string | null {

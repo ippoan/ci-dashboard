@@ -37,7 +37,8 @@ describe("ReleaseWaveHub.start", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.data.wave_id).toBe("w1");
-      expect(result.data.state).toBe("staging");
+      // manual-approval は stage phase 撤去後 pending-approval で開始する。
+      expect(result.data.state).toBe("pending-approval");
       expect(result.data.repos).toHaveLength(2);
     }
   });
@@ -48,9 +49,7 @@ describe("ReleaseWaveHub.start", () => {
       const a = await i.start({ wave_id: "w1", flip_policy: "auto", repos: REPOS });
       expect(a.ok).toBe(true);
       // 1st wave を flipped に進めて serial enforcement に引っかからないようにしてから
-      // 同 id 再 start を試す。
-      await i.stageReport({ wave_id: "w1", repo: REPOS[0]!.repo, ok: true });
-      await i.stageReport({ wave_id: "w1", repo: REPOS[1]!.repo, ok: true });
+      // 同 id 再 start を試す。auto は flipping で開始するので flip_report 2 件で flipped。
       await i.flipReport({ wave_id: "w1", repo: REPOS[0]!.repo, ok: true });
       await i.flipReport({ wave_id: "w1", repo: REPOS[1]!.repo, ok: true });
       const dup = await i.start({ wave_id: "w1", flip_policy: "auto", repos: REPOS });
@@ -77,8 +76,6 @@ describe("ReleaseWaveHub.start", () => {
     const hub = freshHub();
     await runInDurableObject(hub, async (i) => {
       await i.start({ wave_id: "w1", flip_policy: "auto", repos: REPOS });
-      await i.stageReport({ wave_id: "w1", repo: REPOS[0]!.repo, ok: true });
-      await i.stageReport({ wave_id: "w1", repo: REPOS[1]!.repo, ok: true });
       await i.flipReport({ wave_id: "w1", repo: REPOS[0]!.repo, ok: true });
       const finalFlip = await i.flipReport({ wave_id: "w1", repo: REPOS[1]!.repo, ok: true });
       expect(finalFlip.ok).toBe(true);
@@ -93,7 +90,9 @@ describe("ReleaseWaveHub.start", () => {
   it("allows new wave once previous is rolled-back / failed / aborted", async () => {
     const hub = freshHub();
     await runInDurableObject(hub, async (i) => {
-      await i.start({ wave_id: "w1", flip_policy: "auto", repos: REPOS });
+      // abort は flip 前 (pending-approval) のみ有効。manual-approval で開始して
+      // pending-approval から abort → aborted (terminal) に落とす。
+      await i.start({ wave_id: "w1", flip_policy: "manual-approval", repos: REPOS });
       await i.abort({ wave_id: "w1", aborted_by: "ops", reason: "test" });
 
       const w2 = await i.start({ wave_id: "w2", flip_policy: "auto", repos: REPOS });
@@ -102,32 +101,15 @@ describe("ReleaseWaveHub.start", () => {
   });
 });
 
-describe("ReleaseWaveHub.stageReport / approve / flipReport", () => {
-  it("manual-approval policy: full happy path", async () => {
+describe("ReleaseWaveHub.approve / flipReport", () => {
+  it("manual-approval policy: full happy path (pending-approval -> approve -> flip)", async () => {
     const hub = freshHub();
     await runInDurableObject(hub, async (i) => {
-      await i.start({ wave_id: "w1", flip_policy: "manual-approval", repos: REPOS });
+      const start = await i.start({ wave_id: "w1", flip_policy: "manual-approval", repos: REPOS });
+      expect(start.ok).toBe(true);
+      if (start.ok) expect(start.data.state).toBe("pending-approval");
 
-      let r = await i.stageReport({
-        wave_id: "w1",
-        repo: REPOS[0]!.repo,
-        ok: true,
-        preview_url: "https://preview-a.ippoan.org",
-        flip_from_revision: "a-old",
-      });
-      expect(r.ok).toBe(true);
-      if (r.ok) expect(r.data.state).toBe("staging");
-
-      r = await i.stageReport({
-        wave_id: "w1",
-        repo: REPOS[1]!.repo,
-        ok: true,
-        flip_from_revision: "b-old",
-      });
-      expect(r.ok).toBe(true);
-      if (r.ok) expect(r.data.state).toBe("pending-approval");
-
-      r = await i.approve({ wave_id: "w1", approved_by: "ops@example.com" });
+      let r = await i.approve({ wave_id: "w1", approved_by: "ops@example.com" });
       expect(r.ok).toBe(true);
       if (r.ok) {
         expect(r.data.state).toBe("flipping");
@@ -142,21 +124,19 @@ describe("ReleaseWaveHub.stageReport / approve / flipReport", () => {
     });
   });
 
-  it("auto policy: stage all -> auto flip (no approval)", async () => {
+  it("auto policy: starts directly in flipping (no approval)", async () => {
     const hub = freshHub();
     await runInDurableObject(hub, async (i) => {
-      await i.start({ wave_id: "w1", flip_policy: "auto", repos: REPOS });
-      await i.stageReport({ wave_id: "w1", repo: REPOS[0]!.repo, ok: true });
-      const r = await i.stageReport({ wave_id: "w1", repo: REPOS[1]!.repo, ok: true });
+      const r = await i.start({ wave_id: "w1", flip_policy: "auto", repos: REPOS });
       expect(r.ok).toBe(true);
       if (r.ok) expect(r.data.state).toBe("flipping");
     });
   });
 
-  it("stage_report on unknown wave -> NOT_FOUND", async () => {
+  it("flip_report on unknown wave -> NOT_FOUND", async () => {
     const hub = freshHub();
     await runInDurableObject(hub, async (i) => {
-      const r = await i.stageReport({
+      const r = await i.flipReport({
         wave_id: "ghost",
         repo: REPOS[0]!.repo,
         ok: true,
@@ -169,8 +149,8 @@ describe("ReleaseWaveHub.stageReport / approve / flipReport", () => {
   it("propagates state-machine errors as RpcError (INVALID_TRANSITION)", async () => {
     const hub = freshHub();
     await runInDurableObject(hub, async (i) => {
-      await i.start({ wave_id: "w1", flip_policy: "manual-approval", repos: REPOS });
-      // approve は pending-approval 以外 (今は staging) で INVALID_TRANSITION
+      // auto policy は flipping で開始する → approve は INVALID_TRANSITION
+      await i.start({ wave_id: "w1", flip_policy: "auto", repos: REPOS });
       const r = await i.approve({ wave_id: "w1", approved_by: "ops" });
       expect(r.ok).toBe(false);
       if (!r.ok) expect(r.code).toBe("INVALID_TRANSITION");
@@ -180,9 +160,8 @@ describe("ReleaseWaveHub.stageReport / approve / flipReport", () => {
 
 describe("ReleaseWaveHub.rollback / contractApplied", () => {
   async function buildFlipped(i: ReleaseWaveHub, wave_id: string): Promise<void> {
+    // auto policy は flipping で開始するので flip_report 2 件で flipped に進む。
     await i.start({ wave_id, flip_policy: "auto", repos: REPOS });
-    await i.stageReport({ wave_id, repo: REPOS[0]!.repo, ok: true });
-    await i.stageReport({ wave_id, repo: REPOS[1]!.repo, ok: true });
     await i.flipReport({ wave_id, repo: REPOS[0]!.repo, ok: true });
     await i.flipReport({ wave_id, repo: REPOS[1]!.repo, ok: true });
   }
@@ -243,10 +222,11 @@ describe("ReleaseWaveHub.rollback / contractApplied", () => {
 });
 
 describe("ReleaseWaveHub.abort / fail", () => {
-  it("aborts a staging wave", async () => {
+  it("aborts a pending-approval wave", async () => {
     const hub = freshHub();
     await runInDurableObject(hub, async (i) => {
-      await i.start({ wave_id: "w1", flip_policy: "auto", repos: REPOS });
+      // abort は flip 前 (pending-approval) のみ有効。
+      await i.start({ wave_id: "w1", flip_policy: "manual-approval", repos: REPOS });
       const r = await i.abort({
         wave_id: "w1",
         aborted_by: "ops",
@@ -257,9 +237,10 @@ describe("ReleaseWaveHub.abort / fail", () => {
     });
   });
 
-  it("fails a staging wave via fail event", async () => {
+  it("fails an in-progress wave via fail event", async () => {
     const hub = freshHub();
     await runInDurableObject(hub, async (i) => {
+      // auto policy は flipping で開始。fail は in-progress (flipping) で有効。
       await i.start({ wave_id: "w1", flip_policy: "auto", repos: REPOS });
       const r = await i.fail({ wave_id: "w1", reason: "ci crashed" });
       expect(r.ok).toBe(true);
@@ -292,9 +273,7 @@ describe("ReleaseWaveHub.get / list", () => {
     const hub = freshHub();
     await runInDurableObject(hub, async (i) => {
       await i.start({ wave_id: "w1", flip_policy: "auto", repos: REPOS });
-      // 1st を rolled-back に進めて serial を解除し、2nd を時刻差で立てる
-      await i.stageReport({ wave_id: "w1", repo: REPOS[0]!.repo, ok: true });
-      await i.stageReport({ wave_id: "w1", repo: REPOS[1]!.repo, ok: true });
+      // 1st を flipped に進めて serial を解除し、2nd を時刻差で立てる
       await i.flipReport({ wave_id: "w1", repo: REPOS[0]!.repo, ok: true });
       await i.flipReport({ wave_id: "w1", repo: REPOS[1]!.repo, ok: true });
 
@@ -392,8 +371,8 @@ describe("ReleaseWaveHub.start compatibility precheck", () => {
       expect((warn!.detail as { reds: string[] }).reds[0]).toContain(
         "ippoan/alc-app",
       );
-      // precheck は block しない: state は staging のまま。
-      expect(result.data.state).toBe("staging");
+      // precheck は block しない: manual-approval は pending-approval で開始する。
+      expect(result.data.state).toBe("pending-approval");
     }
   });
 
@@ -457,11 +436,12 @@ describe("ReleaseWaveHub.approve compatibility gate", () => {
   beforeEach(clearCompatKeys);
   const now = () => new Date().toISOString();
 
-  async function stageToPendingApproval(
-    i: { start: Function; stageReport: Function },
+  async function startPendingApproval(
+    i: { start: Function },
     wave_id: string,
     require_compatibility: boolean,
   ) {
+    // manual-approval は stage phase 撤去後 pending-approval で開始する。
     await i.start({
       wave_id,
       flip_policy: "manual-approval",
@@ -474,7 +454,6 @@ describe("ReleaseWaveHub.approve compatibility gate", () => {
         },
       ],
     });
-    await i.stageReport({ wave_id, repo: "ippoan/rust-alc-api", ok: true });
   }
 
   async function seedRed() {
@@ -496,7 +475,7 @@ describe("ReleaseWaveHub.approve compatibility gate", () => {
     await seedRed();
     const hub = freshHub();
     const res = await runInDurableObject(hub, async (i) => {
-      await stageToPendingApproval(i as never, "w-gate-red", true);
+      await startPendingApproval(i as never, "w-gate-red", true);
       return i.approve({ wave_id: "w-gate-red", approved_by: "ops" });
     });
     expect(res.ok).toBe(false);
@@ -507,7 +486,7 @@ describe("ReleaseWaveHub.approve compatibility gate", () => {
     await seedRed();
     const hub = freshHub();
     const res = await runInDurableObject(hub, async (i) => {
-      await stageToPendingApproval(i as never, "w-gate-force", true);
+      await startPendingApproval(i as never, "w-gate-force", true);
       return i.approve({ wave_id: "w-gate-force", approved_by: "ops", force: true });
     });
     expect(res.ok).toBe(true);
@@ -518,7 +497,7 @@ describe("ReleaseWaveHub.approve compatibility gate", () => {
     await seedRed();
     const hub = freshHub();
     const res = await runInDurableObject(hub, async (i) => {
-      await stageToPendingApproval(i as never, "w-gate-off", false);
+      await startPendingApproval(i as never, "w-gate-off", false);
       return i.approve({ wave_id: "w-gate-off", approved_by: "ops" });
     });
     expect(res.ok).toBe(true);
@@ -540,7 +519,7 @@ describe("ReleaseWaveHub.approve compatibility gate", () => {
     });
     const hub = freshHub();
     const res = await runInDurableObject(hub, async (i) => {
-      await stageToPendingApproval(i as never, "w-gate-green", true);
+      await startPendingApproval(i as never, "w-gate-green", true);
       return i.approve({ wave_id: "w-gate-green", approved_by: "ops" });
     });
     expect(res.ok).toBe(true);
