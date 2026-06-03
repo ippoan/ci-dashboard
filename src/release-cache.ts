@@ -243,6 +243,19 @@ export async function invalidateRepoCommits(
   await invalidateRepoPrefix(kv, `${PREFIX}commits:${owner}/${name}:`);
 }
 
+/** 該当 repo の compare cache (`cmp:owner/name:<prev>..<curr>`) を全 flush。
+ *  PR merge / default branch への push 時に呼ぶ。"Unreleased" ゾーンの
+ *  `<latest tag>...<defaultBranch>` compare は HEAD が動くと内容が変わるので、
+ *  merge の瞬間に消して即時 refetch させる (60s TTL を待たない)。Refs #231。
+ *  immutable な `tag...tag` compare も一緒に消えるが re-fetch は冪等。 */
+export async function invalidateRepoCompare(
+  kv: KVNamespace | undefined,
+  owner: string,
+  name: string,
+): Promise<void> {
+  await invalidateRepoPrefix(kv, `${PREFIX}cmp:${owner}/${name}:`);
+}
+
 /** 該当 repo の repo-meta (default_branch 等) cache を flush。
  *  `repository` event (rename / default_branch 変更) で呼ぶ想定。
  *  現状の webhook handler では未使用だが API 表面として用意しておく。 */
