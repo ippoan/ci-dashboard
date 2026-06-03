@@ -9,10 +9,11 @@ import type { AuthClientWorkerEnv } from "@ippoan/auth-client-worker";
 //                                                      list-since reconcile)
 //
 // 設計方針 (Refs #129):
-// - SSR は KV から read のみ。reconcile は watermark が古い時だけ走る。
+// - SSR は KV から read のみ。reconcile は watermark が古い時だけ走り、その時
+//   GitHub の現在の open 集合を full snapshot で取り直して KV を一致させる。
 // - Webhook (issues / issue_comment) は個別 issue を patch するが watermark
-//   は触らない。watermark の意味は「ここまでは list-since が確実に拾った」。
-//   webhook 配信ミスは次の reconcile の delta クエリが必ず救う。
+//   は触らない。watermark の意味は「ここまでは full snapshot が確実に拾った」。
+//   webhook 配信ミスは次の reconcile の full snapshot が必ず救う。
 
 const KEY_WATERMARK = "issues:watermark";
 const KEY_PREFIX = "issue:";
@@ -22,9 +23,9 @@ const KEY_PREFIX = "issue:";
 // ラグは webhook 側でほぼ埋まる。
 const FRESH_THRESHOLD_MS = 60 * 1000;
 
-// Watermark を `now - SAFETY_WINDOW_MS` でセット。次回 delta の
-// `updated:>=watermark` が clock skew 5s ぶんを overlap 検索するための
-// バッファ。upsert は idempotent なので overlap は無害。
+// Watermark は `now - SAFETY_WINDOW_MS` でセット。full snapshot 方式では
+// delta query が無いので overlap の意味は無く、次 reconcile の fresh 判定を
+// 5s ぶん早く解除する保険として残す (= 連続アクセス時の取りこぼし余地を縮める)。
 const SAFETY_WINDOW_MS = 5 * 1000;
 
 export function issueKey(repo: string, number: number): string {
@@ -71,11 +72,21 @@ export interface ReconcileResult {
   patched: number;
   /** Whether we actually hit GitHub. false = within FRESH_THRESHOLD_MS. */
   fetched: boolean;
+  /** Stale entries evicted (open in KV but no longer in GitHub's open set).
+   *  0 when the snapshot was incomplete (eviction skipped) or fresh window hit. */
+  removed: number;
 }
 
-/** Watermark を見て GitHub に当てに行く。fresh window 内なら no-op。
- *  Cold start (watermark なし) は state:open の全件取得、それ以降は
- *  state:all + updated:>=watermark の delta。auth error 等はそのまま throw。 */
+/** GitHub の現在の open 集合を full snapshot で取得し、KV をそれに一致させる。
+ *  fresh window 内なら no-op。auth error 等はそのまま throw。
+ *
+ *  旧実装は初回 cold start (state:open) の後ずっと `state:all + updated:>=`
+ *  の warm delta しか走らせなかったため、per_page:100 truncation や KV write
+ *  欠落で一度漏れた open issue を二度と復活できず、特定 repo の section が
+ *  丸ごと消えていた (= MCP の list_org_issues は直叩きで全件見えるのに /issues
+ *  だけ欠ける非対称)。毎回 state:open を引き直し「KV にあるが GitHub の open
+ *  集合に無い entry」を削除すれば、漏れも stale も構造的に起きない。SSR は
+ *  従来どおり KV read のみなので高速性は維持される (Refs #129)。 */
 export async function reconcileIssues(
   env: AuthClientWorkerEnv,
   params: ReconcileParams,
@@ -84,34 +95,22 @@ export async function reconcileIssues(
   const watermark = await kv.get(KEY_WATERMARK);
   const now = Date.now();
   if (watermark && now - Date.parse(watermark) < FRESH_THRESHOLD_MS) {
-    return { patched: 0, fetched: false };
+    return { patched: 0, fetched: false, removed: 0 };
   }
 
-  const isCold = !watermark;
-  // Cold start: state:open で「現時点の open 集合」をブートストラップ。
-  // Warm: state:all + updated:>= で delta のみ (close も拾う)。
-  const sinceQ = watermark ? `updated:>=${watermark}` : "";
-  const stateFilter: FetchOrgIssuesParams["state"] = isCold ? "open" : "all";
-
-  // 既存の issues-page.ts と同じ 2-query pattern。GitHub search は org: と
-  // repo: を組み合わせると repo: 側を黙って drop するので yhonda-ohishi
-  // 特定 repo は別 query に分離する必要がある (mcp/tools/issues.ts 参照)。
+  // 2-query pattern: GitHub search は org: と repo: を混ぜると repo: 側を黙って
+  // drop するので、yhonda-ohishi の特定 repo だけ別 query に分離する
+  // (mcp/tools/issues.ts 参照)。両方とも state:open の full snapshot。
   const mainParams: FetchOrgIssuesParams = {
     orgs: params.mainOrgs,
-    state: stateFilter,
+    state: "open",
     per_page: 100,
   };
-  if (sinceQ) mainParams.query = sinceQ;
-
-  const yhondaQ = [
-    ...params.yhondaRepos.map((r) => `repo:${r}`),
-    sinceQ,
-  ].filter(Boolean).join(" ");
   const yhondaParams: FetchOrgIssuesParams = {
     orgs: ["yhonda-ohishi"],
-    state: stateFilter,
+    state: "open",
     per_page: 100,
-    query: yhondaQ,
+    query: params.yhondaRepos.map((r) => `repo:${r}`).join(" "),
   };
 
   const [main, yhonda] = await Promise.all([
@@ -119,15 +118,34 @@ export async function reconcileIssues(
     fetchOrgIssues(env, yhondaParams),
   ]);
 
-  const all = [...main.items, ...yhonda.items];
-  for (const issue of all) {
-    await upsertIssue(kv, issue);
+  const fresh = [...main.items, ...yhonda.items];
+  const freshKeys = new Set(fresh.map((i) => issueKey(i.repo, i.number)));
+
+  // GitHub search が truncate された (incomplete_results) snapshot は不完全
+  // なので削除を skip する (= まだ open な issue を誤って evict しない)。upsert
+  // は常に安全。yhonda は repo: pin で件数が小さく truncate しないが、main は
+  // 将来 open が 100 超になり得るのでガードする。100 を恒常的に超えたら
+  // per_page pagination を入れる (現状 ippoan+ohishi-exp は ~70 件)。
+  const complete = !main.incomplete && !yhonda.incomplete;
+  let removed = 0;
+  if (complete) {
+    const existing = await listCachedOpenIssues(kv);
+    for (const e of existing) {
+      if (!freshKeys.has(issueKey(e.repo, e.number))) {
+        await kv.delete(issueKey(e.repo, e.number));
+        removed++;
+      }
+    }
+  }
+
+  for (const issue of fresh) {
+    await kv.put(issueKey(issue.repo, issue.number), JSON.stringify(issue));
   }
 
   const newWm = new Date(now - SAFETY_WINDOW_MS).toISOString();
   await kv.put(KEY_WATERMARK, newWm);
 
-  return { patched: all.length, fetched: true };
+  return { patched: fresh.length, fetched: true, removed };
 }
 
 // ───── Webhook payload → OrgIssue 正規化 ─────
