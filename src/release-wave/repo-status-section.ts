@@ -24,6 +24,7 @@ import {
 } from "./repo-release-status";
 import { computeGlobalCompatibility, type WaveCompatibility } from "./compat";
 import { parseTaglessRepos } from "../tagless-repos";
+import { renderStartWaveSection, injectStartWaveSection } from "./start";
 import {
   getTrafficForRepos,
   type TrafficRecord,
@@ -524,6 +525,10 @@ export async function handleReleaseWaveListPageWithRepoStatus(
   const section = renderRepoReleaseStatusSection(statuses);
   let html = await res.text();
   html = injectRepoStatusSection(html, section);
+
+  // Start wave フォーム (Refs #137 / #157 改善B)。tagless でない監視対象 repo を
+  // 候補に出し、画面から wave を start できるようにする。h1 直下に注入。
+  html = injectStartWaveSection(html, renderStartWaveSection(statuses));
 
   // Compatibility (all consumers) グラフ内 repo に Tag Release ボタンを足す。
   if (env.COMPAT_KV) {
