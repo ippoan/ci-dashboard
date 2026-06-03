@@ -356,6 +356,13 @@ export async function computeCompatibility(
 /** wave 内の 1 backend repo についての突合結果。 */
 export interface WaveBackendCompat {
   backend_repo: string;
+  /**
+   * 当該 backend を deploy した wave の id (`backend::<repo>.wave_id`)。
+   * 単独 deploy (wave 経由でない) なら null。global (wave 非依存) ビューの
+   * retest ボタンが既存 `/api/release-wave/<wave_id>/retest` を流用するために使う。
+   * Refs #157。
+   */
+  wave_id: string | null;
   /** `backend::<repo>` に記録された現 production image (record 無しなら null)。 */
   current_image: string | null;
   /** current_image に対応する git release tag (v2 record のみ、無ければ null)。Refs #197。 */
@@ -398,6 +405,7 @@ export async function computeWaveCompatibility(
     const compat = await computeCompatibility(kv, repo, rec.current_image);
     backends.push({
       backend_repo: repo,
+      wave_id: rec.wave_id ?? null,
       current_image: rec.current_image,
       current_tag: rec.current_tag ?? null,
       deploy_history: Array.isArray(rec.deploy_history) ? rec.deploy_history : [],

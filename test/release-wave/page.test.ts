@@ -1067,4 +1067,85 @@ describe("handleReleaseWaveListPage global compat overlay", () => {
     expect(idx).toBeGreaterThan(-1);
     expect(html.slice(Math.max(0, idx - 120), idx)).toContain("disabled");
   });
+
+  it("renders a per-untested-consumer Re-test button posting to the backend's wave retest endpoint", async () => {
+    const env = fakeEnv({
+      listReturn: [],
+      compatKv: memKv({
+        "backend::ippoan/rust-alc-api": {
+          schema_version: 1,
+          repo: "ippoan/rust-alc-api",
+          current_image: "cur-img",
+          deployed_at: "2026-05-27T00:00:00Z",
+          deployed_by: "x",
+          wave_id: "w-backend",
+        },
+        "frontend::ippoan/alc-app": {
+          schema_version: 1,
+          repo: "ippoan/alc-app",
+          prod_version: "v1.2.10",
+          prod_deployed_at: "2026-05-27T00:00:00Z",
+          tested_against: [
+            {
+              backend_repo: "ippoan/rust-alc-api",
+              backend_image: "stale-img",
+              tested_at: "2026-05-27T00:00:00Z",
+            },
+          ],
+        },
+      }),
+    });
+    const html = await (await handleReleaseWaveListPage(env)).text();
+    expect(html).toContain("Re-test untested consumers");
+    // backend record の wave_id を流用して既存 retest endpoint へ POST する
+    expect(html).toContain('action="/api/release-wave/w-backend/retest"');
+    expect(html).toContain('name="frontend" value="ippoan/alc-app"');
+    expect(html).toContain("Re-test ippoan/alc-app");
+  });
+
+  it("disables the Re-test button when the backend has no wave_id (single deploy)", async () => {
+    const env = fakeEnv({
+      listReturn: [],
+      compatKv: memKv({
+        "backend::ippoan/rust-alc-api": {
+          schema_version: 1,
+          repo: "ippoan/rust-alc-api",
+          current_image: "cur-img",
+          deployed_at: "2026-05-27T00:00:00Z",
+          deployed_by: "x",
+          wave_id: null,
+        },
+        "frontend::ippoan/alc-app": {
+          schema_version: 1,
+          repo: "ippoan/alc-app",
+          prod_version: "v1.2.10",
+          prod_deployed_at: "2026-05-27T00:00:00Z",
+          tested_against: [
+            {
+              backend_repo: "ippoan/rust-alc-api",
+              backend_image: "stale-img",
+              tested_at: "2026-05-27T00:00:00Z",
+            },
+          ],
+        },
+      }),
+    });
+    const html = await (await handleReleaseWaveListPage(env)).text();
+    expect(html).toContain("Re-test untested consumers");
+    // wave 未紐付けなので POST 先 form は出ず、disabled ボタンになる
+    expect(html).not.toContain("/retest");
+    const idx = html.indexOf("Re-test ippoan/alc-app");
+    expect(idx).toBeGreaterThan(-1);
+    expect(html.slice(Math.max(0, idx - 250), idx)).toContain("disabled");
+  });
+
+  it("does not render the Re-test grid when all consumers are tested", async () => {
+    const env = fakeEnv({
+      listReturn: [],
+      compatKv: memKv(compatSeed),
+    });
+    const html = await (await handleReleaseWaveListPage(env)).text();
+    expect(html).toContain("all consumers tested");
+    expect(html).not.toContain("Re-test untested consumers");
+  });
 });

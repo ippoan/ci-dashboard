@@ -472,6 +472,31 @@ describe("computeWaveCompatibility", () => {
     expect(res.checked).toBe(false);
     expect(res.verified).toBe(true);
   });
+
+  it("propagates the backend record's wave_id (and null for single deploys)", async () => {
+    const store = kv();
+    await recordBackendDeploy(store, {
+      repo: "ippoan/rust-alc-api",
+      current_image: "cur",
+      deployed_by: "x",
+      wave_id: "w-42",
+      now: daysAgo(1),
+    });
+    await recordBackendDeploy(store, {
+      repo: "ippoan/cc-relay",
+      current_image: "cur2",
+      deployed_by: "x",
+      now: daysAgo(1),
+    });
+    const res = await computeWaveCompatibility(store, [
+      "ippoan/rust-alc-api",
+      "ippoan/cc-relay",
+    ]);
+    const rust = res.backends.find((b) => b.backend_repo === "ippoan/rust-alc-api")!;
+    const relay = res.backends.find((b) => b.backend_repo === "ippoan/cc-relay")!;
+    expect(rust.wave_id).toBe("w-42");
+    expect(relay.wave_id).toBeNull();
+  });
 });
 
 describe("computeGlobalCompatibility", () => {
