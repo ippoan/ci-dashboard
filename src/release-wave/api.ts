@@ -12,7 +12,11 @@
 import type { Env } from "../index";
 import type { ReleaseWaveHub, RpcResult } from "./do";
 import type { WaveState } from "./types";
-import { computeWaveCompatibility, getBackendCurrent } from "./compat";
+import {
+  computeWaveCompatibility,
+  computeCompatibility,
+  getBackendCurrent,
+} from "./compat";
 import { decideRetestDispatches, dispatchAll, type Dispatch } from "./dispatch";
 import { getPendingRelease, clearPendingRelease } from "./pending-release";
 import { getTraffic } from "./traffic";
@@ -211,6 +215,117 @@ export async function handleReleaseWaveRetest(
     }
   }
   return redirectToDetail(wave_id);
+}
+
+// ----------------------------------------------------------------------------
+// POST /api/release-wave/retest-consumer  (Refs #157 / #137)
+// ----------------------------------------------------------------------------
+
+/**
+ * wave **非依存**で 1 consumer (frontend) の integration retest を起こす。
+ *
+ * global「Compatibility (all consumers)」グラフの retest ボタンは、backend が
+ * 単独 deploy (= `backend::<repo>.wave_id` が null) だと wave-bound な
+ * `/api/release-wave/<wave_id>/retest` を呼べず、これまで disabled だった。
+ * 本 endpoint はその制約を外し、wave が無くても retest できるようにする。
+ *
+ * `release-wave-retest` dispatch を frontend repo に送る点・client_payload の
+ * shape (`backend_repo` / `backend_image` / `prod_version`) は wave 版と同一で、
+ * 違いは `wave_id` を載せない (= null 相当) ことだけ。consumer 側の retest 受け
+ * (frontend-ci の `compat_backend_image` 経路 / `report-frontend-compat` action)
+ * は `wave_id` を一切参照しないため、無くても動く。
+ *
+ * form fields:
+ *   - `backend_repo` ("owner/name") 必須。`backend::<repo>` record を引く起点。
+ *   - `frontend`     ("owner/name") 必須。dispatch 先 consumer repo。
+ *   - `backend_image` 任意。未指定なら `backend::<repo>.current_image` を採用
+ *     (= グラフが指す「現 prod image」と一致させる)。指定時は値の検証として
+ *     現 image との一致を要求しない (= 過去 image での retest も許す)。
+ *
+ * 検証:
+ *   - backend record が無ければ 404。
+ *   - 指定 frontend が当該 backend の consumer (= その backend_repo を test した
+ *     履歴を持つ) でなければ 404 (= グラフに無い edge への誤射出を防ぐ)。
+ * dispatch は best-effort。完了後は一覧ページに 303 redirect する。
+ */
+export async function handleReleaseWaveRetestConsumer(
+  req: Request,
+  env: Env,
+): Promise<Response> {
+  if (req.method !== "POST") {
+    return jsonResponse(405, { code: "METHOD_NOT_ALLOWED", error: "use POST" });
+  }
+  if (!env.COMPAT_KV) {
+    return jsonResponse(500, {
+      code: "KV_NOT_CONFIGURED",
+      error: "COMPAT_KV is not bound",
+    });
+  }
+
+  let backendRepo = "";
+  let frontend = "";
+  let backendImage = "";
+  try {
+    const form = await req.formData();
+    backendRepo = String(form.get("backend_repo") ?? "").trim();
+    frontend = String(form.get("frontend") ?? "").trim();
+    backendImage = String(form.get("backend_image") ?? "").trim();
+  } catch {
+    // form-data 以外は下で 400
+  }
+  if (!backendRepo || !frontend) {
+    return jsonResponse(400, {
+      code: "BAD_REQUEST",
+      error: "form fields 'backend_repo' and 'frontend' are required",
+    });
+  }
+
+  const backend = await getBackendCurrent(env.COMPAT_KV, backendRepo);
+  if (!backend) {
+    return jsonResponse(404, {
+      code: "NOT_FOUND",
+      error: `no backend deploy record for ${backendRepo}`,
+    });
+  }
+  const image = backendImage || backend.current_image;
+
+  // frontend が当該 backend の consumer であることを確認しつつ、その
+  // prod_version を取り出す (= report 経路で frontend::<repo> を引く際の version)。
+  const compat = await computeCompatibility(
+    env.COMPAT_KV,
+    backendRepo,
+    backend.current_image,
+  );
+  const edge = compat.matrix.find((m) => m.frontend === frontend);
+  if (!edge) {
+    return jsonResponse(404, {
+      code: "FRONTEND_NOT_CONSUMER",
+      error: `${frontend} has no test history against ${backendRepo}`,
+    });
+  }
+
+  const dispatch: Dispatch = {
+    repo: frontend,
+    event_type: "release-wave-retest",
+    client_payload: {
+      // wave 非依存。consumer 側 retest 受けは wave_id を参照しないので省略する
+      // (= 既存 wave 版 dispatch との唯一の差分)。
+      backend_repo: backendRepo,
+      backend_image: image,
+      ...(edge.prod_version ? { prod_version: edge.prod_version } : {}),
+    },
+  };
+
+  const results = await dispatchAll(env, [dispatch]);
+  if (!(results.length > 0 && results[0]!.ok)) {
+    const err =
+      results.length > 0 && !results[0]!.ok ? results[0]!.error : "dispatch failed";
+    return jsonResponse(502, {
+      code: "DISPATCH_FAILED",
+      error: `failed to dispatch retest for ${frontend}: ${err}`,
+    });
+  }
+  return redirectToList();
 }
 
 // ----------------------------------------------------------------------------

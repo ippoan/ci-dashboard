@@ -1068,7 +1068,7 @@ describe("handleReleaseWaveListPage global compat overlay", () => {
     expect(html.slice(Math.max(0, idx - 120), idx)).toContain("disabled");
   });
 
-  it("renders a per-untested-consumer Re-test button posting to the backend's wave retest endpoint", async () => {
+  it("renders a per-untested-consumer Re-test button posting to the wave-independent retest-consumer endpoint", async () => {
     const env = fakeEnv({
       listReturn: [],
       compatKv: memKv({
@@ -1097,13 +1097,14 @@ describe("handleReleaseWaveListPage global compat overlay", () => {
     });
     const html = await (await handleReleaseWaveListPage(env)).text();
     expect(html).toContain("Re-test untested consumers");
-    // backend record の wave_id を流用して既存 retest endpoint へ POST する
-    expect(html).toContain('action="/api/release-wave/w-backend/retest"');
+    // global グラフは wave 非依存なので retest-consumer へ POST する
+    expect(html).toContain('action="/api/release-wave/retest-consumer"');
+    expect(html).toContain('name="backend_repo" value="ippoan/rust-alc-api"');
     expect(html).toContain('name="frontend" value="ippoan/alc-app"');
     expect(html).toContain("Re-test ippoan/alc-app");
   });
 
-  it("disables the Re-test button when the backend has no wave_id (single deploy)", async () => {
+  it("renders an enabled Re-test button even when the backend has no wave_id (single deploy)", async () => {
     const env = fakeEnv({
       listReturn: [],
       compatKv: memKv({
@@ -1132,11 +1133,12 @@ describe("handleReleaseWaveListPage global compat overlay", () => {
     });
     const html = await (await handleReleaseWaveListPage(env)).text();
     expect(html).toContain("Re-test untested consumers");
-    // wave 未紐付けなので POST 先 form は出ず、disabled ボタンになる
-    expect(html).not.toContain("/retest");
+    // wave 未紐付けでも wave 非依存 endpoint へ POST できる (disabled にしない)
+    expect(html).toContain('action="/api/release-wave/retest-consumer"');
+    expect(html).toContain('name="backend_repo" value="ippoan/rust-alc-api"');
     const idx = html.indexOf("Re-test ippoan/alc-app");
     expect(idx).toBeGreaterThan(-1);
-    expect(html.slice(Math.max(0, idx - 250), idx)).toContain("disabled");
+    expect(html.slice(Math.max(0, idx - 250), idx)).not.toContain("disabled");
   });
 
   it("does not render the Re-test grid when all consumers are tested", async () => {
