@@ -30,6 +30,7 @@ import {
   type TrafficRecord,
   type TrafficVersion,
 } from "./traffic";
+import { listPendingReleases } from "./pending-release";
 
 function escapeHtml(s: string): string {
   return s
@@ -528,7 +529,21 @@ export async function handleReleaseWaveListPageWithRepoStatus(
 
   // Start wave フォーム (Refs #137 / #157 改善B)。tagless でない監視対象 repo を
   // 候補に出し、画面から wave を start できるようにする。h1 直下に注入。
-  html = injectStartWaveSection(html, renderStartWaveSection(statuses));
+  // target_tag prefill は実在の pending release tag を優先する (Refs #237)。
+  const pendingTagByRepo = new Map<string, string>();
+  if (env.COMPAT_KV) {
+    try {
+      for (const p of await listPendingReleases(env.COMPAT_KV)) {
+        pendingTagByRepo.set(p.repo, p.tag);
+      }
+    } catch {
+      // pending release 取得失敗時は latest tag fallback で degrade。
+    }
+  }
+  html = injectStartWaveSection(
+    html,
+    renderStartWaveSection(statuses, new Date(), pendingTagByRepo),
+  );
 
   // Compatibility (all consumers) グラフ内 repo に Tag Release ボタンを足す。
   if (env.COMPAT_KV) {

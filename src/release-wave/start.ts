@@ -31,7 +31,7 @@ import {
   getRepoReleaseStatuses,
   type RepoReleaseStatus,
 } from "./repo-release-status";
-import { nextPatchTag } from "../release-helpers";
+import { parseStableSemver } from "../release-helpers";
 
 function escapeHtml(s: string): string {
   return s
@@ -86,24 +86,32 @@ export function defaultWaveId(now: Date = new Date()): string {
 export function renderStartWaveSection(
   statuses: RepoReleaseStatus[],
   now: Date = new Date(),
+  pendingTagByRepo: Map<string, string> = new Map(),
 ): string {
   const candidates = statuses.filter((s) => !s.tagless && s.behind >= 0);
   if (candidates.length === 0) return "";
 
   const rows = candidates
     .map((s) => {
-      // target_tag の prefill: 現 stable latest tag を patch +1 した値を value に
-      // 入れておく (= 手入力不要 + 異常 tag 防止)。s.latestTag は sortSemverDesc
-      // 由来で prerelease (`-wave-test-NN` / `-dev` / `-rc` 等) を含み得るが、
-      // nextPatchTag が stable semver 以外を null にするので prerelease は自動で
-      // 除外され value 空になる。value が無い (未tag / prerelease のみ) repo は
-      // 従来どおり placeholder のみ (operator が手で打つ)。
-      const prefill = s.latestTag ? (nextPatchTag(s.latestTag) ?? "") : "";
+      // target_tag の prefill (Refs #237):
+      // wave は「事前に tag push → no-traffic upload された pending release」を
+      // flip するだけなので、prefill は **実在 tag** を出す。latest+1 のような
+      // 未来の合成 tag は出さない (旧 stage-driven モデルの名残で、実態とずれる)。
+      //   1) その repo に pending release (no-traffic version) があればその tag。
+      //   2) 無ければ現 stable latest tag (そのまま、bump しない)。
+      //   3) latest が prerelease (`-wave-test-NN` / `-dev` / `-rc` 等) のみなら
+      //      value 空 (placeholder のみ、operator が手で打つ)。
+      const pendingTag = pendingTagByRepo.get(s.repo);
+      const stableLatest =
+        s.latestTag && parseStableSemver(s.latestTag) ? s.latestTag : "";
+      const prefill = pendingTag ?? stableLatest;
       const placeholder = s.latestTag ?? "v0.1.0";
       const id = `repo_${s.repo.replace(/[^a-zA-Z0-9]/g, "_")}`;
-      const tagHint = s.hasTag
-        ? `<span class="meta">latest: ${escapeHtml(s.latestTag ?? "")}</span>`
-        : `<span class="meta">未tag</span>`;
+      const tagHint = pendingTag
+        ? `<span class="meta">pending: ${escapeHtml(pendingTag)} (no-traffic)</span>`
+        : s.hasTag
+          ? `<span class="meta">latest: ${escapeHtml(s.latestTag ?? "")}</span>`
+          : `<span class="meta">未tag</span>`;
       return `
         <tr>
           <td>
