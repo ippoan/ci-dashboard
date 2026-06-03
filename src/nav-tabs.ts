@@ -15,7 +15,7 @@ export type TabKey =
   | "secret-gen";
 
 interface TabDef {
-  key: TabKey | "branch-protection" | "gcp-secrets" | "security-inventory";
+  key: TabKey | "branch-protection" | "gcp-secrets" | "security-inventory" | "repo-maps";
   href: string;
   label: string;
   // External tabs live on a different origin, so they open in a new tab and
@@ -54,6 +54,14 @@ const TABS: ReadonlyArray<TabDef> = [
     key: "security-inventory",
     href: "https://security-inventory.ippoan.org/",
     label: "🔍 Security Inventory",
+    external: true,
+  },
+  // ippoan/claude-skills の <repo>-map スキルを MkDocs で整形した閲覧サイト
+  // (GitHub Pages、認証不要)。各 repo のどこに何があるかの構造ナビゲーション。
+  {
+    key: "repo-maps",
+    href: "https://ippoan.github.io/claude-skills/",
+    label: "🗺️ Repo Maps",
     external: true,
   },
 ];
