@@ -22,6 +22,7 @@ import {
   getPendingRelease,
   clearPendingRelease,
   listPendingReleases,
+  recordPendingRelease,
   recordFlipGroup,
   getFlipGroup,
   clearFlipGroup,
@@ -631,6 +632,14 @@ export async function handleReleaseWaveFlipGroupRollback(
         error: `failed to dispatch rollback for ${repoFilter}: ${err}`,
       });
     }
+    // rollback で flip 対象 version は再び no-traffic に戻るので、Pending releases
+    // に再登録して再 flip できるようにする (Refs ippoan/ci-dashboard#237)。
+    await recordPendingRelease(env.COMPAT_KV, {
+      repo: item.repo,
+      version_id: item.flipped_version_id,
+      tag: item.flipped_tag,
+      now: new Date().toISOString(),
+    });
     // rollback した repo を group から除く。残りが無ければ group ごと消す。
     const remaining = group.items.filter((it) => it.repo !== repoFilter);
     if (remaining.length === 0) {
@@ -666,6 +675,20 @@ export async function handleReleaseWaveFlipGroupRollback(
     return jsonResponse(502, {
       code: "DISPATCH_FAILED",
       error: `failed to dispatch rollback for flip group (${rollbackable.length} repo(s)): ${err}`,
+    });
+  }
+
+  // dispatch 成功した repo は flip 対象 version が no-traffic に戻るので、
+  // Pending releases に再登録して再 flip できるようにする (Refs ippoan/ci-dashboard#237)。
+  const now = new Date().toISOString();
+  for (let i = 0; i < rollbackable.length; i++) {
+    if (!results[i]?.ok) continue;
+    const it = rollbackable[i]!;
+    await recordPendingRelease(env.COMPAT_KV, {
+      repo: it.repo,
+      version_id: it.flipped_version_id,
+      tag: it.flipped_tag,
+      now,
     });
   }
 

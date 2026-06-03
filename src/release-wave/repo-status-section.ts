@@ -323,8 +323,9 @@ export function renderTrafficVersionsBlock(
           ),
         )
         .join("");
-      // 直前以前の active version への rollback ボタン行を続ける。
-      return versionRows + renderTrafficRollbackRow(repo, rec);
+      // 直前以前の active version への rollback ボタン + 表示中 no-traffic
+      // (zeroShown) の Flip ボタン行を続ける。
+      return versionRows + renderTrafficRollbackRow(repo, rec, zeroShown);
     })
     .join("");
 
@@ -351,7 +352,11 @@ export function renderTrafficVersionsBlock(
  * 現 active は traffic の最大 percentage version。deploy_history[0] が現 active と
  * 一致する想定だが、念のため active version_id を除いて候補を作る。
  */
-function renderTrafficRollbackRow(repo: string, rec: TrafficRecord): string {
+function renderTrafficRollbackRow(
+  repo: string,
+  rec: TrafficRecord,
+  promotable: TrafficVersion[],
+): string {
   const versions = rec.versions ?? [];
   const history = rec.deploy_history ?? [];
   const activeId = versions.find((v) => v.percentage > 0)?.version_id ?? null;
@@ -359,27 +364,14 @@ function renderTrafficRollbackRow(repo: string, rec: TrafficRecord): string {
   // 候補: 過去に active だった (deploy_history) が現 active でないもの。
   const candidates = history.filter((e) => e.version_id !== activeId);
 
-  // 候補外: 現存する 0% (no-traffic) で、まだ一度も active になっていない
-  // (= deploy_history に過去 active として載っていない) version。新しい順。
-  const historyIds = new Set(history.map((e) => e.version_id));
-  const nonActive = versions
-    .filter(
-      (v) =>
-        v.percentage <= 0 &&
-        v.version_id !== activeId &&
-        !historyIds.has(v.version_id),
-    )
-    .sort((a, b) => {
-      const ca = a.created_on ?? "";
-      const cb = b.created_on ?? "";
-      if (ca === cb) return 0;
-      if (!ca) return 1;
-      if (!cb) return -1;
-      return ca < cb ? 1 : -1; // 新しい順
-    });
+  // promotable = renderTrafficVersionsBlock が「行として表示する no-traffic
+  // version」(= active より新しい最新 0% = zeroShown)。flip ボタンの対象を
+  // これに揃えることで、行表示と flip ボタンの対象がずれない (古い / 隠した
+  // 0% を勝手にボタン化しない)。active 自身は念のため除く。Refs ippoan/ci-dashboard#237。
+  const noTraffic = promotable.filter((v) => v.version_id !== activeId);
 
-  // 候補も候補外も無ければ従来どおり行を出さない。
-  if (candidates.length === 0 && nonActive.length === 0) return "";
+  // 候補も no-traffic も無ければ従来どおり行を出さない。
+  if (candidates.length === 0 && noTraffic.length === 0) return "";
 
   const buttons = candidates
     .map((e) => {
@@ -403,17 +395,32 @@ function renderTrafficRollbackRow(repo: string, rec: TrafficRecord): string {
       ? `<div class="meta" style="margin-top:4px">過去に active だった version がまだないため、戻せる先がありません。</div>`
       : "";
 
-  // 候補外 (0% / 一度も active になっていない) version を理由付きで併記する。
-  // 最新 1 件を代表表示し、残りは「他N件」で件数だけ示す。
-  let nonActiveNote = "";
-  if (nonActive.length > 0) {
-    const head = nonActive[0]!;
-    const label = head.tag
-      ? escapeHtml(head.tag)
-      : escapeHtml(shortId(head.version_id));
-    const more = nonActive.length > 1 ? ` 他${nonActive.length - 1}件` : "";
-    nonActiveNote = `<div class="meta" style="margin-top:4px">候補外 (rollback 先になりません): ${label} (0% · 一度も active になっていない)${more}</div>`;
-  }
+  // 表示中の no-traffic (0%) version に「Flip to 100%」を出す (Refs ippoan/ci-dashboard#237)。
+  // flip → rollback で no-traffic に戻った version が Pending releases にも rollback
+  // 候補にも出ず再 flip できなくなる事故の救済経路。traffic-rollback endpoint は
+  // versions[] にある version をそのまま `wrangler versions deploy <id>@100%` する。
+  const flipButtons = noTraffic
+    .map((v) => {
+      const label = v.tag ? escapeHtml(v.tag) : escapeHtml(shortId(v.version_id));
+      const when = escapeHtml(shortWhen(v.created_on));
+      return `
+            <form method="post" action="/api/release-wave/traffic-rollback" style="margin:0 6px 4px 0;display:inline-block">
+              <input type="hidden" name="repo" value="${escapeHtml(repo)}">
+              <input type="hidden" name="version_id" value="${escapeHtml(v.version_id)}">
+              <button type="submit"
+                title="${escapeHtml(repo)} の no-traffic version ${escapeHtml(v.version_id)} を即 100% に flip (wrangler versions deploy ${escapeHtml(v.version_id)}@100%)">
+                Flip to ${label} <span class="meta">(0% · ${when})</span>
+              </button>
+            </form>`;
+    })
+    .join("");
+  const nonActiveBlock =
+    noTraffic.length > 0
+      ? `<div style="margin-top:6px">
+                <span class="meta">no-traffic version を 100% に flip:</span>
+                <div style="margin-top:4px">${flipButtons}</div>
+              </div>`
+      : "";
 
   return `
             <tr>
@@ -422,7 +429,7 @@ function renderTrafficRollbackRow(repo: string, rec: TrafficRecord): string {
                 <span class="meta">Rollback to (過去の deployed version):</span>
                 ${noCandidateNote}
                 ${buttons ? `<div style="margin-top:4px">${buttons}</div>` : ""}
-                ${nonActiveNote}
+                ${nonActiveBlock}
               </td>
             </tr>`;
 }

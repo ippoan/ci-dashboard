@@ -400,10 +400,11 @@ describe("renderTrafficVersionsBlock", () => {
     expect(html).not.toContain("/api/release-wave/traffic-rollback");
   });
 
-  it("shows a reason (not a hidden row) when only no-traffic 0% versions exist (Refs #196)", () => {
+  it("offers a Flip-to-100% button for no-traffic 0% versions (Refs #196 / #237)", () => {
     // 現 active 1 つ + 0% no-traffic のみ。deploy_history は現 active だけなので
-    // rollback 候補は 0 件。従来は行ごと消えて理由が分からなかったが、候補外
-    // version を「rollback 先になりません」と理由付きで併記する。
+    // rollback (過去 active への戻し) 候補は 0 件。だが 0% no-traffic version は
+    // 「Flip to 100%」で再 flip できるようにする (#237: flip→rollback で戻った
+    // no-traffic version の救済)。
     const r: TrafficRecord = {
       schema_version: 4,
       repo: "ippoan/auth-worker",
@@ -422,14 +423,13 @@ describe("renderTrafficVersionsBlock", () => {
     );
     // 行は黙って消えない。
     expect(html).toContain("Rollback to (過去の deployed version):");
-    // 候補ゼロの理由が出る。
+    // 過去 active への rollback 候補ゼロの理由は出る。
     expect(html).toContain("戻せる先がありません");
-    // 候補外 version が理由付きで出る。
-    expect(html).toContain("候補外 (rollback 先になりません)");
+    // 0% no-traffic version は「Flip to 100%」ボタンで再 flip できる。
+    expect(html).toContain("no-traffic version を 100% に flip:");
     expect(html).toContain("v0.2.49");
-    expect(html).toContain("一度も active になっていない");
-    // 実 rollback ボタン (dispatch) は出さない。
-    expect(html).not.toContain('action="/api/release-wave/traffic-rollback"');
+    expect(html).toContain('action="/api/release-wave/traffic-rollback"');
+    expect(html).toContain('value="pending-id"');
   });
 });
 

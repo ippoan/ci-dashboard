@@ -1045,6 +1045,10 @@ describe("handleReleaseWaveFlipGroupRollback", () => {
     });
     // rollback dispatch 後に flip-group は消える
     expect(await getFlipGroup(kv)).toBeNull();
+    // flip 対象 version は Pending releases に復活する
+    const restored = await getPendingRelease(kv, "ippoan/auth-worker");
+    expect(restored?.version_id).toBe(PENDING_VID);
+    expect(restored?.tag).toBe("v0.2.38");
   });
 });
 
@@ -1111,6 +1115,12 @@ describe("handleReleaseWaveFlipGroupRollback (single repo)", () => {
     const g = await getFlipGroup(kv);
     expect(g).not.toBeNull();
     expect(g!.items.map((i) => i.repo)).toEqual(["ippoan/nuxt-trouble"]);
+    // rollback した repo の flip 対象 version は Pending releases に復活する
+    const restored = await getPendingRelease(kv, "ippoan/auth-worker");
+    expect(restored?.version_id).toBe(PENDING_VID);
+    expect(restored?.tag).toBe("v0.2.38");
+    // rollback していない repo は Pending releases に出ない
+    expect(await getPendingRelease(kv, "ippoan/nuxt-trouble")).toBeNull();
   });
 
   it("clears the group when the last remaining repo is rolled back", async () => {
