@@ -3,16 +3,20 @@
  *
  * 設計の親 issue: ippoan/ci-dashboard#137
  *
- * Wave の lifecycle:
+ * Wave の lifecycle (stage phase は撤去済み, Refs ippoan/ci-workflows#96①):
  *
- *   start → staging → (pending-approval) → flipping → flipped
- *                                                       │
+ *   start → pending-approval → (approve) → flipping → flipped
+ *   start → flipping (auto policy)                     │
  *                                                       ├─ contract_applied (flag だけ flip)
  *                                                       │
  *                                                       └─ rollback → rolled-back
  *
- *   abort: staging / pending-approval から → aborted
- *   fail:  staging / flipping から → failed
+ *   abort: pending-approval (and legacy staging) から → aborted
+ *   fail:  pending-approval / flipping から → failed
+ *
+ *   注: "staging" state / `stage_report` event は #96① で撤去した。
+ *   WaveStateName union には disk 上の legacy record 互換のため "staging" を
+ *   残すが、もう producer は SET しない。
  *
  * 本ファイルは type のみで実行コードは持たない。state machine の遷移ロジックは
  * `state.ts` の純粋関数 `transition()` 経由で行う。
@@ -151,16 +155,6 @@ export interface WaveState {
  */
 export type WaveEvent =
   | { kind: "start"; now: string }
-  | {
-      kind: "stage_report";
-      now: string;
-      repo: string;
-      ok: boolean;
-      preview_url?: string | null;
-      flip_from_revision?: string | null;
-      previewed_version_id?: string | null;
-      error?: string | null;
-    }
   | { kind: "approve"; now: string; approved_by: string }
   | {
       kind: "flip_report";

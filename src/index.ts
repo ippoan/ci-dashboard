@@ -22,7 +22,6 @@ import { handleReleaseWaveListPageWithRepoStatus } from "./release-wave/repo-sta
 import { handleMcpRequest } from "./mcp/server";
 import {
   handleContractAppliedWebhook,
-  handleStageReportWebhook,
   handleFlipReportWebhook,
   handleFrontendTestReportWebhook,
   handleBackendDeployReportWebhook,
@@ -49,7 +48,6 @@ import {
   handleReleaseWaveTrafficRollback,
   handleReleaseWaveBackendRollback,
 } from "./release-wave/api";
-import { handleReleaseWaveStart } from "./release-wave/start";
 import {
   handlePwaManifest,
   handlePwaServiceWorker,
@@ -233,9 +231,6 @@ app.all("/mcp", (c) => handleMcpRequest(c.req.raw, c.env));
 app.post("/webhooks/release-wave/contract-applied", (c) =>
   handleContractAppliedWebhook(c.req.raw, c.env),
 );
-app.post("/webhooks/release-wave/stage-report", (c) =>
-  handleStageReportWebhook(c.req.raw, c.env),
-);
 app.post("/webhooks/release-wave/flip-report", (c) =>
   handleFlipReportWebhook(c.req.raw, c.env),
 );
@@ -276,15 +271,6 @@ app.get("/backend-current-image", (c) =>
 app.get("/release-wave", (c) => handleReleaseWaveListPageWithRepoStatus(c.env));
 app.get("/release-wave/:wave_id", (c) =>
   handleReleaseWaveDetailPage(c.env, c.req.param("wave_id")),
-);
-// Start wave (Refs #137 / #157 改善B)。/release-wave の Start wave フォームが
-// 叩く。form field `wave_id` / `flip_policy` / `note` / `include` (複数) /
-// `target_tag__<repo>` / `require_compatibility` (複数)。各 repo の head_sha は
-// default branch HEAD を server 側で取得して createWave を起こす。
-// 静的セグメント `start` は下の `:wave_id/<action>` (2 セグメント) と
-// セグメント数が違うため衝突しない。
-app.post("/api/release-wave/start", (c) =>
-  handleReleaseWaveStart(c.req.raw, c.env),
 );
 // Action buttons (state 遷移を起こす side-effectful POST)。完了後は
 // 303 で詳細ページに redirect する。

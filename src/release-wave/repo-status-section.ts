@@ -496,8 +496,8 @@ export async function handleReleaseWaveListPageWithRepoStatus(
   // stage 駆動の Start wave は (1) callback 待ちで staging 滞留 → WAVE_IN_PROGRESS、
   // (2) cloudrun は新規 tag push 前提で、実在 tag を渡すと git tag が即失敗、と
   // 新モデルと構造的に非互換だったため UI から外す。
-  // backend route (/api/release-wave/start) と handler stage job の撤去は
-  // ippoan/ci-workflows#96 で段階的に行う。
+  // backend route (/api/release-wave/start) + handler / start.ts の撤去 (=
+  // ci-dashboard 側) は ippoan/ci-workflows#96① で完了済み。
 
   // Compatibility (all consumers) グラフ内 repo に Tag Release ボタンを足す。
   if (env.COMPAT_KV) {

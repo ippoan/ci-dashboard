@@ -77,7 +77,10 @@ export function createWave(input: {
 
   return {
     wave_id: input.wave_id,
-    state: "staging",
+    // stage phase は撤去済み (Refs ippoan/ci-workflows#96①)。wave は最初から
+    // flippable な state で始まる: auto policy は直接 flipping、manual-approval は
+    // approve 待ちの pending-approval。
+    state: input.flip_policy === "auto" ? "flipping" : "pending-approval",
     flip_policy: input.flip_policy,
     note: input.note,
     repos,
@@ -120,9 +123,6 @@ export function transition(state: WaveState, event: WaveEvent): TransitionResult
       // createWave 経由で作るべき; 既存 state に対する start は重複扱い
       return fail("ALREADY_STARTED", "wave already started, use createWave() instead");
 
-    case "stage_report":
-      return applyStageReport(state, event);
-
     case "approve":
       return applyApprove(state, event);
 
@@ -146,74 +146,6 @@ export function transition(state: WaveState, event: WaveEvent): TransitionResult
 // ----------------------------------------------------------------------------
 // Per-event handlers
 // ----------------------------------------------------------------------------
-
-function applyStageReport(
-  state: WaveState,
-  event: Extract<WaveEvent, { kind: "stage_report" }>,
-): TransitionResult {
-  if (state.state !== "staging") {
-    return fail(
-      "INVALID_TRANSITION",
-      `stage_report only valid in 'staging', current=${state.state}`,
-    );
-  }
-
-  const repoIdx = state.repos.findIndex((r) => r.repo === event.repo);
-  if (repoIdx === -1) {
-    return fail("REPO_NOT_IN_WAVE", `repo ${event.repo} is not in this wave`);
-  }
-  const repoBefore = state.repos[repoIdx]!;
-
-  // permanent な failed をひっくり返さない: failed → done 等は受け付けない
-  if (repoBefore.stage_status === "failed") {
-    return fail(
-      "INVALID_TRANSITION",
-      `repo ${event.repo} stage already failed (permanent)`,
-    );
-  }
-
-  const next = cloneWaveForUpdate(state);
-  const repoNext = next.repos[repoIdx]!;
-  if (event.ok) {
-    repoNext.stage_status = "done";
-    repoNext.preview_url = event.preview_url ?? null;
-    repoNext.flip_from_revision = event.flip_from_revision ?? null;
-    repoNext.previewed_version_id = event.previewed_version_id ?? null;
-    repoNext.stage_error = null;
-  } else {
-    repoNext.stage_status = "failed";
-    repoNext.stage_error = event.error ?? "stage failed (no detail)";
-  }
-
-  // 全 stage 完了? - failed が 1 つでもあれば failed transition
-  const anyFailed = next.repos.some((r) => r.stage_status === "failed");
-  const allDone = next.repos.every((r) => r.stage_status === "done");
-
-  let summary = `stage ${event.ok ? "ok" : "failed"}: ${event.repo}`;
-
-  if (anyFailed) {
-    next.state = "failed";
-    next.failed_at = event.now;
-    summary = `stage failed (${event.repo}); wave -> failed`;
-  } else if (allDone) {
-    next.staged_at = event.now;
-    if (state.flip_policy === "auto") {
-      next.state = "flipping";
-      summary = `all repos staged; auto policy -> flipping`;
-    } else {
-      next.state = "pending-approval";
-      summary = `all repos staged; awaiting approval`;
-    }
-  }
-
-  next.events = appendEvent(state.events, {
-    at: event.now,
-    kind: "stage_report",
-    summary,
-    detail: { repo: event.repo, ok: event.ok },
-  });
-  return { ok: true, state: next };
-}
 
 function applyApprove(
   state: WaveState,
@@ -337,7 +269,8 @@ function applyAbort(
   state: WaveState,
   event: Extract<WaveEvent, { kind: "abort" }>,
 ): TransitionResult {
-  // abort は flip 前 (staging / pending-approval) のみ。flipping/flipped 後は rollback を使う。
+  // abort は flip 前 (pending-approval、および legacy staging record 互換) のみ。
+  // flipping/flipped 後は rollback を使う。
   if (state.state !== "staging" && state.state !== "pending-approval") {
     return fail(
       "INVALID_TRANSITION",

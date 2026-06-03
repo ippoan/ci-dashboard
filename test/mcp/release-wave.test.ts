@@ -59,8 +59,6 @@ function fakeHub(): {
   spies: Record<string, ReturnType<typeof vi.fn>>;
 } {
   const spies = {
-    start: vi.fn(),
-    stageReport: vi.fn(),
     approve: vi.fn(),
     flipReport: vi.fn(),
     rollback: vi.fn(),
@@ -124,7 +122,7 @@ const STUB_ERR = {
 // ----------------------------------------------------------------------------
 
 describe("registerReleaseWaveTools registration", () => {
-  it("registers exactly 8 tools with expected names", () => {
+  it("registers exactly 6 tools with expected names", () => {
     const { tools } = setup();
     expect(Array.from(tools.keys()).sort()).toEqual(
       [
@@ -133,8 +131,6 @@ describe("registerReleaseWaveTools registration", () => {
         "release_wave_contract_applied",
         "release_wave_flip",
         "release_wave_rollback",
-        "release_wave_stage",
-        "release_wave_start",
         "release_wave_status",
       ].sort(),
     );
@@ -154,93 +150,6 @@ describe("registerReleaseWaveTools registration", () => {
 // ----------------------------------------------------------------------------
 // Wiring per tool
 // ----------------------------------------------------------------------------
-
-describe("release_wave_start", () => {
-  it("calls hub.start with raw inputs and formats success", async () => {
-    const { tools, spies } = setup();
-    spies.start.mockResolvedValue(STUB_OK);
-    const r = await tools.get("release_wave_start")!.handler({
-      wave_id: "w1",
-      flip_policy: "auto",
-      note: "ship it",
-      repos: [{ repo: "ippoan/a", target_tag: "v1.0.0", head_sha: "abc" }],
-    });
-    expect(spies.start).toHaveBeenCalledWith({
-      wave_id: "w1",
-      flip_policy: "auto",
-      note: "ship it",
-      repos: [{ repo: "ippoan/a", target_tag: "v1.0.0", head_sha: "abc" }],
-    });
-    expect(r.isError).toBeUndefined();
-    expect(r.content[0]!.text).toContain('"wave_id"');
-  });
-
-  it("formats RpcError as isError + JSON code/error", async () => {
-    const { tools, spies } = setup();
-    spies.start.mockResolvedValue({
-      ok: false,
-      code: "WAVE_IN_PROGRESS",
-      error: "another wave running",
-    });
-    const r = await tools.get("release_wave_start")!.handler({
-      wave_id: "w2",
-      flip_policy: "auto",
-      repos: [{ repo: "ippoan/a", target_tag: "v1", head_sha: "x" }],
-    });
-    expect(r.isError).toBe(true);
-    const parsed = JSON.parse(r.content[0]!.text);
-    expect(parsed.code).toBe("WAVE_IN_PROGRESS");
-    expect(parsed.error).toContain("running");
-  });
-
-  it("defaults note to '' when omitted", async () => {
-    const { tools, spies } = setup();
-    spies.start.mockResolvedValue(STUB_OK);
-    await tools.get("release_wave_start")!.handler({
-      wave_id: "w1",
-      flip_policy: "auto",
-      repos: [{ repo: "ippoan/a", target_tag: "v1", head_sha: "x" }],
-    });
-    expect(spies.start).toHaveBeenCalledWith(
-      expect.objectContaining({ note: "" }),
-    );
-  });
-});
-
-describe("release_wave_stage", () => {
-  it("passes optional fields through, nullifying when missing", async () => {
-    const { tools, spies } = setup();
-    spies.stageReport.mockResolvedValue(STUB_OK);
-    await tools.get("release_wave_stage")!.handler({
-      wave_id: "w1",
-      repo: "ippoan/a",
-      ok: true,
-    });
-    expect(spies.stageReport).toHaveBeenCalledWith({
-      wave_id: "w1",
-      repo: "ippoan/a",
-      ok: true,
-      preview_url: null,
-      flip_from_revision: null,
-      previewed_version_id: null,
-      error: null,
-    });
-  });
-
-  it("passes explicit optional values", async () => {
-    const { tools, spies } = setup();
-    spies.stageReport.mockResolvedValue(STUB_OK);
-    await tools.get("release_wave_stage")!.handler({
-      wave_id: "w1",
-      repo: "ippoan/a",
-      ok: false,
-      error: "build failed",
-    });
-    expect(spies.stageReport).toHaveBeenCalledWith(
-      expect.objectContaining({ ok: false, error: "build failed" }),
-    );
-  });
-});
 
 describe("release_wave_status", () => {
   it("calls hub.get with wave_id", async () => {

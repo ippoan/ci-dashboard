@@ -1,7 +1,12 @@
 /**
- * Release Wave 機構の MCP tools (8 個)。
+ * Release Wave 機構の MCP tools (6 個)。
  *
  * 設計の親 issue: ippoan/ci-dashboard#137
+ *
+ * 注: stage phase 撤去 (Refs ippoan/ci-workflows#96①) に伴い
+ * `release_wave_start` / `release_wave_stage` tool は削除した。wave は Pending
+ * releases / flip-all 経路で driven され、本 tool 群は status/approve/flip/
+ * rollback/abort/contract_applied の 6 個。
  *
  * 各 tool は ReleaseWaveHub DO の RPC を 1:1 で呼び出す薄い wrapper。
  * 認証は MCP server 側 (auth-worker introspect) で済んでいる前提。
@@ -62,104 +67,6 @@ function formatRpcResult(
 // ----------------------------------------------------------------------------
 
 export function registerReleaseWaveTools(server: McpServer, env: Env): void {
-  // ============================================================
-  // release_wave_start
-  // ============================================================
-  server.registerTool(
-    "release_wave_start",
-    {
-      description:
-        "Start a new release wave coordinating multiple repos. Stages each repo, optionally gates on admin approval, then flips traffic atomically. Refs ippoan/ci-dashboard#137.",
-      inputSchema: {
-        wave_id: z
-          .string()
-          .min(1)
-          .describe("Unique wave identifier (e.g. 'wave_2026_05_27_01')"),
-        flip_policy: z
-          .enum(["manual-approval", "auto"])
-          .describe(
-            "manual-approval: wait for admin approval after stage; auto: flip as soon as all stage complete",
-          ),
-        note: z.string().optional().describe("Free-form note (e.g. release theme)"),
-        repos: z
-          .array(
-            z.object({
-              repo: z.string().describe("owner/name (e.g. 'ippoan/rust-alc-api')"),
-              target_tag: z
-                .string()
-                .describe("Tag to be cut for this wave (e.g. 'v1.42.0')"),
-              head_sha: z.string().describe("HEAD SHA at wave start"),
-              require_compatibility: z
-                .boolean()
-                .optional()
-                .describe(
-                  "When true (backend repos), approve is rejected while any consuming frontend is untested against this backend's current image. Default false. Refs #157 Phase C.",
-                ),
-            }),
-          )
-          .min(1)
-          .describe("Repos participating in this wave"),
-      },
-      annotations: { readOnlyHint: false },
-    },
-    async ({ wave_id, flip_policy, note, repos }) => {
-      const result = await hubStub(env).start({
-        wave_id,
-        flip_policy,
-        note: note ?? "",
-        repos,
-      });
-      return formatRpcResult(result);
-    },
-  );
-
-  // ============================================================
-  // release_wave_stage
-  // ============================================================
-  server.registerTool(
-    "release_wave_stage",
-    {
-      description:
-        "Callback from a repo's release-wave handler reporting stage completion. ok=true means staged successfully (with preview_url & flip_from_revision); ok=false fails the whole wave. Refs ippoan/ci-dashboard#137.",
-      inputSchema: {
-        wave_id: z.string().min(1),
-        repo: z.string().describe("owner/name reporting the stage result"),
-        ok: z.boolean(),
-        preview_url: z
-          .string()
-          .url()
-          .optional()
-          .describe("Admin-only preview URL (CF Access gated). Set when ok=true."),
-        flip_from_revision: z
-          .string()
-          .optional()
-          .describe(
-            "Pre-flip latest revision (= rollback target). Set when ok=true.",
-          ),
-        previewed_version_id: z
-          .string()
-          .optional()
-          .describe(
-            "CF Workers no-traffic version id that was previewed (= flip target). Set when ok=true.",
-          ),
-        error: z.string().optional().describe("Error detail when ok=false."),
-      },
-      annotations: { readOnlyHint: false },
-    },
-    async ({ wave_id, repo, ok, preview_url, flip_from_revision, previewed_version_id, error }) => {
-      const result = await hubStub(env).stageReport({
-        wave_id,
-        repo,
-        ok,
-        preview_url: preview_url ?? null,
-        flip_from_revision: flip_from_revision ?? null,
-        previewed_version_id: previewed_version_id ?? null,
-        error: error ?? null,
-      });
-      return formatRpcResult(result);
-    },
-  );
-
   // ============================================================
   // release_wave_status
   // ============================================================
@@ -245,8 +152,8 @@ export function registerReleaseWaveTools(server: McpServer, env: Env): void {
   //
   // 一方で「各 repo handler が flip 完了を ci-dashboard に通知する経路」が
   // tool として欠けていると wave が flipped 状態に進めないので、ここでは
-  // **per-repo flip callback** として実装する (`release_wave_stage` の flip
-  // 版)。operator override は将来別 tool として追加検討。
+  // **per-repo flip callback** として実装する。operator override は将来別 tool
+  // として追加検討。
   server.registerTool(
     "release_wave_flip",
     {

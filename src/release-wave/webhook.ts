@@ -7,9 +7,7 @@
  *   Secrets Store binding `RELEASE_WAVE_WEBHOOK_SECRET` から expected 値取得、
  *   body は JSON、エラーは JSON `{ code, error }` で返す。
  *
- * 提供する 3 endpoint:
- *   POST /webhooks/release-wave/stage-report       — release-wave-handler が
- *      stage deploy 完了後に呼ぶ (= release_wave_stage MCP tool 等価)
+ * 主な endpoint (stage-report は stage phase 撤去で削除済み, Refs ippoan/ci-workflows#96①):
  *   POST /webhooks/release-wave/flip-report        — flip 完了後に呼ぶ
  *      (= release_wave_flip MCP tool 等価)
  *   POST /webhooks/release-wave/contract-applied   — migration deploy 後に呼ぶ
@@ -156,50 +154,6 @@ export async function handleContractAppliedWebhook(
     wave_id: v.data.wave_id,
     repo: v.data.repo,
     migration_id: v.data.migration_id,
-  })) as RpcResult<WaveState>;
-  return rpcResultToResponse(result);
-}
-
-// ----------------------------------------------------------------------------
-// /webhooks/release-wave/stage-report  (Phase 4 NEW)
-// ----------------------------------------------------------------------------
-
-/**
- * stage-report body:
- *   {
- *     "wave_id": "wave_...",
- *     "repo": "ippoan/rust-alc-api",
- *     "ok": true,
- *     "preview_url": "https://preview-rust-alc-api.ippoan.org",      // ok=true 時のみ意味あり
- *     "flip_from_revision": "rust-alc-api-00041-zzz",                // ok=true 時のみ (rollback 戻し先)
- *     "previewed_version_id": "1a2b3c4d-...",                        // CF Workers のみ (flip 対象 version)
- *     "error": "build failed"                                        // ok=false 時のみ
- *   }
- */
-const stageReportSchema = z.object({
-  wave_id: z.string().min(1),
-  repo: z.string().min(1),
-  ok: z.boolean(),
-  preview_url: z.string().url().optional(),
-  flip_from_revision: z.string().optional(),
-  previewed_version_id: z.string().optional(),
-  error: z.string().optional(),
-});
-
-export async function handleStageReportWebhook(
-  request: Request,
-  env: Env,
-): Promise<Response> {
-  const v = await validateAndAuth(request, env, stageReportSchema);
-  if (!v.ok) return v.response;
-  const result = (await hubStub(env).stageReport({
-    wave_id: v.data.wave_id,
-    repo: v.data.repo,
-    ok: v.data.ok,
-    preview_url: v.data.preview_url ?? null,
-    flip_from_revision: v.data.flip_from_revision ?? null,
-    previewed_version_id: v.data.previewed_version_id ?? null,
-    error: v.data.error ?? null,
   })) as RpcResult<WaveState>;
   return rpcResultToResponse(result);
 }

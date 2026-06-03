@@ -58,16 +58,6 @@ export interface StartInput {
   }>;
 }
 
-export interface StageReportInput {
-  wave_id: string;
-  repo: string;
-  ok: boolean;
-  preview_url?: string | null;
-  flip_from_revision?: string | null;
-  previewed_version_id?: string | null;
-  error?: string | null;
-}
-
 export interface ApproveInput {
   wave_id: string;
   approved_by: string;
@@ -106,6 +96,10 @@ export interface ContractAppliedInput {
   repo: string;
   migration_id: string;
 }
+
+// 注: StageReportInput / stageReport は stage phase 撤去 (Refs ippoan/ci-workflows#96①)
+// に伴い削除済み。wave は start 時点で flippable な state (auto → flipping /
+// manual → pending-approval) になり、stage 完了 callback は存在しない。
 
 /** RPC で返す統一エラー型。HTTP / MCP 層でそのまま status code に map できる。 */
 export type RpcErrorCode =
@@ -179,28 +173,17 @@ export class ReleaseWaveHub extends DurableObject<Env> {
     await this.saveWave(state);
     // compatibility precheck (Refs #157 Phase A): 既 deploy frontend が wave 内
     // backend の現 image と整合しているかを突合し、赤があれば warning event を
-    // 記録する。**block はしない** (= state はそのまま staging)。
+    // 記録する。**block はしない**。
     await this.maybeRecordCompatWarning(state);
-    // 各 caller repo に release-wave-stage dispatch を fan-out。
+    // stage phase 撤去後 (Refs ippoan/ci-workflows#96①):
+    //   auto policy   → createWave が直接 flipping を作る → flip dispatch を発火
+    //   manual-approval → pending-approval で開始 → dispatch は無し (approve 待ち)
     // 失敗は best-effort で log/result に残す (dispatchAll は throw しない)。
     await this.maybeDispatch(null, state);
     return { ok: true, data: state };
   }
 
   // ============ per-event handlers =================================
-
-  async stageReport(input: StageReportInput): Promise<RpcResult<WaveState>> {
-    return this.applyEvent(input.wave_id, {
-      kind: "stage_report",
-      now: new Date().toISOString(),
-      repo: input.repo,
-      ok: input.ok,
-      preview_url: input.preview_url ?? null,
-      flip_from_revision: input.flip_from_revision ?? null,
-      previewed_version_id: input.previewed_version_id ?? null,
-      error: input.error ?? null,
-    });
-  }
 
   async approve(input: ApproveInput): Promise<RpcResult<WaveState>> {
     // compatibility gate (Refs #157 Phase C): require_compatibility=true な
@@ -345,9 +328,9 @@ export class ReleaseWaveHub extends DurableObject<Env> {
     }
     await this.saveWave(result.state);
     // 副作用: state 遷移に応じて caller repo へ repository_dispatch を発火。
-    // approve → flipping, stage_report → flipping (auto), rollback → rolled-back
-    // のいずれかで dispatchAll が走る。stage_report の途中遷移 (= staging のまま)
-    // / contract_applied / fail 等は decideDispatches が空配列を返すので no-op。
+    // approve → flipping (flip dispatch), rollback → rolled-back (rollback dispatch)
+    // のいずれかで dispatchAll が走る。contract_applied / fail 等は
+    // decideDispatches が空配列を返すので no-op。
     await this.maybeDispatch(state, result.state);
     return { ok: true, data: result.state };
   }

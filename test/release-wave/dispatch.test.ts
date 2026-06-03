@@ -33,17 +33,21 @@ function ok<T extends { ok: boolean }>(r: T): Extract<T, { ok: true }> {
 }
 
 // ============================================================================
-// start (null → staging) → release-wave-stage to all repos
+// start: stage phase 撤去後 (Refs ippoan/ci-workflows#96①)
+//   auto policy   → null → flipping → release-wave-flip を即発火
+//   manual policy → null → pending-approval → dispatch なし
 // ============================================================================
 
 describe("decideDispatches: start", () => {
-  it("emits release-wave-stage to all repos when wave starts", () => {
-    const next = makeWave();
+  it("emits release-wave-flip to all repos when auto policy starts (flipping)", () => {
+    const next = makeWave({ flip_policy: "auto" });
+    expect(next.state).toBe("flipping");
     const ds = decideDispatches(null, next);
     expect(ds).toHaveLength(2);
+    expect(ds.every((d) => d.event_type === "release-wave-flip")).toBe(true);
     expect(ds[0]).toMatchObject({
       repo: "ippoan/rust-alc-api",
-      event_type: "release-wave-stage",
+      event_type: "release-wave-flip",
       client_payload: {
         wave_id: "w1",
         target_tag: "v1.1.0",
@@ -52,7 +56,7 @@ describe("decideDispatches: start", () => {
     });
     expect(ds[1]).toMatchObject({
       repo: "ippoan/auth-worker",
-      event_type: "release-wave-stage",
+      event_type: "release-wave-flip",
       client_payload: {
         wave_id: "w1",
         target_tag: "v0.5.0",
@@ -60,73 +64,11 @@ describe("decideDispatches: start", () => {
       },
     });
   });
-});
 
-// ============================================================================
-// stage_report → no dispatch unless state moved to flipping
-// ============================================================================
-
-describe("decideDispatches: stage_report (mid-staging)", () => {
-  it("does not dispatch when state stays staging (partial stage)", () => {
-    const prev = makeWave();
-    const next = ok(
-      transition(prev, {
-        kind: "stage_report",
-        now: T1,
-        repo: "ippoan/rust-alc-api",
-        ok: true,
-      }),
-    ).state;
-    expect(decideDispatches(prev, next)).toEqual([]);
-  });
-
-  it("does not dispatch when state moves to pending-approval (manual policy)", () => {
-    let s = makeWave({ flip_policy: "manual-approval" });
-    s = ok(transition(s, { kind: "stage_report", now: T1, repo: "ippoan/rust-alc-api", ok: true })).state;
-    const prev = s;
-    const next = ok(
-      transition(prev, {
-        kind: "stage_report",
-        now: T2,
-        repo: "ippoan/auth-worker",
-        ok: true,
-      }),
-    ).state;
+  it("does not dispatch when manual policy starts (pending-approval)", () => {
+    const next = makeWave({ flip_policy: "manual-approval" });
     expect(next.state).toBe("pending-approval");
-    expect(decideDispatches(prev, next)).toEqual([]);
-  });
-
-  it("emits release-wave-flip to all repos when auto policy stage completes", () => {
-    let s = makeWave({ flip_policy: "auto" });
-    s = ok(transition(s, { kind: "stage_report", now: T1, repo: "ippoan/rust-alc-api", ok: true })).state;
-    const prev = s;
-    const next = ok(
-      transition(prev, {
-        kind: "stage_report",
-        now: T2,
-        repo: "ippoan/auth-worker",
-        ok: true,
-      }),
-    ).state;
-    expect(next.state).toBe("flipping");
-    const ds = decideDispatches(prev, next);
-    expect(ds).toHaveLength(2);
-    expect(ds.every((d) => d.event_type === "release-wave-flip")).toBe(true);
-  });
-
-  it("does not dispatch when state moves to failed", () => {
-    const prev = makeWave();
-    const next = ok(
-      transition(prev, {
-        kind: "stage_report",
-        now: T1,
-        repo: "ippoan/rust-alc-api",
-        ok: false,
-        error: "build broke",
-      }),
-    ).state;
-    expect(next.state).toBe("failed");
-    expect(decideDispatches(prev, next)).toEqual([]);
+    expect(decideDispatches(null, next)).toEqual([]);
   });
 });
 
@@ -136,10 +78,8 @@ describe("decideDispatches: stage_report (mid-staging)", () => {
 
 describe("decideDispatches: approve", () => {
   function pendingApprovalWave(): WaveState {
-    let s = makeWave({ flip_policy: "manual-approval" });
-    s = ok(transition(s, { kind: "stage_report", now: T1, repo: "ippoan/rust-alc-api", ok: true })).state;
-    s = ok(transition(s, { kind: "stage_report", now: T1, repo: "ippoan/auth-worker", ok: true })).state;
-    return s;
+    // manual-approval policy は createWave 直後に pending-approval で開始する。
+    return makeWave({ flip_policy: "manual-approval" });
   }
 
   it("emits release-wave-flip to all repos when approved", () => {
@@ -155,26 +95,17 @@ describe("decideDispatches: approve", () => {
   });
 
   it("includes previewed_version_id per repo in flip payload (CF Workers staged flip)", () => {
-    let s = makeWave({ flip_policy: "manual-approval" });
-    s = ok(
-      transition(s, {
-        kind: "stage_report",
-        now: T1,
-        repo: "ippoan/rust-alc-api",
-        ok: true,
-        previewed_version_id: "11111111-2222-3333-4444-555555555555",
-      }),
-    ).state;
-    s = ok(
-      transition(s, {
-        kind: "stage_report",
-        now: T1,
-        repo: "ippoan/auth-worker",
-        ok: true,
-        previewed_version_id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-      }),
-    ).state;
-    const prev = s;
+    // previewed_version_id は pending-release 経路で RepoState に載るので、ここでは
+    // pending-approval wave の repos に直接注入して flip payload に乗ることを確認する。
+    const base = makeWave({ flip_policy: "manual-approval" });
+    const prev: WaveState = {
+      ...base,
+      repos: base.repos.map((r) =>
+        r.repo === "ippoan/rust-alc-api"
+          ? { ...r, previewed_version_id: "11111111-2222-3333-4444-555555555555" }
+          : { ...r, previewed_version_id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" },
+      ),
+    };
     const next = ok(
       transition(prev, { kind: "approve", now: T2, approved_by: "ops@example.com" }),
     ).state;
@@ -194,10 +125,8 @@ describe("decideDispatches: approve", () => {
 
 describe("decideDispatches: flip_report", () => {
   function flippingWave(): WaveState {
-    let s = makeWave({ flip_policy: "auto" });
-    s = ok(transition(s, { kind: "stage_report", now: T1, repo: "ippoan/rust-alc-api", ok: true })).state;
-    s = ok(transition(s, { kind: "stage_report", now: T1, repo: "ippoan/auth-worker", ok: true })).state;
-    return s;
+    // auto policy は createWave 直後に flipping で開始する。
+    return makeWave({ flip_policy: "auto" });
   }
 
   it("does not dispatch on partial flip", () => {
@@ -226,9 +155,8 @@ describe("decideDispatches: flip_report", () => {
 
 describe("decideDispatches: rollback", () => {
   function flippedWave(): WaveState {
+    // auto policy は flipping で開始するので flip_report 2 件で flipped。
     let s = makeWave({ flip_policy: "auto" });
-    s = ok(transition(s, { kind: "stage_report", now: T1, repo: "ippoan/rust-alc-api", ok: true })).state;
-    s = ok(transition(s, { kind: "stage_report", now: T1, repo: "ippoan/auth-worker", ok: true })).state;
     s = ok(transition(s, { kind: "flip_report", now: T2, repo: "ippoan/rust-alc-api", ok: true })).state;
     s = ok(transition(s, { kind: "flip_report", now: T2, repo: "ippoan/auth-worker", ok: true })).state;
     return s;
@@ -248,25 +176,17 @@ describe("decideDispatches: rollback", () => {
   });
 
   it("includes flip_from_revision per repo when available", () => {
-    let s = makeWave({ flip_policy: "auto" });
-    s = ok(
-      transition(s, {
-        kind: "stage_report",
-        now: T1,
-        repo: "ippoan/rust-alc-api",
-        ok: true,
-        flip_from_revision: "rust-alc-api-old-rev",
-      }),
-    ).state;
-    s = ok(
-      transition(s, {
-        kind: "stage_report",
-        now: T1,
-        repo: "ippoan/auth-worker",
-        ok: true,
-        flip_from_revision: "auth-worker-old-rev",
-      }),
-    ).state;
+    // flip_from_revision は pending-release 経路で RepoState に載るので、ここでは
+    // flipping wave の repos に直接注入して rollback payload に乗ることを確認する。
+    const base = makeWave({ flip_policy: "auto" });
+    let s: WaveState = {
+      ...base,
+      repos: base.repos.map((r) =>
+        r.repo === "ippoan/rust-alc-api"
+          ? { ...r, flip_from_revision: "rust-alc-api-old-rev" }
+          : { ...r, flip_from_revision: "auth-worker-old-rev" },
+      ),
+    };
     s = ok(transition(s, { kind: "flip_report", now: T2, repo: "ippoan/rust-alc-api", ok: true })).state;
     s = ok(transition(s, { kind: "flip_report", now: T2, repo: "ippoan/auth-worker", ok: true })).state;
     const prev = s;
@@ -307,8 +227,6 @@ describe("decideDispatches: silent transitions", () => {
 
   it("does not dispatch on contract_applied", () => {
     let s = makeWave({ flip_policy: "auto" });
-    s = ok(transition(s, { kind: "stage_report", now: T1, repo: "ippoan/rust-alc-api", ok: true })).state;
-    s = ok(transition(s, { kind: "stage_report", now: T1, repo: "ippoan/auth-worker", ok: true })).state;
     s = ok(transition(s, { kind: "flip_report", now: T2, repo: "ippoan/rust-alc-api", ok: true })).state;
     s = ok(transition(s, { kind: "flip_report", now: T2, repo: "ippoan/auth-worker", ok: true })).state;
     const prev = s;
