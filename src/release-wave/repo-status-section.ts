@@ -24,13 +24,11 @@ import {
 } from "./repo-release-status";
 import { computeGlobalCompatibility, type WaveCompatibility } from "./compat";
 import { parseTaglessRepos } from "../tagless-repos";
-import { renderStartWaveSection, injectStartWaveSection } from "./start";
 import {
   getTrafficForRepos,
   type TrafficRecord,
   type TrafficVersion,
 } from "./traffic";
-import { listPendingReleases } from "./pending-release";
 
 function escapeHtml(s: string): string {
   return s
@@ -527,23 +525,15 @@ export async function handleReleaseWaveListPageWithRepoStatus(
   let html = await res.text();
   html = injectRepoStatusSection(html, section);
 
-  // Start wave フォーム (Refs #137 / #157 改善B)。tagless でない監視対象 repo を
-  // 候補に出し、画面から wave を start できるようにする。h1 直下に注入。
-  // target_tag prefill は実在の pending release tag を優先する (Refs #237)。
-  const pendingTagByRepo = new Map<string, string>();
-  if (env.COMPAT_KV) {
-    try {
-      for (const p of await listPendingReleases(env.COMPAT_KV)) {
-        pendingTagByRepo.set(p.repo, p.tag);
-      }
-    } catch {
-      // pending release 取得失敗時は latest tag fallback で degrade。
-    }
-  }
-  html = injectStartWaveSection(
-    html,
-    renderStartWaveSection(statuses, new Date(), pendingTagByRepo),
-  );
+  // 旧「Start wave」(stage 駆動) フォームは撤去 (Refs #237)。
+  // stage は wave と切り離し済み: tag push 時点で frontend-ci が no-traffic upload
+  // → ci-dashboard に pending-release 報告される。wave は「Pending releases」の
+  // ⚡ Flip all で一括 flip するだけ (wave-state 非依存)。
+  // stage 駆動の Start wave は (1) callback 待ちで staging 滞留 → WAVE_IN_PROGRESS、
+  // (2) cloudrun は新規 tag push 前提で、実在 tag を渡すと git tag が即失敗、と
+  // 新モデルと構造的に非互換だったため UI から外す。
+  // backend route (/api/release-wave/start) と handler stage job の撤去は
+  // ippoan/ci-workflows#96 で段階的に行う。
 
   // Compatibility (all consumers) グラフ内 repo に Tag Release ボタンを足す。
   if (env.COMPAT_KV) {
