@@ -161,3 +161,128 @@ export async function getFlipGroup(
 export async function clearFlipGroup(kv: KVNamespace): Promise<void> {
   await kv.delete(FLIP_GROUP_KEY);
 }
+
+// ----------------------------------------------------------------------------
+// 単一真実の Pending releases 導出 (Refs #237)
+// ----------------------------------------------------------------------------
+//
+// 「flip 待ちの no-traffic version」を 1 系統に統合する。従来は
+// pending-release:: KV と traffic:: の 0% version が別々に表示され drift して
+// いた。ここでは:
+//   - workers (traffic::<repo> を持つ): Cloudflare 実機 (traffic-report) の
+//     no-traffic promotable version を真実とする。flip は traffic-rollback 経由
+//     (= wrangler versions deploy <id>@100%)。
+//   - cloudrun 等 (traffic:: を持たない): pending-release:: record を使う。
+//     flip は pending-release/flip 経由 (handler が platform routing)。
+// traffic:: を持つ repo は traffic:: を優先し、pending-release:: は無視する。
+
+import type { TrafficRecord, TrafficVersion } from "./traffic";
+
+/** flip 入口の種別。traffic=workers / pending=cloudrun 等。 */
+export type PendingSource = "traffic" | "pending";
+
+/** Pending releases の 1 行 (統合表現)。 */
+export interface UnifiedPending {
+  repo: string;
+  version_id: string;
+  tag: string | null;
+  uploaded_at: string;
+  preview_url: string | null;
+  source: PendingSource;
+  /** flip 直前の active version (= rollback 先)。traffic source のみ取れる。 */
+  rollback_to: string | null;
+  rollback_tag: string | null;
+}
+
+/**
+ * traffic record から「flip 待ちの最新 no-traffic version」を返す。
+ * = 0% かつ現 active より新しい version の最新 1 件 (renderTrafficVersionsBlock の
+ * zeroShown と同義)。無ければ null。
+ */
+export function noTrafficPromotable(
+  rec: TrafficRecord,
+): TrafficVersion | null {
+  const versions = rec.versions ?? [];
+  const active = versions.filter((v) => v.percentage > 0);
+  const activeNewest = active
+    .map((v) => v.created_on)
+    .filter((c): c is string => !!c)
+    .sort()
+    .at(-1);
+  const zero = versions
+    .filter((v) => v.percentage <= 0)
+    .filter((v) => {
+      if (!activeNewest) return true; // active の日時不明 → 全て候補
+      if (!v.created_on) return false; // 日時不明の古い 0% は除外
+      return v.created_on > activeNewest; // active より新しいものだけ
+    })
+    .sort((a, b) => {
+      const ca = a.created_on ?? "";
+      const cb = b.created_on ?? "";
+      if (ca === cb) return 0;
+      if (!ca) return 1;
+      if (!cb) return -1;
+      return ca < cb ? 1 : -1; // 新しい順
+    });
+  return zero[0] ?? null;
+}
+
+/** traffic record の現 active version (= rollback 先候補) を返す。 */
+function currentActiveOf(
+  rec: TrafficRecord,
+): { version_id: string; tag: string | null } | null {
+  const hist = rec.deploy_history ?? [];
+  if (hist[0]) return { version_id: hist[0].version_id, tag: hist[0].tag ?? null };
+  const a =
+    (rec.versions ?? []).find((v) => v.percentage === 100) ??
+    (rec.versions ?? []).find((v) => v.percentage > 0);
+  return a ? { version_id: a.version_id, tag: a.tag ?? null } : null;
+}
+
+/**
+ * Pending releases の単一真実リストを組む (Refs #237)。uploaded_at 降順。
+ */
+export function computeUnifiedPending(
+  trafficByRepo: Map<string, TrafficRecord>,
+  pendingRecords: PendingReleaseRecord[],
+): UnifiedPending[] {
+  const out: UnifiedPending[] = [];
+  const seen = new Set<string>();
+  for (const [repo, rec] of trafficByRepo) {
+    const v = noTrafficPromotable(rec);
+    if (!v) continue;
+    const active = currentActiveOf(rec);
+    out.push({
+      repo,
+      version_id: v.version_id,
+      tag: v.tag ?? null,
+      uploaded_at: v.created_on ?? "",
+      preview_url: null,
+      source: "traffic",
+      rollback_to: active?.version_id ?? null,
+      rollback_tag: active?.tag ?? null,
+    });
+    seen.add(repo);
+  }
+  for (const r of pendingRecords) {
+    if (seen.has(r.repo)) continue; // traffic:: の no-traffic version を持つ repo は traffic:: 優先
+    // pending source (cloudrun 等) でも traffic:: record があれば現 active を
+    // rollback 先として控える (= 一括 flip → flip-group rollback の戻し先確保、
+    // Refs ippoan/ci-dashboard#241)。traffic:: が無ければ null (戻し先不明)。
+    const active = trafficByRepo.has(r.repo)
+      ? currentActiveOf(trafficByRepo.get(r.repo)!)
+      : null;
+    out.push({
+      repo: r.repo,
+      version_id: r.version_id,
+      tag: r.tag,
+      uploaded_at: r.uploaded_at,
+      preview_url: r.preview_url ?? null,
+      source: "pending",
+      rollback_to: active?.version_id ?? null,
+      rollback_tag: active?.tag ?? null,
+    });
+  }
+  out.sort((a, b) => (a.uploaded_at < b.uploaded_at ? 1 : -1));
+  return out;
+}

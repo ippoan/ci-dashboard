@@ -123,11 +123,12 @@ describe("handleReleaseWaveListPage", () => {
     expect(html).toContain("No release waves yet");
   });
 
-  it("shows the Pending releases section placeholder when none (Refs #181)", async () => {
+  it("shows the Pending releases section placeholder when none (Refs #181 / #237)", async () => {
     const env = fakeEnv({ listReturn: [], compatKv: memKv() });
     const html = await (await handleReleaseWaveListPage(env)).text();
     expect(html).toContain("Pending releases (no-traffic)");
-    expect(html).toContain("単独");
+    // 単一真実化後 (#237) の placeholder 文言。
+    expect(html).toContain("flip 待ちの no-traffic version はありません");
     expect(html).not.toContain("Flip to 100%");
   });
 

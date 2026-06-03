@@ -15,6 +15,7 @@ import type { WaveState } from "./types";
 import {
   computeWaveCompatibility,
   computeCompatibility,
+  computeGlobalCompatibility,
   getBackendCurrent,
 } from "./compat";
 import { decideRetestDispatches, dispatchAll, type Dispatch } from "./dispatch";
@@ -26,10 +27,16 @@ import {
   recordFlipGroup,
   getFlipGroup,
   clearFlipGroup,
+  computeUnifiedPending,
   type PendingReleaseRecord,
   type FlipGroupItem,
+  type UnifiedPending,
 } from "./pending-release";
-import { getTraffic, type TrafficRecord } from "./traffic";
+import {
+  getTraffic,
+  getTrafficForRepos,
+  type TrafficRecord,
+} from "./traffic";
 import { serviceNameFromRevision } from "./revision";
 
 function hubStub(env: Env): DurableObjectStub<ReleaseWaveHub> {
@@ -389,23 +396,6 @@ function buildTrafficRollbackDispatch(
   };
 }
 
-/**
- * traffic record から「現在 active な version」(= flip 前の戻し先候補) を返す。
- * deploy_history の先頭 (index 0 = 現 active) を最優先。無ければ versions[] の
- * 100% / 最大 traffic から拾う。判定できなければ null。
- */
-function currentActiveVersion(
-  traffic: TrafficRecord | null,
-): { version_id: string; tag: string | null } | null {
-  if (!traffic) return null;
-  const hist = traffic.deploy_history ?? [];
-  if (hist[0]) return { version_id: hist[0].version_id, tag: hist[0].tag ?? null };
-  const active =
-    traffic.versions.find((v) => v.percentage === 100) ??
-    traffic.versions.find((v) => v.percentage > 0);
-  return active ? { version_id: active.version_id, tag: active.tag ?? null } : null;
-}
-
 // ----------------------------------------------------------------------------
 // POST /api/release-wave/pending-release/flip  (Refs #181 / #174)
 // ----------------------------------------------------------------------------
@@ -507,40 +497,40 @@ export async function handleReleaseWavePendingReleaseFlipAll(
     });
   }
 
-  const records = await listPendingReleases(env.COMPAT_KV);
-  if (records.length === 0) {
+  // Pending releases の単一真実 (workers=traffic:: / cloudrun=pending-release::)
+  // を導出する (= 画面の表示と同じ source、Refs #237)。
+  const unified = await loadUnifiedPending(env);
+  if (unified.length === 0) {
     // flip 対象が無ければ何もせず一覧へ。
     return redirectToList();
   }
 
-  // flip 前に各 repo の現 active version (= 戻し先) を控える。
-  const rollbackByRepo = new Map<
-    string,
-    { version_id: string; tag: string | null } | null
-  >();
-  await Promise.all(
-    records.map(async (r) => {
-      const traffic = await getTraffic(env.COMPAT_KV, r.repo);
-      rollbackByRepo.set(r.repo, currentActiveVersion(traffic));
-    }),
+  // source 別に dispatch を組む:
+  //  - traffic (workers): traffic-rollback (wrangler versions deploy <id>@100%)
+  //  - pending (cloudrun 等): release-wave-flip (handler が platform routing)
+  // 戻し先 (rollback_to) は computeUnifiedPending が traffic:: record から控える
+  // (traffic source / pending source どちらも、traffic:: があれば現 active)。
+  const dispatches = unified.map((u) =>
+    u.source === "traffic"
+      ? buildTrafficRollbackDispatch(u.repo, u.version_id, u.tag)
+      : buildPendingFlipDispatch(unifiedToRecord(u)),
   );
-
-  const dispatches = records.map(buildPendingFlipDispatch);
   const results = await dispatchAll(env, dispatches);
 
   const items: FlipGroupItem[] = [];
-  for (let i = 0; i < records.length; i++) {
-    const rec = records[i]!;
+  for (let i = 0; i < unified.length; i++) {
+    const u = unified[i]!;
     if (!results[i]?.ok) continue;
-    const rb = rollbackByRepo.get(rec.repo) ?? null;
     items.push({
-      repo: rec.repo,
-      flipped_version_id: rec.version_id,
-      flipped_tag: rec.tag,
-      rollback_to: rb?.version_id ?? null,
-      rollback_tag: rb?.tag ?? null,
+      repo: u.repo,
+      flipped_version_id: u.version_id,
+      flipped_tag: u.tag ?? "",
+      rollback_to: u.rollback_to,
+      rollback_tag: u.rollback_tag,
     });
-    await clearPendingRelease(env.COMPAT_KV, rec.repo);
+    // pending-release:: 由来 (cloudrun) は flip したので消す。traffic 由来は
+    // traffic-report (flip 後) が状態を更新するので KV 操作不要。
+    if (u.source === "pending") await clearPendingRelease(env.COMPAT_KV, u.repo);
   }
 
   if (items.length === 0) {
@@ -548,7 +538,7 @@ export async function handleReleaseWavePendingReleaseFlipAll(
     const err = failed && !failed.ok ? failed.error : "dispatch failed";
     return jsonResponse(502, {
       code: "DISPATCH_FAILED",
-      error: `failed to dispatch flip for all ${records.length} pending release(s): ${err}`,
+      error: `failed to dispatch flip for all ${unified.length} pending release(s): ${err}`,
     });
   }
 
@@ -558,6 +548,54 @@ export async function handleReleaseWavePendingReleaseFlipAll(
     items,
   });
   return redirectToList();
+}
+
+/** UnifiedPending を buildPendingFlipDispatch 用の record 形に変換する。 */
+function unifiedToRecord(u: UnifiedPending): PendingReleaseRecord {
+  return {
+    schema_version: 1,
+    repo: u.repo,
+    version_id: u.version_id,
+    tag: u.tag ?? "",
+    preview_url: u.preview_url,
+    uploaded_at: u.uploaded_at,
+  };
+}
+
+/**
+ * Pending releases の単一真実リストをサーバ側で導出する (Refs #237)。
+ * page.ts の表示と同じ source: workers=traffic:: / cloudrun=pending-release::。
+ */
+async function loadUnifiedPending(env: Env): Promise<UnifiedPending[]> {
+  if (!env.COMPAT_KV) return [];
+  let pending: PendingReleaseRecord[] = [];
+  try {
+    pending = await listPendingReleases(env.COMPAT_KV);
+  } catch {
+    pending = [];
+  }
+  // traffic を引く repo = compat グラフ (backend + frontend) ∪ pending repo。
+  // pending repo も含めることで、pending source (cloudrun 等で compat グラフに
+  // 出ていない repo) でも現 active を rollback 先として控えられる
+  // (= 一括 flip → flip-group rollback の戻し先確保、Refs #241)。
+  const repos = new Set<string>();
+  try {
+    const compat = await computeGlobalCompatibility(env.COMPAT_KV);
+    for (const b of compat.backends) {
+      repos.add(b.backend_repo);
+      for (const m of b.matrix) repos.add(m.frontend);
+    }
+  } catch {
+    // compat 取得失敗時は pending repo のみで degrade。
+  }
+  for (const r of pending) repos.add(r.repo);
+  let trafficByRepo = new Map<string, TrafficRecord>();
+  try {
+    trafficByRepo = await getTrafficForRepos(env.COMPAT_KV, repos);
+  } catch {
+    // traffic 取得失敗時は pending-release:: のみで degrade。
+  }
+  return computeUnifiedPending(trafficByRepo, pending);
 }
 
 // ----------------------------------------------------------------------------
