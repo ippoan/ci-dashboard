@@ -788,21 +788,35 @@ ${PWA_REGISTER_SCRIPT}
 }
 
 function renderIndexRepo(view: RepoView): string {
-  const tagSections = view.tagBlocks
-    .filter((b) => b.issues.length > 0)
-    .map((b) => renderTagBlock(view.repo, b))
-    .join("\n");
-
-  // When every referenced issue across the visible tag blocks is already
-  // closed, the form has nothing to actually do — clicking the button would
-  // just round-trip with an empty selection. Drop the actions row so the
-  // historical `<details>` blocks remain as audit context without inviting a
-  // no-op click (#59). The `<form>` itself stays so future closes (e.g. if
-  // an issue is reopened) still have a working submit path; the operator
-  // would just need a tick + a manual page refresh to re-render the button.
-  const hasVisibleCandidate = view.tagBlocks.some((b) =>
+  // Only tag blocks with at least one OPEN (actionable) issue get the full
+  // table+form treatment. Closed-only blocks are pure noise on the landing
+  // page — the operator already released them. Refs #226.
+  const openBlocks = view.tagBlocks.filter((b) =>
     b.issues.some((i) => i.state !== "closed"),
   );
+
+  // When nothing in the repo is open, collapse the whole card to a single
+  // compact line instead of a tall stack of expandable "N closed issues"
+  // <details>. The repo stays on the roster (#224) but reads as one row:
+  // either a deduped closed-issue count ("released") or a no-refs note.
+  // No <form> / table / older-tags strip — the point is one line. Refs #226.
+  if (openBlocks.length === 0) {
+    const closed = new Set<number>();
+    for (const b of view.tagBlocks) {
+      for (const i of b.issues) if (i.state === "closed") closed.add(i.number);
+    }
+    const summary = closed.size > 0
+      ? `<span class="closed-summary">✅ ${closed.size} closed issue${closed.size === 1 ? "" : "s"} (released)</span>`
+      : `<span class="no-refs">No referenced issues in the recent release window.</span>`;
+    return `<section class="repo-card repo-card-compact">
+      <a class="repo-link" href="https://github.com/${escapeHtml(view.repo)}/releases" target="_blank" rel="noopener">${escapeHtml(view.repo)}</a>
+      ${summary}
+    </section>`;
+  }
+
+  const tagSections = openBlocks
+    .map((b) => renderTagBlock(view.repo, b))
+    .join("\n");
 
   const olderHtml = view.olderTags.length === 0
     ? ""
@@ -812,20 +826,12 @@ function renderIndexRepo(view: RepoView): string {
         )
         .join(" · ")}</div>`;
 
-  const actions = hasVisibleCandidate
-    ? `<div class="actions">
+  // Every kept block has ≥1 open issue, so the close button always has
+  // something to act on here.
+  const actions = `<div class="actions">
         <button type="submit">✅ Close selected as released</button>
         <span class="hint">⚠️ rows start unchecked.</span>
-      </div>`
-    : "";
-
-  // No tag block carried a referenced issue (no semver tags, no Refs in the
-  // recent range, or the synthetic path found nothing). The repo is still
-  // shown — operator wants the full roster (Refs #224) — with a passive note
-  // standing in for the table/actions so an empty card doesn't read as broken.
-  const noRefsNote = tagSections === ""
-    ? `<div class="no-refs">No referenced issues in the recent release window.</div>`
-    : "";
+      </div>`;
 
   // Whole repo card is one form so the operator can tick across tags and
   // close them in one shot; the POST handler groups by tag for comment
@@ -835,7 +841,6 @@ function renderIndexRepo(view: RepoView): string {
     <form method="POST" action="/api/release-close-batch" class="batch-close-form">
       <input type="hidden" name="repo" value="${escapeHtml(view.repo)}">
       ${tagSections}
-      ${noRefsNote}
       ${actions}
     </form>
     ${olderHtml}
@@ -1019,6 +1024,16 @@ const STYLES = `
     font-size: 12px; color: #8b949e;
     padding: 4px 0 2px 0;
   }
+  /* Closed-only / no-ref repos collapse to a single compact row (#226). */
+  .repo-card-compact {
+    display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+    padding: 10px 16px;
+  }
+  .repo-card-compact .repo-link {
+    font-size: 14px; font-weight: 600; color: #c9d1d9; text-decoration: none;
+  }
+  .repo-card-compact .repo-link:hover { color: #58a6ff; }
+  .repo-card-compact .closed-summary { font-size: 12px; color: #8b949e; }
   .tag-block { margin-bottom: 14px; }
   .tag-block-header {
     display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap;
