@@ -544,10 +544,10 @@ describe("GET /releases", () => {
     expect(html).toContain("worktree-naming-guard hook");
   });
 
-  it("omits a synthetic block when the recent commit window has no Refs", async () => {
-    // Direct-push-OK repo, but the recent commits don't reference any issue —
-    // we drop the whole RepoView so the landing page doesn't grow a noisy
-    // empty card.
+  it("renders an empty card (no synthetic block) when the recent commit window has no Refs", async () => {
+    // Direct-push-OK repo, but the recent commits don't reference any issue.
+    // Per Refs #224 the repo still shows as a card with a "no referenced
+    // issues" note — but it must NOT grow a synthetic tag block.
     vi.spyOn(globalThis, "fetch").mockImplementation(async (req) => {
       const url = typeof req === "string" ? req : (req as Request).url;
 
@@ -578,9 +578,11 @@ describe("GET /releases", () => {
 
     expect(res.status).toBe(200);
     const html = await res.text();
-    // Repo dropped → empty-state hint shown, no synthetic block markup.
-    expect(html).toContain("No releases with referenced issues");
-    expect(html).not.toContain("yhonda-ohishi/claude-hooks");
+    // Repo card present with the no-refs note; no synthetic block / tag label.
+    expect(html).toContain("yhonda-ohishi/claude-hooks");
+    expect(html).toContain("No referenced issues in the recent release window");
+    expect(html).not.toContain("master@");
+    expect(html).not.toMatch(/name="pair"/);
   });
 
   // #59: once every referenced issue in a repo card is closed, the
@@ -847,9 +849,11 @@ describe("GET /releases", () => {
     expect(html).toContain("No releases with referenced issues");
   });
 
-  it("does not turn an unallowlisted tag-less repo into a synthetic block", async () => {
+  it("shows an unallowlisted tag-less repo as an empty card but never as a synthetic block", async () => {
     // Guard against the auto-merge regression the user called out: a PR repo
-    // briefly without tags must NOT show its main-branch commits here.
+    // briefly without tags must NOT show its main-branch commits as a release.
+    // Post-#224 the repo still appears as an empty card (full roster), but the
+    // synthetic path (/commits fetch + "direct push" marker) must stay unentered.
     vi.spyOn(globalThis, "fetch").mockImplementation(async (req) => {
       const url = typeof req === "string" ? req : (req as Request).url;
 
@@ -881,7 +885,12 @@ describe("GET /releases", () => {
 
     expect(res.status).toBe(200);
     const html = await res.text();
-    expect(html).toContain("No releases with referenced issues");
+    // Empty card shown (full roster)...
+    expect(html).toContain("ippoan/some-pr-repo");
+    expect(html).toContain("No referenced issues in the recent release window");
+    // ...but never promoted to a synthetic block (no marker; /commits not hit,
+    // enforced by the throw in the stub above).
     expect(html).not.toContain("direct push");
+    expect(html).not.toMatch(/name="pair"/);
   });
 });
