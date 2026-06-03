@@ -10,6 +10,7 @@ import {
   invalidateRepoCommits,
   invalidateRepoMeta,
   clearReleaseCache,
+  TTL_MOVING_COMPARE,
 } from "../src/release-cache";
 
 // The cache layer is meant to be transparent: first call hits GitHub, second
@@ -66,6 +67,32 @@ describe("release-cache", () => {
     await cachedCompare("tok", env.CI_STATUS, "ippoan", "x", "v1.0.0", "v1.1.0");
     await cachedCompare("tok", env.CI_STATUS, "ippoan", "x", "v1.1.0", "v1.2.0");
     expect(calls).toBe(2);
+  });
+
+  // #228: the "Unreleased" zone compares `tag...<defaultBranch>`, a moving
+  // range, so it must NOT inherit the 24h immutable-range TTL — otherwise a
+  // just-merged Ref stays hidden for up to a day. An explicit ttlSec override
+  // (TTL_MOVING_COMPARE) caps the KV entry at 60s; the default stays 24h.
+  it("cachedCompare: honors an explicit short ttl for moving-HEAD ranges", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      Response.json({ commits: [] }),
+    );
+    const putSpy = vi.spyOn(env.CI_STATUS, "put");
+
+    // Immutable tag...tag — default 24h.
+    await cachedCompare("tok", env.CI_STATUS, "ippoan", "y", "v1.0.0", "v1.1.0");
+    // Moving tag...main — short TTL via override.
+    await cachedCompare(
+      "tok", env.CI_STATUS, "ippoan", "y", "v1.0.0", "main", TTL_MOVING_COMPARE,
+    );
+
+    const ttlFor = (frag: string): number | undefined => {
+      const call = putSpy.mock.calls.find(([k]) => String(k).includes(frag));
+      return (call?.[2] as { expirationTtl?: number } | undefined)?.expirationTtl;
+    };
+    expect(ttlFor("v1.0.0..v1.1.0")).toBe(86400);
+    expect(ttlFor("v1.0.0..main")).toBe(TTL_MOVING_COMPARE);
+    expect(TTL_MOVING_COMPARE).toBe(60);
   });
 
   it("falls through to the loader when kv is undefined (no caching)", async () => {
