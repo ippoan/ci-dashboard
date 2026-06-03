@@ -596,11 +596,57 @@ export async function handleReleaseWaveFlipGroupRollback(
     });
   }
 
-  const targets = group.items.filter(
+  // optional form field `repo`: 指定時はその repo 1 件だけ rollback (= 単一 rollback)。
+  // 未指定なら group 全件を一括 rollback (= 従来の Rollback last flip)。
+  let repoFilter = "";
+  try {
+    const form = await req.formData();
+    repoFilter = String(form.get("repo") ?? "").trim();
+  } catch {
+    // form-data 以外 (= bulk ボタンの空 body 等) は repoFilter 無しで全件扱い。
+  }
+
+  const rollbackable = group.items.filter(
     (it): it is FlipGroupItem & { rollback_to: string } =>
       typeof it.rollback_to === "string" && it.rollback_to.length > 0,
   );
-  if (targets.length === 0) {
+
+  // ---- 単一 rollback (repo 指定) ----
+  if (repoFilter) {
+    const item = rollbackable.find((it) => it.repo === repoFilter);
+    if (!item) {
+      return jsonResponse(404, {
+        code: "NOT_FOUND",
+        error: `no rollback target for ${repoFilter} in the latest flip group`,
+      });
+    }
+    const results = await dispatchAll(env, [
+      buildTrafficRollbackDispatch(item.repo, item.rollback_to, item.rollback_tag),
+    ]);
+    if (!(results.length > 0 && results[0]!.ok)) {
+      const err =
+        results.length > 0 && !results[0]!.ok ? results[0]!.error : "dispatch failed";
+      return jsonResponse(502, {
+        code: "DISPATCH_FAILED",
+        error: `failed to dispatch rollback for ${repoFilter}: ${err}`,
+      });
+    }
+    // rollback した repo を group から除く。残りが無ければ group ごと消す。
+    const remaining = group.items.filter((it) => it.repo !== repoFilter);
+    if (remaining.length === 0) {
+      await clearFlipGroup(env.COMPAT_KV);
+    } else {
+      await recordFlipGroup(env.COMPAT_KV, {
+        flipped_at: group.flipped_at,
+        actor: group.actor,
+        items: remaining,
+      });
+    }
+    return redirectToList();
+  }
+
+  // ---- 一括 rollback (repo 未指定) ----
+  if (rollbackable.length === 0) {
     // 戻し先が 1 件も無い (= flip 時に active を特定できなかった)。group は消す。
     await clearFlipGroup(env.COMPAT_KV);
     return jsonResponse(409, {
@@ -609,7 +655,7 @@ export async function handleReleaseWaveFlipGroupRollback(
     });
   }
 
-  const dispatches = targets.map((it) =>
+  const dispatches = rollbackable.map((it) =>
     buildTrafficRollbackDispatch(it.repo, it.rollback_to, it.rollback_tag),
   );
   const results = await dispatchAll(env, dispatches);
@@ -619,7 +665,7 @@ export async function handleReleaseWaveFlipGroupRollback(
     const err = failed && !failed.ok ? failed.error : "dispatch failed";
     return jsonResponse(502, {
       code: "DISPATCH_FAILED",
-      error: `failed to dispatch rollback for flip group (${targets.length} repo(s)): ${err}`,
+      error: `failed to dispatch rollback for flip group (${rollbackable.length} repo(s)): ${err}`,
     });
   }
 

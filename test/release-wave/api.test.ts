@@ -1047,3 +1047,108 @@ describe("handleReleaseWaveFlipGroupRollback", () => {
     expect(await getFlipGroup(kv)).toBeNull();
   });
 });
+
+// ============================================================================
+// flip-group-rollback: 単一 repo 指定 (Refs #237)
+// ============================================================================
+
+describe("handleReleaseWaveFlipGroupRollback (single repo)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function twoItemGroupKv(): KVNamespace {
+    return memKv({
+      "flip-group::latest": {
+        schema_version: 1,
+        flipped_at: "2026-05-28T12:00:00Z",
+        actor: "op@example.com",
+        items: [
+          {
+            repo: "ippoan/auth-worker",
+            flipped_version_id: PENDING_VID,
+            flipped_tag: "v0.2.38",
+            rollback_to: "prior-aw-0001",
+            rollback_tag: "v0.2.37",
+          },
+          {
+            repo: "ippoan/nuxt-trouble",
+            flipped_version_id: "vid-nuxt-trouble",
+            flipped_tag: "v0.0.18",
+            rollback_to: "prior-nt-0001",
+            rollback_tag: "v0.0.17",
+          },
+        ],
+      },
+    });
+  }
+
+  it("rolls back only the specified repo and keeps the rest in the group", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const kv = twoItemGroupKv();
+    const resp = await handleReleaseWaveFlipGroupRollback(
+      postRequest("/api/release-wave/pending-release/flip-group-rollback", {
+        formBody: { repo: "ippoan/auth-worker" },
+      }),
+      pendingFlipEnv(kv),
+    );
+    expect(resp.status).toBe(303);
+    const awCall = fetchSpy.mock.calls.find((c) =>
+      String(c[0]).includes("/repos/ippoan/auth-worker/dispatches"),
+    );
+    expect(awCall).toBeDefined();
+    const body = JSON.parse(awCall![1].body);
+    expect(body.event_type).toBe("release-wave-traffic-rollback");
+    expect(body.client_payload.previewed_version_id).toBe("prior-aw-0001");
+    // 指定外 (nuxt-trouble) へは dispatch しない
+    expect(
+      fetchSpy.mock.calls.find((c) =>
+        String(c[0]).includes("/repos/ippoan/nuxt-trouble/dispatches"),
+      ),
+    ).toBeUndefined();
+    // group には未 rollback の nuxt-trouble だけ残る
+    const g = await getFlipGroup(kv);
+    expect(g).not.toBeNull();
+    expect(g!.items.map((i) => i.repo)).toEqual(["ippoan/nuxt-trouble"]);
+  });
+
+  it("clears the group when the last remaining repo is rolled back", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const kv = memKv({
+      "flip-group::latest": {
+        schema_version: 1,
+        flipped_at: "2026-05-28T12:00:00Z",
+        actor: "op@example.com",
+        items: [
+          {
+            repo: "ippoan/auth-worker",
+            flipped_version_id: PENDING_VID,
+            flipped_tag: "v0.2.38",
+            rollback_to: "prior-aw-0001",
+            rollback_tag: "v0.2.37",
+          },
+        ],
+      },
+    });
+    const resp = await handleReleaseWaveFlipGroupRollback(
+      postRequest("/api/release-wave/pending-release/flip-group-rollback", {
+        formBody: { repo: "ippoan/auth-worker" },
+      }),
+      pendingFlipEnv(kv),
+    );
+    expect(resp.status).toBe(303);
+    expect(await getFlipGroup(kv)).toBeNull();
+  });
+
+  it("returns 404 when the specified repo is not in the flip group", async () => {
+    const resp = await handleReleaseWaveFlipGroupRollback(
+      postRequest("/api/release-wave/pending-release/flip-group-rollback", {
+        formBody: { repo: "ippoan/no-such" },
+      }),
+      pendingFlipEnv(twoItemGroupKv()),
+    );
+    expect(resp.status).toBe(404);
+  });
+});
