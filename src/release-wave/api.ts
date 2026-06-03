@@ -18,8 +18,17 @@ import {
   getBackendCurrent,
 } from "./compat";
 import { decideRetestDispatches, dispatchAll, type Dispatch } from "./dispatch";
-import { getPendingRelease, clearPendingRelease } from "./pending-release";
-import { getTraffic } from "./traffic";
+import {
+  getPendingRelease,
+  clearPendingRelease,
+  listPendingReleases,
+  recordFlipGroup,
+  getFlipGroup,
+  clearFlipGroup,
+  type PendingReleaseRecord,
+  type FlipGroupItem,
+} from "./pending-release";
+import { getTraffic, type TrafficRecord } from "./traffic";
 import { serviceNameFromRevision } from "./revision";
 
 function hubStub(env: Env): DurableObjectStub<ReleaseWaveHub> {
@@ -329,6 +338,74 @@ export async function handleReleaseWaveRetestConsumer(
 }
 
 // ----------------------------------------------------------------------------
+// Pending release flip / rollback の dispatch ビルダー (single / bulk 共有)
+// ----------------------------------------------------------------------------
+
+/**
+ * pending release (no-traffic version) を 100% へ flip する dispatch を組む。
+ * single (`/pending-release/flip`) と bulk (`/pending-release/flip-all`) で共有。
+ */
+function buildPendingFlipDispatch(record: PendingReleaseRecord): Dispatch {
+  // synthetic wave_id: handler の dispatch job の wave_id 形式検証
+  // (^[a-zA-Z0-9._-]{1,128}$) を満たすよう `/` を `-` に潰す。
+  const wave_id = `pending-${record.repo.replace(/[^a-zA-Z0-9._-]/g, "-")}-${Date.now()}`;
+  return {
+    repo: record.repo,
+    event_type: "release-wave-flip",
+    client_payload: {
+      wave_id,
+      target_tag: record.tag,
+      head_sha: "",
+      previewed_version_id: record.version_id,
+      // handler が wave flip-report callback を skip するためのマーカー。
+      pending_release: true,
+    },
+  };
+}
+
+/**
+ * 任意 version への traffic rollback dispatch を組む。single
+ * (`/traffic-rollback`) と bulk (flip-group rollback) で共有。
+ */
+function buildTrafficRollbackDispatch(
+  repo: string,
+  versionId: string,
+  tag: string | null,
+): Dispatch {
+  const wave_id = `traffic-rollback-${repo.replace(/[^a-zA-Z0-9._-]/g, "-")}-${Date.now()}`;
+  return {
+    repo,
+    event_type: "release-wave-traffic-rollback",
+    client_payload: {
+      wave_id,
+      ...(tag ? { target_tag: tag } : {}),
+      head_sha: "",
+      // handler が `wrangler versions deploy <id>@100%` の対象にする version。
+      previewed_version_id: versionId,
+      // handler が wave callback を skip するためのマーカー。
+      traffic_rollback: true,
+    },
+  };
+}
+
+/**
+ * traffic record から「現在 active な version」(= flip 前の戻し先候補) を返す。
+ * deploy_history の先頭 (index 0 = 現 active) を最優先。無ければ versions[] の
+ * 100% / 最大 traffic から拾う。判定できなければ null。
+ */
+function currentActiveVersion(
+  traffic: TrafficRecord | null,
+): { version_id: string; tag: string | null } | null {
+  if (!traffic) return null;
+  const hist = traffic.deploy_history ?? [];
+  if (hist[0]) return { version_id: hist[0].version_id, tag: hist[0].tag ?? null };
+  const active =
+    traffic.versions.find((v) => v.percentage === 100) ??
+    traffic.versions.find((v) => v.percentage > 0);
+  return active ? { version_id: active.version_id, tag: active.tag ?? null } : null;
+}
+
+// ----------------------------------------------------------------------------
 // POST /api/release-wave/pending-release/flip  (Refs #181 / #174)
 // ----------------------------------------------------------------------------
 
@@ -383,23 +460,7 @@ export async function handleReleaseWavePendingReleaseFlip(
     });
   }
 
-  // synthetic wave_id: handler の dispatch job の wave_id 形式検証
-  // (^[a-zA-Z0-9._-]{1,128}$) を満たすよう `/` を `-` に潰す。
-  const wave_id = `pending-${repo.replace(/[^a-zA-Z0-9._-]/g, "-")}-${Date.now()}`;
-  const dispatch: Dispatch = {
-    repo,
-    event_type: "release-wave-flip",
-    client_payload: {
-      wave_id,
-      target_tag: record.tag,
-      head_sha: "",
-      previewed_version_id: record.version_id,
-      // handler が wave flip-report を skip するためのマーカー。
-      pending_release: true,
-    },
-  };
-
-  const results = await dispatchAll(env, [dispatch]);
+  const results = await dispatchAll(env, [buildPendingFlipDispatch(record)]);
   const ok = results.length > 0 && results[0]!.ok;
   if (ok) {
     // dispatch が着火できたら record を消す (optimistic)。実 flip の成否は
@@ -412,6 +473,157 @@ export async function handleReleaseWavePendingReleaseFlip(
       error: `failed to dispatch flip for ${repo}: ${err}`,
     });
   }
+  return redirectToList();
+}
+
+// ----------------------------------------------------------------------------
+// POST /api/release-wave/pending-release/flip-all  (wave 一括 flip, Refs #237)
+// ----------------------------------------------------------------------------
+
+/**
+ * 「wave = 複数 repo の pending release を一括 flip」。KV の pending-release を
+ * 全件まとめて `release-wave-flip` dispatch し、各 repo の **flip 直前の active
+ * version (= 戻し先)** を flip-group として記録する。後で
+ * `/pending-release/flip-group-rollback` で同じ set を一括 rollback できる。
+ *
+ * - pending-release が 0 件なら no-op で一覧へ redirect。
+ * - 戻し先は flip 前に `traffic::<repo>` から控える (flip CI が traffic を
+ *   書き換える前のスナップショット)。取得できない repo は rollback_to=null。
+ * - dispatch 成功した repo のみ pending-release を clear し flip-group に積む。
+ * - 全 dispatch 失敗時のみ 502。一部成功は成功分を記録して一覧へ redirect。
+ */
+export async function handleReleaseWavePendingReleaseFlipAll(
+  req: Request,
+  env: Env,
+): Promise<Response> {
+  if (req.method !== "POST") {
+    return jsonResponse(405, { code: "METHOD_NOT_ALLOWED", error: "use POST" });
+  }
+  if (!env.COMPAT_KV) {
+    return jsonResponse(500, {
+      code: "KV_NOT_CONFIGURED",
+      error: "COMPAT_KV is not bound",
+    });
+  }
+
+  const records = await listPendingReleases(env.COMPAT_KV);
+  if (records.length === 0) {
+    // flip 対象が無ければ何もせず一覧へ。
+    return redirectToList();
+  }
+
+  // flip 前に各 repo の現 active version (= 戻し先) を控える。
+  const rollbackByRepo = new Map<
+    string,
+    { version_id: string; tag: string | null } | null
+  >();
+  await Promise.all(
+    records.map(async (r) => {
+      const traffic = await getTraffic(env.COMPAT_KV, r.repo);
+      rollbackByRepo.set(r.repo, currentActiveVersion(traffic));
+    }),
+  );
+
+  const dispatches = records.map(buildPendingFlipDispatch);
+  const results = await dispatchAll(env, dispatches);
+
+  const items: FlipGroupItem[] = [];
+  for (let i = 0; i < records.length; i++) {
+    const rec = records[i]!;
+    if (!results[i]?.ok) continue;
+    const rb = rollbackByRepo.get(rec.repo) ?? null;
+    items.push({
+      repo: rec.repo,
+      flipped_version_id: rec.version_id,
+      flipped_tag: rec.tag,
+      rollback_to: rb?.version_id ?? null,
+      rollback_tag: rb?.tag ?? null,
+    });
+    await clearPendingRelease(env.COMPAT_KV, rec.repo);
+  }
+
+  if (items.length === 0) {
+    const err =
+      results.find((r) => !r.ok && r.error)?.error ?? "dispatch failed";
+    return jsonResponse(502, {
+      code: "DISPATCH_FAILED",
+      error: `failed to dispatch flip for all ${records.length} pending release(s): ${err}`,
+    });
+  }
+
+  await recordFlipGroup(env.COMPAT_KV, {
+    flipped_at: new Date().toISOString(),
+    actor: actorEmail(req),
+    items,
+  });
+  return redirectToList();
+}
+
+// ----------------------------------------------------------------------------
+// POST /api/release-wave/pending-release/flip-group-rollback  (一括 rollback)
+// ----------------------------------------------------------------------------
+
+/**
+ * 直近の一括 flip (flip-group) を一括 rollback する。各 repo を flip 直前の
+ * active version (`rollback_to`) へ `release-wave-traffic-rollback` dispatch で
+ * 即 100% に戻す。
+ *
+ * - flip-group が無ければ 404。
+ * - `rollback_to` を記録できていた item のみ対象 (= flip 時に戻し先が判明して
+ *   いた repo)。1 件も無ければ 409。
+ * - 全 dispatch 失敗時のみ 502。一部でも成功すれば flip-group を clear して
+ *   一覧へ redirect (= rollback 済みとみなす)。
+ */
+export async function handleReleaseWaveFlipGroupRollback(
+  req: Request,
+  env: Env,
+): Promise<Response> {
+  if (req.method !== "POST") {
+    return jsonResponse(405, { code: "METHOD_NOT_ALLOWED", error: "use POST" });
+  }
+  if (!env.COMPAT_KV) {
+    return jsonResponse(500, {
+      code: "KV_NOT_CONFIGURED",
+      error: "COMPAT_KV is not bound",
+    });
+  }
+
+  const group = await getFlipGroup(env.COMPAT_KV);
+  if (!group) {
+    return jsonResponse(404, {
+      code: "NOT_FOUND",
+      error: "no flip group to rollback",
+    });
+  }
+
+  const targets = group.items.filter(
+    (it): it is FlipGroupItem & { rollback_to: string } =>
+      typeof it.rollback_to === "string" && it.rollback_to.length > 0,
+  );
+  if (targets.length === 0) {
+    // 戻し先が 1 件も無い (= flip 時に active を特定できなかった)。group は消す。
+    await clearFlipGroup(env.COMPAT_KV);
+    return jsonResponse(409, {
+      code: "NO_ROLLBACK_TARGET",
+      error: "flip group has no recorded rollback targets",
+    });
+  }
+
+  const dispatches = targets.map((it) =>
+    buildTrafficRollbackDispatch(it.repo, it.rollback_to, it.rollback_tag),
+  );
+  const results = await dispatchAll(env, dispatches);
+
+  if (!results.some((r) => r.ok)) {
+    const err =
+      results.find((r) => !r.ok && r.error)?.error ?? "dispatch failed";
+    return jsonResponse(502, {
+      code: "DISPATCH_FAILED",
+      error: `failed to dispatch rollback for flip group (${targets.length} repo(s)): ${err}`,
+    });
+  }
+
+  await clearFlipGroup(env.COMPAT_KV);
   return redirectToList();
 }
 
@@ -482,22 +694,9 @@ export async function handleReleaseWaveTrafficRollback(
   }
   const tag = fromHistory?.tag ?? fromVersions?.tag ?? null;
 
-  const wave_id = `traffic-rollback-${repo.replace(/[^a-zA-Z0-9._-]/g, "-")}-${Date.now()}`;
-  const dispatch: Dispatch = {
-    repo,
-    event_type: "release-wave-traffic-rollback",
-    client_payload: {
-      wave_id,
-      ...(tag ? { target_tag: tag } : {}),
-      head_sha: "",
-      // handler が `wrangler versions deploy <id>@100%` の対象にする version。
-      previewed_version_id: versionId,
-      // handler が wave callback を skip するためのマーカー。
-      traffic_rollback: true,
-    },
-  };
-
-  const results = await dispatchAll(env, [dispatch]);
+  const results = await dispatchAll(env, [
+    buildTrafficRollbackDispatch(repo, versionId, tag),
+  ]);
   if (!(results.length > 0 && results[0]!.ok)) {
     const err = results.length > 0 && !results[0]!.ok ? results[0]!.error : "dispatch failed";
     return jsonResponse(502, {

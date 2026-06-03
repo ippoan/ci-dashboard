@@ -23,7 +23,9 @@ import {
 } from "./compat";
 import {
   listPendingReleases,
+  getFlipGroup,
   type PendingReleaseRecord,
+  type FlipGroupRecord,
 } from "./pending-release";
 import { getTrafficForRepos, type TrafficRecord } from "./traffic";
 
@@ -190,15 +192,25 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
   );
 
   // 単独 v* リリースで upload された no-traffic version の一覧 (Refs #181)。
+  // + 直近の一括 flip (flip-group) — 一括 rollback 用 (Refs #237)。
   let pendingReleases: PendingReleaseRecord[] = [];
+  let flipGroup: FlipGroupRecord | null = null;
   if (env.COMPAT_KV) {
     try {
       pendingReleases = await listPendingReleases(env.COMPAT_KV);
     } catch {
       pendingReleases = [];
     }
+    try {
+      flipGroup = await getFlipGroup(env.COMPAT_KV);
+    } catch {
+      flipGroup = null;
+    }
   }
-  const pendingReleaseSection = renderPendingReleaseSection(pendingReleases);
+  const pendingReleaseSection = renderPendingReleaseSection(
+    pendingReleases,
+    flipGroup,
+  );
 
   const rows = waves.length === 0
     ? `<tr><td colspan="7" class="empty">No release waves yet.</td></tr>`
@@ -511,7 +523,10 @@ export async function handleReleaseWaveDetailPage(
  * record が無ければセクション自体は出すが「pending release はありません」を表示
  * (= 「ここで単独リリースを flip できる」affordance を常設)。
  */
-function renderPendingReleaseSection(records: PendingReleaseRecord[]): string {
+function renderPendingReleaseSection(
+  records: PendingReleaseRecord[],
+  flipGroup: FlipGroupRecord | null,
+): string {
   const rows = records
     .map((r) => {
       const safe = safeHttpUrl(r.preview_url);
@@ -540,8 +555,22 @@ function renderPendingReleaseSection(records: PendingReleaseRecord[]): string {
     })
     .join("");
 
+  // wave = 一括 flip。pending が 2 件以上なら「全部まとめて flip」ボタンを出す
+  // (Refs #237)。1 件でも押せるが、単独行の Flip と機能は同じなので 2 件以上で表示。
+  const flipAllBtn =
+    records.length >= 2
+      ? `<form method="post" action="/api/release-wave/pending-release/flip-all"
+              style="margin:0 0 8px 0"
+              onsubmit="return confirm('${records.length} 件の pending release を一括で 100% flip します。よろしいですか？');">
+           <button type="submit"
+             title="全 pending release を一括で 100% traffic へ flip (wave)">
+             ⚡ Flip all ${records.length} to 100% (wave)
+           </button>
+         </form>`
+      : "";
+
   const body = records.length > 0
-    ? `<table>
+    ? `${flipAllBtn}<table>
         <thead>
           <tr>
             <th>Repo</th><th>Tag</th><th>Version</th><th>Preview</th>
@@ -560,6 +589,45 @@ function renderPendingReleaseSection(records: PendingReleaseRecord[]): string {
         した no-traffic version。Flip で 100% traffic へ promote する。
         Refs <a href="https://github.com/ippoan/ci-dashboard/issues/181">#181</a>.</p>
       ${body}
+      ${renderFlipGroupRollback(flipGroup)}
+    </div>`;
+}
+
+/**
+ * 直近の一括 flip (flip-group) の rollback パネル。flip-group があれば「直前の
+ * active version へ一括で戻す」ボタンを出す。戻し先 (rollback_to) を控えられた
+ * repo のみが対象。Refs #237。
+ */
+function renderFlipGroupRollback(flipGroup: FlipGroupRecord | null): string {
+  if (!flipGroup || flipGroup.items.length === 0) return "";
+  const rollbackable = flipGroup.items.filter((it) => it.rollback_to);
+  const repoList = flipGroup.items
+    .map((it) => {
+      const to = it.rollback_to
+        ? `→ ${escapeHtml((it.rollback_tag ?? it.rollback_to).slice(0, 16))}`
+        : `<span class="meta">(戻し先不明)</span>`;
+      return `<li>${escapeHtml(it.repo)} <span class="meta">${escapeHtml(it.flipped_tag)}</span> ${to}</li>`;
+    })
+    .join("");
+  const btn =
+    rollbackable.length > 0
+      ? `<form method="post" action="/api/release-wave/pending-release/flip-group-rollback"
+              style="margin:8px 0 0 0"
+              onsubmit="return confirm('直近の一括 flip (${rollbackable.length} repo) を直前の version へ一括 rollback します。よろしいですか？');">
+           <button type="submit"
+             title="直近の一括 flip を一括 rollback (各 repo を flip 直前の version へ戻す)">
+             ↩ Rollback last flip (${rollbackable.length} repo)
+           </button>
+         </form>`
+      : `<p class="meta">この flip-group には戻し先が記録された repo がありません
+          (各行の traffic-rollback で個別に戻してください)。</p>`;
+  return `
+    <div class="subsection" style="margin-top:12px;border-top:1px solid #2a2a2a;padding-top:10px">
+      <h3 style="margin:0 0 4px 0;font-size:0.95em">直近の一括 flip
+        <span class="meta">(${escapeHtml(flipGroup.flipped_at)} by ${escapeHtml(flipGroup.actor)})</span>
+      </h3>
+      <ul class="meta" style="margin:4px 0">${repoList}</ul>
+      ${btn}
     </div>`;
 }
 

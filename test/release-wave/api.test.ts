@@ -6,10 +6,15 @@ import {
   handleReleaseWaveRetest,
   handleReleaseWaveRetestConsumer,
   handleReleaseWavePendingReleaseFlip,
+  handleReleaseWavePendingReleaseFlipAll,
+  handleReleaseWaveFlipGroupRollback,
   handleReleaseWaveTrafficRollback,
   handleReleaseWaveBackendRollback,
 } from "../../src/release-wave/api";
-import { getPendingRelease } from "../../src/release-wave/pending-release";
+import {
+  getPendingRelease,
+  getFlipGroup,
+} from "../../src/release-wave/pending-release";
 import type { Env } from "../../src/index";
 import type { ReleaseWaveHub } from "../../src/release-wave/do";
 
@@ -874,5 +879,171 @@ describe("handleReleaseWaveBackendRollback", () => {
     expect(body.client_payload.rollback_target).toEqual({
       "rust-alc-api": "rust-alc-api-00041-xyz",
     });
+  });
+});
+
+// ============================================================================
+// /api/release-wave/pending-release/flip-all  (wave 一括 flip, Refs #237)
+// ============================================================================
+
+describe("handleReleaseWavePendingReleaseFlipAll", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("returns 405 on GET", async () => {
+    const req = new Request(
+      "https://ci-dashboard.ippoan.org/api/release-wave/pending-release/flip-all",
+      { method: "GET" },
+    );
+    const resp = await handleReleaseWavePendingReleaseFlipAll(req, pendingFlipEnv(pendingKv()));
+    expect(resp.status).toBe(405);
+  });
+
+  it("redirects with no dispatch when there are no pending releases", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const resp = await handleReleaseWavePendingReleaseFlipAll(
+      postRequest("/api/release-wave/pending-release/flip-all"),
+      pendingFlipEnv(memKv()),
+    );
+    expect(resp.status).toBe(303);
+    const dispatchCall = fetchSpy.mock.calls.find((c) =>
+      String(c[0]).includes("/dispatches"),
+    );
+    expect(dispatchCall).toBeUndefined();
+  });
+
+  it("flips all pending releases, clears them, and records a flip-group with the prior active version as rollback target", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    // pending release + 直前 active (deploy_history[0]) を持つ traffic record。
+    const kv = memKv({
+      "pending-release::ippoan/auth-worker": {
+        schema_version: 1,
+        repo: "ippoan/auth-worker",
+        version_id: PENDING_VID,
+        tag: "v0.2.38",
+        preview_url: null,
+        uploaded_at: "2026-05-28T12:00:00Z",
+      },
+      "traffic::ippoan/auth-worker": {
+        schema_version: 4,
+        repo: "ippoan/auth-worker",
+        versions: [{ version_id: "prior-active-1111", percentage: 100 }],
+        deploy_history: [
+          { version_id: "prior-active-1111", tag: "v0.2.37", became_active_at: "2026-05-27T00:00:00Z" },
+        ],
+        reported_at: "2026-05-28T00:00:00Z",
+      },
+    });
+    const resp = await handleReleaseWavePendingReleaseFlipAll(
+      postRequest("/api/release-wave/pending-release/flip-all"),
+      pendingFlipEnv(kv),
+    );
+    expect(resp.status).toBe(303);
+    const dispatchCall = fetchSpy.mock.calls.find((c) =>
+      String(c[0]).includes("/repos/ippoan/auth-worker/dispatches"),
+    );
+    expect(dispatchCall).toBeDefined();
+    const body = JSON.parse(dispatchCall![1].body);
+    expect(body.event_type).toBe("release-wave-flip");
+    expect(body.client_payload).toMatchObject({
+      previewed_version_id: PENDING_VID,
+      pending_release: true,
+    });
+    // pending record は消える
+    expect(await getPendingRelease(kv, "ippoan/auth-worker")).toBeNull();
+    // flip-group が記録され、戻し先 = 直前 active version
+    const group = await getFlipGroup(kv);
+    expect(group).not.toBeNull();
+    expect(group!.items).toHaveLength(1);
+    expect(group!.items[0]).toMatchObject({
+      repo: "ippoan/auth-worker",
+      flipped_version_id: PENDING_VID,
+      rollback_to: "prior-active-1111",
+      rollback_tag: "v0.2.37",
+    });
+  });
+});
+
+// ============================================================================
+// /api/release-wave/pending-release/flip-group-rollback  (一括 rollback, Refs #237)
+// ============================================================================
+
+describe("handleReleaseWaveFlipGroupRollback", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("returns 404 when there is no flip-group", async () => {
+    const resp = await handleReleaseWaveFlipGroupRollback(
+      postRequest("/api/release-wave/pending-release/flip-group-rollback"),
+      pendingFlipEnv(memKv()),
+    );
+    expect(resp.status).toBe(404);
+  });
+
+  it("returns 409 and clears the group when no item has a rollback target", async () => {
+    const kv = memKv({
+      "flip-group::latest": {
+        schema_version: 1,
+        flipped_at: "2026-05-28T12:00:00Z",
+        actor: "op@example.com",
+        items: [
+          {
+            repo: "ippoan/auth-worker",
+            flipped_version_id: PENDING_VID,
+            flipped_tag: "v0.2.38",
+            rollback_to: null,
+            rollback_tag: null,
+          },
+        ],
+      },
+    });
+    const resp = await handleReleaseWaveFlipGroupRollback(
+      postRequest("/api/release-wave/pending-release/flip-group-rollback"),
+      pendingFlipEnv(kv),
+    );
+    expect(resp.status).toBe(409);
+    expect(await getFlipGroup(kv)).toBeNull();
+  });
+
+  it("dispatches traffic-rollback to the prior version for each group item, then clears the group", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const kv = memKv({
+      "flip-group::latest": {
+        schema_version: 1,
+        flipped_at: "2026-05-28T12:00:00Z",
+        actor: "op@example.com",
+        items: [
+          {
+            repo: "ippoan/auth-worker",
+            flipped_version_id: PENDING_VID,
+            flipped_tag: "v0.2.38",
+            rollback_to: "prior-active-1111",
+            rollback_tag: "v0.2.37",
+          },
+        ],
+      },
+    });
+    const resp = await handleReleaseWaveFlipGroupRollback(
+      postRequest("/api/release-wave/pending-release/flip-group-rollback"),
+      pendingFlipEnv(kv),
+    );
+    expect(resp.status).toBe(303);
+    const dispatchCall = fetchSpy.mock.calls.find((c) =>
+      String(c[0]).includes("/repos/ippoan/auth-worker/dispatches"),
+    );
+    expect(dispatchCall).toBeDefined();
+    const body = JSON.parse(dispatchCall![1].body);
+    expect(body.event_type).toBe("release-wave-traffic-rollback");
+    expect(body.client_payload).toMatchObject({
+      previewed_version_id: "prior-active-1111",
+      traffic_rollback: true,
+    });
+    // rollback dispatch 後に flip-group は消える
+    expect(await getFlipGroup(kv)).toBeNull();
   });
 });
