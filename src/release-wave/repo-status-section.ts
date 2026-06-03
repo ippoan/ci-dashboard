@@ -323,8 +323,9 @@ export function renderTrafficVersionsBlock(
           ),
         )
         .join("");
-      // 直前以前の active version への rollback ボタン行を続ける。
-      return versionRows + renderTrafficRollbackRow(repo, rec);
+      // 直前以前の active version への rollback ボタン + 表示中 no-traffic
+      // (zeroShown) の Flip ボタン行を続ける。
+      return versionRows + renderTrafficRollbackRow(repo, rec, zeroShown);
     })
     .join("");
 
@@ -351,7 +352,11 @@ export function renderTrafficVersionsBlock(
  * 現 active は traffic の最大 percentage version。deploy_history[0] が現 active と
  * 一致する想定だが、念のため active version_id を除いて候補を作る。
  */
-function renderTrafficRollbackRow(repo: string, rec: TrafficRecord): string {
+function renderTrafficRollbackRow(
+  repo: string,
+  rec: TrafficRecord,
+  promotable: TrafficVersion[],
+): string {
   const versions = rec.versions ?? [];
   const history = rec.deploy_history ?? [];
   const activeId = versions.find((v) => v.percentage > 0)?.version_id ?? null;
@@ -359,27 +364,14 @@ function renderTrafficRollbackRow(repo: string, rec: TrafficRecord): string {
   // 候補: 過去に active だった (deploy_history) が現 active でないもの。
   const candidates = history.filter((e) => e.version_id !== activeId);
 
-  // 候補外: 現存する 0% (no-traffic) で、まだ一度も active になっていない
-  // (= deploy_history に過去 active として載っていない) version。新しい順。
-  const historyIds = new Set(history.map((e) => e.version_id));
-  const nonActive = versions
-    .filter(
-      (v) =>
-        v.percentage <= 0 &&
-        v.version_id !== activeId &&
-        !historyIds.has(v.version_id),
-    )
-    .sort((a, b) => {
-      const ca = a.created_on ?? "";
-      const cb = b.created_on ?? "";
-      if (ca === cb) return 0;
-      if (!ca) return 1;
-      if (!cb) return -1;
-      return ca < cb ? 1 : -1; // 新しい順
-    });
+  // promotable = renderTrafficVersionsBlock が「行として表示する no-traffic
+  // version」(= active より新しい最新 0% = zeroShown)。flip ボタンの対象を
+  // これに揃えることで、行表示と flip ボタンの対象がずれない (古い / 隠した
+  // 0% を勝手にボタン化しない)。active 自身は念のため除く。Refs ippoan/ci-dashboard#237。
+  const noTraffic = promotable.filter((v) => v.version_id !== activeId);
 
-  // 候補も候補外も無ければ従来どおり行を出さない。
-  if (candidates.length === 0 && nonActive.length === 0) return "";
+  // 候補も no-traffic も無ければ従来どおり行を出さない。
+  if (candidates.length === 0 && noTraffic.length === 0) return "";
 
   const buttons = candidates
     .map((e) => {
@@ -403,17 +395,11 @@ function renderTrafficRollbackRow(repo: string, rec: TrafficRecord): string {
       ? `<div class="meta" style="margin-top:4px">過去に active だった version がまだないため、戻せる先がありません。</div>`
       : "";
 
-  // 0% (no-traffic / 一度も active になっていない) version も「Flip to 100%」で
-  // 再 flip できるようにする (Refs ippoan/ci-dashboard#237)。flip → rollback で
-  // no-traffic に戻った version が Pending releases にも rollback 候補にも出ず
-  // 再 flip できなくなる事故 (= 旧 rollback が pending-release を復活させなかった
-  // 名残) の救済経路。traffic-rollback endpoint は versions[] にある version を
-  // そのまま `wrangler versions deploy <id>@100%` するので、これで promote できる。
-  // 新しい順に最大 5 件をボタン表示、残りは件数のみ。
-  const NON_ACTIVE_SHOW = 5;
-  const shownNonActive = nonActive.slice(0, NON_ACTIVE_SHOW);
-  const moreNonActive = nonActive.length - shownNonActive.length;
-  const nonActiveButtons = shownNonActive
+  // 表示中の no-traffic (0%) version に「Flip to 100%」を出す (Refs ippoan/ci-dashboard#237)。
+  // flip → rollback で no-traffic に戻った version が Pending releases にも rollback
+  // 候補にも出ず再 flip できなくなる事故の救済経路。traffic-rollback endpoint は
+  // versions[] にある version をそのまま `wrangler versions deploy <id>@100%` する。
+  const flipButtons = noTraffic
     .map((v) => {
       const label = v.tag ? escapeHtml(v.tag) : escapeHtml(shortId(v.version_id));
       const when = escapeHtml(shortWhen(v.created_on));
@@ -429,11 +415,10 @@ function renderTrafficRollbackRow(repo: string, rec: TrafficRecord): string {
     })
     .join("");
   const nonActiveBlock =
-    nonActive.length > 0
+    noTraffic.length > 0
       ? `<div style="margin-top:6px">
                 <span class="meta">no-traffic version を 100% に flip:</span>
-                <div style="margin-top:4px">${nonActiveButtons}</div>
-                ${moreNonActive > 0 ? `<div class="meta" style="margin-top:2px">他${moreNonActive}件</div>` : ""}
+                <div style="margin-top:4px">${flipButtons}</div>
               </div>`
       : "";
 
