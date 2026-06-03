@@ -24,8 +24,10 @@ import {
 import {
   listPendingReleases,
   getFlipGroup,
+  computeUnifiedPending,
   type PendingReleaseRecord,
   type FlipGroupRecord,
+  type UnifiedPending,
 } from "./pending-release";
 import { getTrafficForRepos, type TrafficRecord } from "./traffic";
 
@@ -207,8 +209,11 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
       flipGroup = null;
     }
   }
+  // Pending releases は単一真実 (Refs #237): workers=traffic:: の no-traffic
+  // version / cloudrun=pending-release:: を統合し、Traffic セクションと一致させる。
+  const unifiedPending = computeUnifiedPending(trafficByRepo, pendingReleases);
   const pendingReleaseSection = renderPendingReleaseSection(
-    pendingReleases,
+    unifiedPending,
     flipGroup,
   );
 
@@ -524,7 +529,7 @@ export async function handleReleaseWaveDetailPage(
  * (= 「ここで単独リリースを flip できる」affordance を常設)。
  */
 function renderPendingReleaseSection(
-  records: PendingReleaseRecord[],
+  records: UnifiedPending[],
   flipGroup: FlipGroupRecord | null,
 ): string {
   const rows = records
@@ -535,22 +540,37 @@ function renderPendingReleaseSection(
         : `<span class="meta">—</span>`;
       const shortVid =
         r.version_id.length > 8 ? r.version_id.slice(0, 8) : r.version_id;
-      return `
-        <tr>
-          <td>${escapeHtml(r.repo)}</td>
-          <td class="meta">${escapeHtml(r.tag)}</td>
-          <td class="meta" title="${escapeHtml(r.version_id)}">${escapeHtml(shortVid)}…</td>
-          <td>${previewCell}</td>
-          <td class="meta">${escapeHtml(r.uploaded_at)}</td>
-          <td class="actions">
-            <form method="post" action="/api/release-wave/pending-release/flip" style="margin:0">
+      const tagCell = r.tag ? escapeHtml(r.tag) : `<span class="meta">—</span>`;
+      // flip 入口は source 別:
+      //  - traffic (workers): /traffic-rollback に version_id を渡して
+      //    `wrangler versions deploy <id>@100%`。
+      //  - pending (cloudrun 等): /pending-release/flip に repo を渡す
+      //    (handler が platform で routing、cloudrun は target_tag→pending-<tag>)。
+      const flipForm =
+        r.source === "traffic"
+          ? `<form method="post" action="/api/release-wave/traffic-rollback" style="margin:0">
               <input type="hidden" name="repo" value="${escapeHtml(r.repo)}">
+              <input type="hidden" name="version_id" value="${escapeHtml(r.version_id)}">
               <button type="submit"
                 title="Promote this no-traffic version to 100% (wrangler versions deploy ${escapeHtml(r.version_id)}@100%)">
                 Flip to 100%
               </button>
-            </form>
-          </td>
+            </form>`
+          : `<form method="post" action="/api/release-wave/pending-release/flip" style="margin:0">
+              <input type="hidden" name="repo" value="${escapeHtml(r.repo)}">
+              <button type="submit"
+                title="Promote this no-traffic release to 100% traffic">
+                Flip to 100%
+              </button>
+            </form>`;
+      return `
+        <tr>
+          <td>${escapeHtml(r.repo)}</td>
+          <td class="meta">${tagCell}</td>
+          <td class="meta" title="${escapeHtml(r.version_id)}">${escapeHtml(shortVid)}…</td>
+          <td>${previewCell}</td>
+          <td class="meta">${escapeHtml(r.uploaded_at)}</td>
+          <td class="actions">${flipForm}</td>
         </tr>`;
     })
     .join("");
@@ -579,15 +599,16 @@ function renderPendingReleaseSection(
         </thead>
         <tbody>${rows}</tbody>
       </table>`
-    : `<p class="meta">no-traffic でアップロード済みの単独リリースはありません。
-        v* tag を打つと frontend-ci がここに version を登録する。</p>`;
+    : `<p class="meta">flip 待ちの no-traffic version はありません。
+        v* tag を打つと no-traffic で deploy され、ここに出ます。</p>`;
 
   return `
     <div class="section">
       <h2>Pending releases (no-traffic)</h2>
-      <p class="meta">単独 <code>v*</code> リリースで <code>wrangler versions upload</code>
-        した no-traffic version。Flip で 100% traffic へ promote する。
-        Refs <a href="https://github.com/ippoan/ci-dashboard/issues/181">#181</a>.</p>
+      <p class="meta">flip 待ちの no-traffic version (= Cloudflare 実機 0% / cloudrun
+        pending revision)。Flip で 100% traffic へ promote する。Traffic セクションと
+        同じ単一真実 (traffic 由来) から導出。
+        Refs <a href="https://github.com/ippoan/ci-dashboard/issues/237">#237</a>.</p>
       ${body}
       ${renderFlipGroupRollback(flipGroup)}
     </div>`;
