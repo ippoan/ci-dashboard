@@ -612,19 +612,27 @@ describe("handlePendingReleaseWebhook", () => {
     expect(rec!.preview_url).toBeNull();
   });
 
-  it("rejects non-UUID version_id with 400", async () => {
+  it("accepts non-UUID version_id (cloudrun pending-<tag>) (Refs #237)", async () => {
+    // cloudrun は revision tag (pending-v0-0-79) を version_id に入れる。
+    // UUID 強制をやめたので 200 で受理し record を保存する。
     const kv = memKv();
     const { env } = fakeEnv({ compatKv: kv });
     const resp = await handlePendingReleaseWebhook(
       jsonRequest({
         url: PENDING_URL,
         secret: "expected-secret",
-        body: { repo: "ippoan/auth-worker", version_id: "not-a-uuid", tag: "v1.0.0" },
+        body: {
+          repo: "ippoan/rust-alc-api",
+          version_id: "pending-v0-0-79",
+          tag: "v0.0.79",
+        },
       }),
       env,
     );
-    expect(resp.status).toBe(400);
-    expect(await getPendingRelease(kv, "ippoan/auth-worker")).toBeNull();
+    expect(resp.status).toBe(200);
+    const rec = await getPendingRelease(kv, "ippoan/rust-alc-api");
+    expect(rec!.version_id).toBe("pending-v0-0-79");
+    expect(rec!.tag).toBe("v0.0.79");
   });
 
   it("rejects bad webhook secret with 401", async () => {
