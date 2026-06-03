@@ -31,6 +31,7 @@ import {
   getRepoReleaseStatuses,
   type RepoReleaseStatus,
 } from "./repo-release-status";
+import { nextPatchTag } from "../release-helpers";
 
 function escapeHtml(s: string): string {
   return s
@@ -91,7 +92,13 @@ export function renderStartWaveSection(
 
   const rows = candidates
     .map((s) => {
-      // target_tag の placeholder は最新 tag。未tag は v0.1.0 を例示。
+      // target_tag の prefill: 現 stable latest tag を patch +1 した値を value に
+      // 入れておく (= 手入力不要 + 異常 tag 防止)。s.latestTag は sortSemverDesc
+      // 由来で prerelease (`-wave-test-NN` / `-dev` / `-rc` 等) を含み得るが、
+      // nextPatchTag が stable semver 以外を null にするので prerelease は自動で
+      // 除外され value 空になる。value が無い (未tag / prerelease のみ) repo は
+      // 従来どおり placeholder のみ (operator が手で打つ)。
+      const prefill = s.latestTag ? (nextPatchTag(s.latestTag) ?? "") : "";
       const placeholder = s.latestTag ?? "v0.1.0";
       const id = `repo_${s.repo.replace(/[^a-zA-Z0-9]/g, "_")}`;
       const tagHint = s.hasTag
@@ -106,6 +113,7 @@ export function renderStartWaveSection(
           <td>${tagHint}</td>
           <td>
             <input type="text" name="target_tag__${escapeHtml(s.repo)}"
+              value="${escapeHtml(prefill)}"
               placeholder="${escapeHtml(placeholder)}"
               style="width:140px">
           </td>

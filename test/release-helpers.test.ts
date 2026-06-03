@@ -7,6 +7,8 @@ import {
   isSemverTag,
   previousTag,
   computeWarnings,
+  parseStableSemver,
+  nextPatchTag,
 } from "../src/release-helpers";
 
 describe("extractRefIssues", () => {
@@ -166,5 +168,61 @@ describe("computeWarnings", () => {
   it("closed state remains the sole warning regardless of labels", () => {
     const w = computeWarnings({ state: "closed", labels: ["bug", "regression"] });
     expect(w).toEqual(["already closed"]);
+  });
+});
+
+describe("parseStableSemver", () => {
+  it("parses v-prefixed and bare stable semver", () => {
+    expect(parseStableSemver("v0.0.76")).toEqual({
+      hasV: true,
+      major: 0,
+      minor: 0,
+      patch: 76,
+    });
+    expect(parseStableSemver("1.4.0")).toEqual({
+      hasV: false,
+      major: 1,
+      minor: 4,
+      patch: 0,
+    });
+  });
+
+  it("tolerates surrounding whitespace", () => {
+    expect(parseStableSemver("  v2.3.4  ")?.patch).toBe(4);
+  });
+
+  it("rejects prerelease / build suffixes", () => {
+    expect(parseStableSemver("v0.5.99-wave-test-08")).toBeNull();
+    expect(parseStableSemver("v1.2.3-dev")).toBeNull();
+    expect(parseStableSemver("v1.2.3-rc.1")).toBeNull();
+    expect(parseStableSemver("v1.2.3+build.5")).toBeNull();
+  });
+
+  it("rejects incomplete or junk tags", () => {
+    expect(parseStableSemver("v1.2")).toBeNull();
+    expect(parseStableSemver("v1")).toBeNull();
+    expect(parseStableSemver("dev-3")).toBeNull();
+    expect(parseStableSemver("")).toBeNull();
+  });
+});
+
+describe("nextPatchTag", () => {
+  it("increments the patch component, preserving the v prefix", () => {
+    expect(nextPatchTag("v0.0.76")).toBe("v0.0.77");
+    expect(nextPatchTag("v0.2.51")).toBe("v0.2.52");
+    expect(nextPatchTag("v1.9.9")).toBe("v1.9.10");
+    expect(nextPatchTag("2.0.0")).toBe("2.0.1");
+  });
+
+  it("returns null for prerelease tags (no bump → empty prefill)", () => {
+    expect(nextPatchTag("v0.5.99-wave-test-08")).toBeNull();
+    expect(nextPatchTag("v1.2.3-dev")).toBeNull();
+    expect(nextPatchTag("v1.2.3-rc.1")).toBeNull();
+  });
+
+  it("returns null for non-semver junk", () => {
+    expect(nextPatchTag("latest")).toBeNull();
+    expect(nextPatchTag("v1.2")).toBeNull();
+    expect(nextPatchTag("")).toBeNull();
   });
 });

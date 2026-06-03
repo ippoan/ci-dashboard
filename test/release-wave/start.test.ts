@@ -158,6 +158,55 @@ describe("renderStartWaveSection", () => {
     expect(html).not.toContain('value="ippoan/x"y"');
     expect(html).toContain("&quot;");
   });
+
+  it("prefills target_tag value with latest stable tag patch-bumped", () => {
+    const html = renderStartWaveSection([
+      status("ippoan/rust-alc-api", { latestTag: "v0.0.76" }),
+      status("ippoan/alc-app", { latestTag: "v0.2.51" }),
+    ]);
+    // value (not just placeholder) is the latest tag with patch +1
+    expect(html).toContain(
+      'name="target_tag__ippoan/rust-alc-api"\n              value="v0.0.77"',
+    );
+    expect(html).toContain(
+      'name="target_tag__ippoan/alc-app"\n              value="v0.2.52"',
+    );
+    // placeholder still shows the current latest tag
+    expect(html).toContain('placeholder="v0.0.76"');
+    expect(html).toContain('placeholder="v0.2.51"');
+  });
+
+  it("leaves prefill value empty when latest tag is a prerelease", () => {
+    // A polluted prerelease (`-wave-test-NN` / `-dev` / `-rc`) must NOT bump
+    // into a new stable tag — value stays empty, operator types manually.
+    const html = renderStartWaveSection([
+      status("ippoan/poll-1", { latestTag: "v0.5.99-wave-test-08" }),
+      status("ippoan/poll-2", { latestTag: "v1.2.3-dev" }),
+      status("ippoan/poll-3", { latestTag: "v1.2.3-rc.1" }),
+    ]);
+    expect(html).toContain(
+      'name="target_tag__ippoan/poll-1"\n              value=""',
+    );
+    expect(html).toContain(
+      'name="target_tag__ippoan/poll-2"\n              value=""',
+    );
+    expect(html).toContain(
+      'name="target_tag__ippoan/poll-3"\n              value=""',
+    );
+    // but the placeholder still surfaces the (prerelease) latest for context
+    expect(html).toContain('placeholder="v0.5.99-wave-test-08"');
+  });
+
+  it("leaves prefill value empty for repos with no tag", () => {
+    const html = renderStartWaveSection([
+      status("ippoan/fresh", { hasTag: false, latestTag: null }),
+    ]);
+    expect(html).toContain(
+      'name="target_tag__ippoan/fresh"\n              value=""',
+    );
+    //未tag repo keeps the v0.1.0 example placeholder
+    expect(html).toContain('placeholder="v0.1.0"');
+  });
 });
 
 describe("injectStartWaveSection", () => {
