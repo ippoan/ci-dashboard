@@ -4,6 +4,7 @@ import {
   handleReleaseWaveRollback,
   handleReleaseWaveAbort,
   handleReleaseWaveRetest,
+  handleReleaseWaveRetestConsumer,
   handleReleaseWavePendingReleaseFlip,
   handleReleaseWaveTrafficRollback,
   handleReleaseWaveBackendRollback,
@@ -446,6 +447,150 @@ describe("handleReleaseWaveRetest", () => {
       String(c[0]).includes("/dispatches"),
     );
     expect(dispatchCall).toBeUndefined();
+  });
+});
+
+// ============================================================================
+// /api/release-wave/retest-consumer  (Refs #157 / #137 — wave 非依存)
+// ============================================================================
+
+/** retest-consumer 用の env (hub は不要、COMPAT_KV のみ)。 */
+function retestConsumerEnv(compatKv?: KVNamespace): Env {
+  return {
+    RELEASE_WAVE_HUB: { idFromName: () => ({}), get: () => ({}) },
+    COMPAT_KV: compatKv,
+    CI_STATUS: memKv({ "auth-client-worker:gh-token": FRESH_TOKEN }),
+    INTERNAL_SHARED_SECRET: { get: async () => "secret" },
+  } as unknown as Env;
+}
+
+describe("handleReleaseWaveRetestConsumer", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("returns 405 on GET", async () => {
+    const env = retestConsumerEnv(redCompatKv());
+    const req = new Request(
+      "https://ci-dashboard.ippoan.org/api/release-wave/retest-consumer",
+      { method: "GET" },
+    );
+    const resp = await handleReleaseWaveRetestConsumer(req, env);
+    expect(resp.status).toBe(405);
+  });
+
+  it("returns 500 when COMPAT_KV unbound", async () => {
+    const env = retestConsumerEnv(undefined);
+    const resp = await handleReleaseWaveRetestConsumer(
+      postRequest("/api/release-wave/retest-consumer", {
+        formBody: { backend_repo: "ippoan/rust-alc-api", frontend: "ippoan/alc-app" },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(500);
+  });
+
+  it("returns 400 when backend_repo / frontend missing", async () => {
+    const env = retestConsumerEnv(redCompatKv());
+    const resp = await handleReleaseWaveRetestConsumer(
+      postRequest("/api/release-wave/retest-consumer", {
+        formBody: { backend_repo: "ippoan/rust-alc-api" },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(400);
+  });
+
+  it("returns 404 when backend has no deploy record", async () => {
+    const env = retestConsumerEnv(memKv());
+    const resp = await handleReleaseWaveRetestConsumer(
+      postRequest("/api/release-wave/retest-consumer", {
+        formBody: { backend_repo: "ippoan/ghost", frontend: "ippoan/alc-app" },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(404);
+  });
+
+  it("returns 404 when frontend is not a consumer of the backend", async () => {
+    const env = retestConsumerEnv(redCompatKv());
+    const resp = await handleReleaseWaveRetestConsumer(
+      postRequest("/api/release-wave/retest-consumer", {
+        formBody: { backend_repo: "ippoan/rust-alc-api", frontend: "ippoan/not-a-consumer" },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(404);
+  });
+
+  it("dispatches release-wave-retest WITHOUT wave_id for a no-wave backend and redirects to list", async () => {
+    const fetchSpy = vi
+      .fn()
+      .mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    // redCompatKv() の backend record は wave_id: null (= 単独 deploy)。
+    const env = retestConsumerEnv(redCompatKv());
+    const resp = await handleReleaseWaveRetestConsumer(
+      postRequest("/api/release-wave/retest-consumer", {
+        formBody: { backend_repo: "ippoan/rust-alc-api", frontend: "ippoan/alc-app" },
+      }),
+      env,
+    );
+    // 完了後は一覧へ 303
+    expect(resp.status).toBe(303);
+    expect(resp.headers.get("Location")).toBe("/release-wave");
+    const dispatchCall = fetchSpy.mock.calls.find((c) =>
+      String(c[0]).includes("/repos/ippoan/alc-app/dispatches"),
+    );
+    expect(dispatchCall).toBeDefined();
+    const body = JSON.parse(dispatchCall![1].body);
+    expect(body.event_type).toBe("release-wave-retest");
+    // wave_id は載らない (= 唯一の差分)。
+    expect(body.client_payload.wave_id).toBeUndefined();
+    expect(body.client_payload).toMatchObject({
+      backend_repo: "ippoan/rust-alc-api",
+      backend_image: "cur-img",
+      prod_version: "v1.2.10",
+    });
+  });
+
+  it("uses the explicit backend_image form field when provided", async () => {
+    const fetchSpy = vi
+      .fn()
+      .mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const env = retestConsumerEnv(redCompatKv());
+    const resp = await handleReleaseWaveRetestConsumer(
+      postRequest("/api/release-wave/retest-consumer", {
+        formBody: {
+          backend_repo: "ippoan/rust-alc-api",
+          frontend: "ippoan/alc-app",
+          backend_image: "explicit-img",
+        },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(303);
+    const dispatchCall = fetchSpy.mock.calls.find((c) =>
+      String(c[0]).includes("/dispatches"),
+    );
+    const body = JSON.parse(dispatchCall![1].body);
+    expect(body.client_payload.backend_image).toBe("explicit-img");
+  });
+
+  it("returns 502 when the dispatch fails", async () => {
+    const fetchSpy = vi
+      .fn()
+      .mockResolvedValue(new Response("boom", { status: 500 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const env = retestConsumerEnv(redCompatKv());
+    const resp = await handleReleaseWaveRetestConsumer(
+      postRequest("/api/release-wave/retest-consumer", {
+        formBody: { backend_repo: "ippoan/rust-alc-api", frontend: "ippoan/alc-app" },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(502);
   });
 });
 

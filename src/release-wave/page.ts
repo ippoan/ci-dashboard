@@ -647,11 +647,12 @@ function renderGlobalCompatibilitySection(
  * global (wave 非依存) Compatibility グラフの直下に、untested edge
  * (backend × frontend) ごとの "Re-test" ボタングリッドを描画する (Refs #157)。
  *
- * 各 backend の `wave_id` を使って既存 `/api/release-wave/<wave_id>/retest` に
- * `frontend` を POST する (= 新 endpoint を作らず wave 詳細ページと同じ
- * handler / dispatch 経路を流用する)。`wave_id` を持たない backend
- * (= 単独 deploy で wave 未紐付け) の edge は disabled ボタンにし、
- * tooltip で理由を示す。
+ * global グラフ自体が wave 非依存なので、retest も wave 非依存の
+ * `/api/release-wave/retest-consumer` に統一して POST する。これにより backend
+ * が単独 deploy (wave 未紐付け = `wave_id` null) でも retest できる
+ * (旧実装は wave-bound endpoint しか無く no-wave backend のボタンを disabled に
+ * していた。Refs #137 (A))。`backend_repo` + `frontend` を hidden field で渡し、
+ * backend image は handler 側が `backend::<repo>.current_image` を採用する。
  *
  * JS 不使用 (form POST のみ) なので strict CSP `default-src 'none'` のまま動く。
  */
@@ -662,18 +663,14 @@ function renderGlobalRetestButtons(compat: WaveCompatibility): string {
     if (reds.length === 0) continue;
     const buttons = reds
       .map((m) => {
-        if (!b.wave_id) {
-          // wave 未紐付けの backend は既存 retest endpoint を呼べない。
-          return `<button type="button" class="warn" disabled
-              title="${escapeHtml(b.backend_repo)} は wave に紐付いていないため (単独 deploy)、ここからの retest 不可。該当 wave で再実行するか backend を wave 経由で deploy してください。">
-              Re-test ${escapeHtml(m.frontend)}
-            </button>`;
-        }
-        const action = encodeURIComponent(b.wave_id);
-        return `<form method="post" action="/api/release-wave/${action}/retest" style="display:inline; margin:0">
+        const waveNote = b.wave_id
+          ? ` (wave ${escapeHtml(b.wave_id)})`
+          : " (no wave)";
+        return `<form method="post" action="/api/release-wave/retest-consumer" style="display:inline; margin:0">
+            <input type="hidden" name="backend_repo" value="${escapeHtml(b.backend_repo)}">
             <input type="hidden" name="frontend" value="${escapeHtml(m.frontend)}">
             <button type="submit" class="warn"
-              title="Re-test ${escapeHtml(m.frontend)} against ${escapeHtml(b.backend_repo)} の現 image (wave ${escapeHtml(b.wave_id)})">
+              title="Re-test ${escapeHtml(m.frontend)} against ${escapeHtml(b.backend_repo)} の現 image${waveNote}">
               Re-test ${escapeHtml(m.frontend)}
             </button>
           </form>`;

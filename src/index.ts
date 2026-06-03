@@ -42,6 +42,7 @@ import {
   handleReleaseWaveRollback,
   handleReleaseWaveAbort,
   handleReleaseWaveRetest,
+  handleReleaseWaveRetestConsumer,
   handleReleaseWavePendingReleaseFlip,
   handleReleaseWaveTrafficRollback,
   handleReleaseWaveBackendRollback,
@@ -288,6 +289,15 @@ app.post("/api/release-wave/:wave_id/abort", (c) =>
 // (Refs #157 Phase B)。form field `frontend` で 1 件指定可、無ければ全 red。
 app.post("/api/release-wave/:wave_id/retest", (c) =>
   handleReleaseWaveRetest(c.req.raw, c.env, c.req.param("wave_id")),
+);
+// wave 非依存の単発 retest (Refs #157 / #137)。global Compatibility グラフの
+// 「no wave」backend consumer から retest できるよう、wave_id を取らず
+// form field `backend_repo` + `frontend` (+ 任意 `backend_image`) で
+// release-wave-retest を 1 件 dispatch する。
+// 静的セグメント `retest-consumer` は上の `:wave_id/retest` (2 セグメント) と
+// セグメント数が違うため衝突しない。
+app.post("/api/release-wave/retest-consumer", (c) =>
+  handleReleaseWaveRetestConsumer(c.req.raw, c.env),
 );
 // 単独 v* リリースの no-traffic version を 100% へ flip (Refs #181 / #174)。
 // wave を起こさず form field `repo` の pending-release record を promote する。
