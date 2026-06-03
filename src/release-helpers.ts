@@ -79,6 +79,43 @@ export function isSemverTag(tag: string): boolean {
   return SEMVER_RE.test(tag);
 }
 
+// A *stable* release tag: `v?MAJOR.MINOR.PATCH` with no prerelease/build
+// suffix. Anchored at end so `v0.5.99-wave-test-08`, `v1.2.3-dev`, `v1.2.3-rc.1`
+// etc. are rejected — those must never be treated as the latest stable release
+// when prefilling the next target tag (a `-wave-test-NN` tag slipping through
+// here is exactly what polluted the npm `latest` dist-tag before). Returns the
+// parsed components (and whether the tag carried a leading `v`), or null for
+// non-stable / non-semver input.
+const STABLE_SEMVER_RE = /^(v?)(\d+)\.(\d+)\.(\d+)$/;
+
+export interface ParsedSemver {
+  hasV: boolean;
+  major: number;
+  minor: number;
+  patch: number;
+}
+
+export function parseStableSemver(tag: string): ParsedSemver | null {
+  const m = tag.trim().match(STABLE_SEMVER_RE);
+  if (!m) return null;
+  return {
+    hasV: m[1] === "v",
+    major: Number(m[2]),
+    minor: Number(m[3]),
+    patch: Number(m[4]),
+  };
+}
+
+// Given a stable semver tag, return the same tag with patch incremented by one
+// (preserving the `v` prefix), e.g. `v0.0.76 -> v0.0.77`, `v0.2.51 -> v0.2.52`,
+// `1.4.0 -> 1.4.1`. Returns null when `tag` is not a stable semver (prerelease
+// suffix, missing component, or junk) — callers fall back to an empty prefill.
+export function nextPatchTag(tag: string): string | null {
+  const p = parseStableSemver(tag);
+  if (!p) return null;
+  return `${p.hasV ? "v" : ""}${p.major}.${p.minor}.${p.patch + 1}`;
+}
+
 function compareTagsDesc(a: string, b: string): number {
   const ma = a.match(SEMVER_RE);
   const mb = b.match(SEMVER_RE);
