@@ -263,6 +263,7 @@ export function renderTrafficVersionsBlock(
     v: TrafficVersion,
     first: boolean,
     extra: number,
+    rollback: { cell: string; rowspan: number } | null,
   ): string => {
     // 100% = 緑 / 0% = 灰 / その他 (canary 等) = 黄。
     const color = v.percentage >= 100 ? GREEN : v.percentage <= 0 ? GRAY : AMBER;
@@ -275,12 +276,18 @@ export function renderTrafficVersionsBlock(
       : "";
     const vid = `${tagPart}<code title="${escapeHtml(v.version_id)}">${escapeHtml(shortId(v.version_id))}</code>`;
     const when = `<span class="meta" title="${escapeHtml(v.created_on ?? "")}">${escapeHtml(shortWhen(v.created_on))}</span>`;
+    // rollback は repo 単位なので、先頭 version 行にだけ rowspan セルを置き、
+    // version 行と同じ行に並べる (別 colspan 行にはしない)。残り行には td 無し。
+    const rollbackTd = rollback
+      ? `<td rowspan="${rollback.rowspan}">${rollback.cell}</td>`
+      : "";
     return `
             <tr>
               <td>${first ? escapeHtml(repo) : ""}</td>
               <td>${pctBadge}</td>
               <td>${vid}</td>
               <td>${when}</td>
+              ${rollbackTd}
             </tr>`;
   };
 
@@ -320,6 +327,11 @@ export function renderTrafficVersionsBlock(
         return ca < cb ? 1 : -1;
       });
 
+      // 直前以前の active version への rollback UI を先頭 version 行と同じ行に置く
+      // (no-traffic version の flip は Pending releases に一本化、Refs #237)。
+      // 候補が無ければ "—" を出して列を揃える。
+      const rollbackInner = renderTrafficRollbackCell(repo, rec);
+      const rollbackCell = rollbackInner || `<span class="meta">—</span>`;
       const versionRows = shown
         .map((v, i) =>
           versionRow(
@@ -328,12 +340,12 @@ export function renderTrafficVersionsBlock(
             i === 0,
             // 余剰件数は最新 0% (= zeroShown) の行にだけ付ける。
             v === zeroShown[0] ? zeroExtra : 0,
+            // rollback セルは先頭行に rowspan で 1 つだけ。
+            i === 0 ? { cell: rollbackCell, rowspan: shown.length } : null,
           ),
         )
         .join("");
-      // 直前以前の active version への rollback ボタン行を続ける
-      // (no-traffic version の flip は Pending releases に一本化、Refs #237)。
-      return versionRows + renderTrafficRollbackRow(repo, rec);
+      return versionRows;
     })
     .join("");
 
@@ -341,26 +353,27 @@ export function renderTrafficVersionsBlock(
     <div style="margin-top:10px">
       <strong class="meta">Traffic (version split)</strong>
       <table style="margin-top:6px">
-        <thead><tr><th>Repo</th><th>%</th><th>Tag / Version</th><th>Deployed / Uploaded (UTC)</th></tr></thead>
+        <thead><tr><th>Repo</th><th>%</th><th>Tag / Version</th><th>Deployed / Uploaded (UTC)</th><th>Rollback</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </div>`;
 }
 
 /**
- * 1 repo の Traffic 行に続けて、rollback 行を返す (Refs #196)。
+ * 1 repo の Traffic 行に並べる rollback セルの中身を返す (Refs #196)。
  *
  * - rollback **候補** = `deploy_history` のうち「現 active 以外」(= 過去に active
- *   だった version)。各候補に `Rollback to <tag/id>` ボタンを出す。
- * - rollback **候補外** = `versions` のうち 0% (no-traffic) でまだ一度も active に
- *   なっていない version (= deploy_history に載っていない)。rollback 先になれない
- *   が、「なぜボタンが無いか」を画面で分かるよう理由付きで併記する。
- * - 候補も候補外も無ければ "" (Traffic 行が 1 version だけ等)。
+ *   だった version)。select の option に列挙し、1 ボタンで戻す。
+ * - 候補が無ければ "" (Traffic 行が 1 version だけ等)。呼び出し側で "—" 等に
+ *   フォールバックして列を揃える。
+ *
+ * 返すのは `<form>` 単体 (`<tr>`/`<td>` ラッパ無し) で、version 行の rollback 列に
+ * rowspan セルとして埋め込まれる。
  *
  * 現 active は traffic の最大 percentage version。deploy_history[0] が現 active と
  * 一致する想定だが、念のため active version_id を除いて候補を作る。
  */
-function renderTrafficRollbackRow(repo: string, rec: TrafficRecord): string {
+function renderTrafficRollbackCell(repo: string, rec: TrafficRecord): string {
   const versions = rec.versions ?? [];
   const history = rec.deploy_history ?? [];
   const activeId = versions.find((v) => v.percentage > 0)?.version_id ?? null;
@@ -369,8 +382,8 @@ function renderTrafficRollbackRow(repo: string, rec: TrafficRecord): string {
   const candidates = history.filter((e) => e.version_id !== activeId);
 
   // no-traffic (0%) version の flip は「Pending releases」セクションに一本化した
-  // (Refs ippoan/ci-dashboard#237)。Traffic セクションの本行は「過去に active
-  // だった version へ戻す」rollback 専用。戻し先が無ければ行を出さない。
+  // (Refs ippoan/ci-dashboard#237)。Traffic セクションの本セルは「過去に active
+  // だった version へ戻す」rollback 専用。戻し先が無ければ空を返す。
   if (candidates.length === 0) return "";
 
   // 候補が増えると button 横並びが画面を埋めるので、select で 1 つ選んで 1 ボタンで
@@ -383,11 +396,7 @@ function renderTrafficRollbackRow(repo: string, rec: TrafficRecord): string {
     })
     .join("");
 
-  return `
-            <tr>
-              <td></td>
-              <td colspan="3">
-                <form method="post" action="/api/release-wave/traffic-rollback"
+  return `<form method="post" action="/api/release-wave/traffic-rollback"
                   style="margin:0;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
                   <input type="hidden" name="repo" value="${escapeHtml(repo)}">
                   <span class="meta">Rollback to:</span>
@@ -396,9 +405,7 @@ function renderTrafficRollbackRow(repo: string, rec: TrafficRecord): string {
                     title="${escapeHtml(repo)} を選択した version に即 100% で戻す (wrangler versions deploy <id>@100%)">
                     Rollback
                   </button>
-                </form>
-              </td>
-            </tr>`;
+                </form>`;
 }
 
 /**
@@ -438,12 +445,16 @@ export function renderBackendRollbackBlock(
     .filter((b) => !workerRepos?.has(b.backend_repo))
     .map((b) => {
       const traffic = trafficByRepo?.get(b.backend_repo);
+      // rollback UI は traffic/fallback 行の先頭に rowspan セルとして並べる
+      // (別 colspan 行にはしない)。候補が無ければ "—" で列を揃える。
+      const rollbackInner = renderBackendRollbackCell(b);
+      const rollbackCell = rollbackInner || `<span class="meta">—</span>`;
       // 実 traffic split (GCP 実態) があれば優先。無ければ current_image fallback。
       const head = hasBackendTraffic(traffic)
-        ? renderBackendTrafficRows(b.backend_repo, traffic!)
-        : renderBackendActiveRow(b);
+        ? renderBackendTrafficRows(b.backend_repo, traffic!, rollbackCell)
+        : renderBackendActiveRow(b, rollbackCell);
       if (!head) return ""; // traffic も current_image も無い record は出さない
-      return head + renderBackendRollbackRow(b);
+      return head;
     })
     .filter((r) => r !== "")
     .join("");
@@ -457,7 +468,7 @@ export function renderBackendRollbackBlock(
         tag push → no-traffic deploy (新 0%) → Flip (新 100%) 運用なので、Flip 前は
         「旧 100% + 新 pending 0%」が並ぶ。revision / image sha は hover で full。</p>
       <table style="margin-top:6px">
-        <thead><tr><th>Backend repo</th><th>%</th><th>Revision / Image / Tag</th><th>When (UTC)</th></tr></thead>
+        <thead><tr><th>Backend repo</th><th>%</th><th>Revision / Image / Tag</th><th>When (UTC)</th><th>Rollback</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </div>`;
@@ -478,6 +489,7 @@ function hasBackendTraffic(t: BackendTrafficRecord | undefined): boolean {
 function renderBackendTrafficRows(
   repo: string,
   traffic: BackendTrafficRecord,
+  rollbackCell: string,
 ): string {
   const multiService = traffic.services.length > 1;
   const flat = traffic.services.flatMap((svc) =>
@@ -502,12 +514,16 @@ function renderBackendTrafficRows(
       const tagPart = rev.tag
         ? ` <span class="meta">${escapeHtml(rev.tag)}</span>`
         : "";
+      // rollback セルは先頭行に rowspan で 1 つだけ並べる。
+      const rollbackTd =
+        i === 0 ? `<td rowspan="${flat.length}">${rollbackCell}</td>` : "";
       return `
             <tr>
               <td>${i === 0 ? escapeHtml(repo) : ""}</td>
               <td>${pctBadge}</td>
               <td>${svcPart}${revCode}${tagPart}</td>
               <td><span class="meta">—</span></td>
+              ${rollbackTd}
             </tr>`;
     })
     .join("");
@@ -521,7 +537,10 @@ function renderBackendTrafficRows(
  * hover) に分けて markup し、「どれが ver でどれが sha か」を一目で区別できる
  * ようにする (= 旧 `Current` 列で tag と image が `·` 区切りで混在していた問題)。
  */
-function renderBackendActiveRow(b: WaveBackendCompat): string {
+function renderBackendActiveRow(
+  b: WaveBackendCompat,
+  rollbackCell: string,
+): string {
   const image = b.current_image;
   if (!image) return "";
   const tagPart = b.current_tag
@@ -535,14 +554,18 @@ function renderBackendActiveRow(b: WaveBackendCompat): string {
               <td><span class="badge" style="background:${GREEN}">100%</span></td>
               <td>${tagPart}${imgCode}</td>
               <td>${when}</td>
+              <td>${rollbackCell}</td>
             </tr>`;
 }
 
 /**
- * 1 backend の rollback 行 (deploy_history の「現 active 以外」)。候補無しなら ""。
+ * 1 backend の rollback セルの中身 (deploy_history の「現 active 以外」)。候補無しなら ""。
  * frontend の Traffic rollback と同じ方針: 過去 revision を即 100% に戻す。
+ *
+ * 返すのは `<form>` 単体 (`<tr>`/`<td>` ラッパ無し) で、traffic/fallback 行の
+ * rollback 列に rowspan セルとして埋め込まれる。
  */
-function renderBackendRollbackRow(b: WaveBackendCompat): string {
+function renderBackendRollbackCell(b: WaveBackendCompat): string {
   const history = b.deploy_history ?? [];
   const candidates = history.filter((e) => e.image !== b.current_image);
   if (candidates.length === 0) return "";
@@ -557,11 +580,7 @@ function renderBackendRollbackRow(b: WaveBackendCompat): string {
     })
     .join("");
 
-  return `
-            <tr>
-              <td></td>
-              <td colspan="3">
-                <form method="post" action="/api/release-wave/backend-rollback"
+  return `<form method="post" action="/api/release-wave/backend-rollback"
                   style="margin:0;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
                   <input type="hidden" name="repo" value="${escapeHtml(b.backend_repo)}">
                   <span class="meta">Rollback to:</span>
@@ -570,9 +589,7 @@ function renderBackendRollbackRow(b: WaveBackendCompat): string {
                     title="${escapeHtml(b.backend_repo)} の Cloud Run traffic を選択した revision に即 100% で戻す">
                     Rollback
                   </button>
-                </form>
-              </td>
-            </tr>`;
+                </form>`;
 }
 
 /**

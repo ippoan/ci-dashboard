@@ -389,6 +389,11 @@ describe("renderTrafficVersionsBlock", () => {
     expect(html).toContain("v0.2.49 (");
     // 現 active (cur) は戻し先候補にしない (option に出さない)。
     expect(html).not.toContain('value="cur"');
+    // rollback は version 行と同じ行 (Rollback 列の rowspan セル) に並ぶ。
+    // 旧実装の別 colspan 行は廃止した。
+    expect(html).toContain("<th>Rollback</th>");
+    expect(html).toContain('<td rowspan="1">');
+    expect(html).not.toContain('colspan="3"');
   });
 
   it("renders no Rollback button when deploy_history has only the active version", () => {
@@ -470,6 +475,10 @@ describe("renderBackendRollbackBlock", () => {
     expect(html).toContain("v1.4.1 (");
     // 現 active (00042) は戻し先候補にしない (option value に出さない)。
     expect(html).not.toContain('value="rust-alc-api-00042-abc"');
+    // rollback は traffic/fallback 行と同じ行 (Rollback 列) に並ぶ。
+    // 旧実装の別 colspan 行は廃止した。
+    expect(html).toContain("<th>Rollback</th>");
+    expect(html).not.toContain('colspan="3"');
   });
 
   it("shows the current active row even without rollback candidates (deploy 直後で履歴 1 件)", () => {
