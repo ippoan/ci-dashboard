@@ -133,6 +133,56 @@ export type RpcResult<T> =
 export class ReleaseWaveHub extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
+    // Hibernatable WebSocket の keep-alive。CIDashboardHub (`src/hub.ts`) と
+    // 同じく ping → pong を runtime 内で自動応答させる (= wake させずに済む)。
+    this.ctx.setWebSocketAutoResponse(
+      new WebSocketRequestResponsePair("ping", "pong"),
+    );
+  }
+
+  // ============ live update (Hibernatable WebSocket) ===============
+
+  /**
+   * `/release-wave` ページの live 更新用 endpoint (Refs #275)。
+   *
+   *   GET /ws → WebSocketPair を accept して 101 を返す。以後この DO の
+   *   state が変わる (= `saveWave` が走る) たびに `broadcast()` が「変わった
+   *   よ」シグナルを送り、ブラウザ側 `live.js` が `location.reload()` する。
+   *
+   * Hibernatable WebSocket なのでアイドル中は hibernate され DO 課金ゼロ。
+   * 表示は既存 SSR をそのまま使うため、ここでは差分 payload を作らず固定
+   * 文字列 (`"reload"`) を流すだけにしている (XSS 面を増やさない)。
+   */
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    if (url.pathname === "/ws") {
+      const pair = new WebSocketPair();
+      const [client, server] = Object.values(pair) as [WebSocket, WebSocket];
+      this.ctx.acceptWebSocket(server);
+      return new Response(null, { status: 101, webSocket: client });
+    }
+    return new Response("Not Found", { status: 404 });
+  }
+
+  /** 接続中の全 WebSocket に「変わった」シグナルを送る。 */
+  broadcast(data = "reload"): void {
+    for (const ws of this.ctx.getWebSockets()) {
+      try {
+        ws.send(data);
+      } catch {
+        // client が既に切断済み — 無視する。
+      }
+    }
+  }
+
+  async webSocketMessage(_ws: WebSocket, _message: string | ArrayBuffer): Promise<void> {}
+
+  async webSocketClose(ws: WebSocket, _code: number, _reason: string): Promise<void> {
+    ws.close();
+  }
+
+  async webSocketError(ws: WebSocket, _error: unknown): Promise<void> {
+    ws.close();
   }
 
   // ============ life-cycle =========================================
@@ -403,6 +453,10 @@ export class ReleaseWaveHub extends DurableObject<Env> {
 
   private async saveWave(state: WaveState): Promise<void> {
     await this.ctx.storage.put(waveKey(state.wave_id), state);
+    // 全 state 更新 (start/approve/flipReport/rollback/abort/fail/
+    // contractApplied + compat warning) は saveWave を必ず通るので、ここ一点で
+    // 全イベントを拾って live ページに「変わった」シグナルを送る (Refs #275)。
+    this.broadcast();
   }
 
   /** 全 wave を storage から取り出す (内部 helper)。listing 順は呼び出し側で sort。 */

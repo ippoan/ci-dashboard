@@ -99,15 +99,18 @@ function htmlResponse(body: string, status = 200): Response {
       // キャッシュ制御は response header 側で担保する。
       "Cache-Control": "no-store, must-revalidate",
       // Defense in depth against XSS:
-      // - `script-src 'none'` で <script> / event handler 経由の実行をブロック
+      // - `script-src 'self'` で **外部ファイル 1 個** (/release-wave/live.js) のみ
+      //   許可。inline JS / event handler 経由の実行は引き続き全ブロックされる
+      //   ため injected script は動かない (Refs #275: live 更新を最小緩和で実現)
       // - `style-src 'self' 'unsafe-inline'` は本ページが inline <style> を
       //   使うため許可 (= injected style での data exfil は別軸の懸念だが、
       //   本ページの content は admin trusted DO state なのでバランス内)
       // - `default-src 'none'` で他リソース読み込みを全 deny
-      // - `connect-src 'none'` で fetch / XHR 全 deny (本ページに JS 無し)
+      // - `connect-src 'self'` で同一オリジン wss (= live 更新 WebSocket) のみ許可。
+      //   外部 origin への fetch / XHR / WS は引き続き deny
       // - preview link は target=_blank で別タブに飛ばすため frame-src 不要
       "Content-Security-Policy":
-        "default-src 'none'; style-src 'self' 'unsafe-inline'; connect-src 'none'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+        "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
       "X-Content-Type-Options": "nosniff",
       "Referrer-Policy": "no-referrer",
     },
@@ -496,6 +499,7 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
   <meta charset="utf-8">
   <title>Release Waves</title>
   <style>${COMMON_STYLES}${TAB_STYLES}</style>
+  <script src="/release-wave/live.js" defer></script>
 </head>
 <body>
   <div class="container">
@@ -702,6 +706,7 @@ export async function handleReleaseWaveDetailPage(
   <meta charset="utf-8">
   <title>Wave ${escapeHtml(w.wave_id)} &mdash; ci-dashboard</title>
   <style>${COMMON_STYLES}${TAB_STYLES}</style>
+  <script src="/release-wave/live.js" defer></script>
 </head>
 <body>
   <div class="container">
