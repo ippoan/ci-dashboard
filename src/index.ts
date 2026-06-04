@@ -17,7 +17,10 @@ import { handleRecheck } from "./recheck";
 import { handleSecretGenPage } from "./secret-gen-page";
 import { handleLaunch } from "./launch";
 import { handleTagRelease } from "./tag-release";
-import { handleReleaseWaveTagRelease } from "./release-wave/tag-release-action";
+import {
+  handleReleaseWaveTagRelease,
+  handleReleaseWaveTagReleaseAll,
+} from "./release-wave/tag-release-action";
 import { handleReleaseWaveListPageWithRepoStatus } from "./release-wave/repo-status-section";
 import { handleMcpRequest } from "./mcp/server";
 import {
@@ -200,6 +203,11 @@ app.post("/api/tag-release", (c) => handleTagRelease(c.req.raw, c.env));
 // 303 で /release-wave へ戻す。
 app.post("/api/release-wave/tag-release", (c) =>
   handleReleaseWaveTagRelease(c.req.raw, c.env),
+);
+// Compatibility グラフの「⚡ Tag Release all」: form field `repos` (カンマ区切り)
+// の tag-release.yml をまとめて dispatch する。
+app.post("/api/release-wave/tag-release-all", (c) =>
+  handleReleaseWaveTagReleaseAll(c.req.raw, c.env),
 );
 
 // Recheck

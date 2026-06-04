@@ -169,6 +169,39 @@ describe("renderCompatTagReleaseButtons", () => {
     expect(html.match(/Tag Release: ippoan\/a/g)?.length).toBe(1);
   });
 
+  it("renders a 一括 Tag Release all button for 2+ releasable repos", () => {
+    const html = renderCompatTagReleaseButtons(
+      ["ippoan/a", "ippoan/b", "ippoan/c"],
+      new Set(),
+    );
+    expect(html).toContain("⚡ Tag Release all (3)");
+    expect(html).toContain('action="/api/release-wave/tag-release-all"');
+    // hidden field に release 可能 repo を sort 済みカンマ区切りで載せる
+    expect(html).toContain('name="repos" value="ippoan/a,ippoan/b,ippoan/c"');
+  });
+
+  it("excludes up-to-date repos from the 一括 Tag Release all set", () => {
+    const statusByRepo = new Map([
+      ["ippoan/a", status({ repo: "ippoan/a", hasTag: true, latestTag: "v1", behind: 0 })],
+      ["ippoan/b", status({ repo: "ippoan/b", hasTag: true, latestTag: "v1", behind: 3 })],
+      ["ippoan/c", status({ repo: "ippoan/c", hasTag: true, latestTag: "v1", behind: 5 })],
+    ]);
+    const html = renderCompatTagReleaseButtons(
+      ["ippoan/a", "ippoan/b", "ippoan/c"],
+      new Set(),
+      statusByRepo,
+    );
+    // a は最新なので一括対象から外れ、b/c の 2 件だけ
+    expect(html).toContain("⚡ Tag Release all (2)");
+    expect(html).toContain('name="repos" value="ippoan/b,ippoan/c"');
+  });
+
+  it("omits the 一括 Tag Release all button when only one repo is releasable", () => {
+    const html = renderCompatTagReleaseButtons(["ippoan/only"], new Set());
+    expect(html).not.toContain("Tag Release all");
+    expect(html).toContain("Tag Release: ippoan/only");
+  });
+
   it("returns empty string when every repo is tagless", () => {
     const html = renderCompatTagReleaseButtons(
       ["ippoan/ci-dashboard"],

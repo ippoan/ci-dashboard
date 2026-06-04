@@ -171,42 +171,8 @@ function hubStub(env: Env): DurableObjectStub<ReleaseWaveHub> {
 }
 
 // ----------------------------------------------------------------------------
-// Wave 一覧の絞り込み + frontend 単位の追跡
+// frontend 単位の追跡
 // ----------------------------------------------------------------------------
-
-/** in-progress (= 常に一覧に出す) state。terminal はそれ以外。 */
-const ACTIVE_STATES: ReadonlySet<WaveStateName> = new Set([
-  "staging",
-  "pending-approval",
-  "flipping",
-]);
-
-/**
- * 一覧に出す wave を絞る。
- *
- * - active (staging / pending-approval / flipping) は常に表示。
- * - terminal (flipped / failed / aborted / rolled-back) のうち、最新の成功
- *   デプロイ (= 最も新しい flipped wave) より **前に started した** wave は隠す。
- *   成功デプロイが起きるたびに、それ以前の失敗・成功履歴が一覧から畳まれる
- *   (= 古い fail / stale preview link がいつまでも残らない)。
- * - flipped wave が 1 つも無ければ cutoff 無し = 全件表示 (deploy 前は隠さない)。
- *
- * 隠した wave も DO には残るので `/release-wave/<id>` 直リンクで参照可能。
- */
-function visibleWaves(waves: WaveState[]): WaveState[] {
-  // 最新の flipped の started_at を cutoff にする (sort 順に依存せず max を取る)。
-  let cutoff: string | null = null;
-  for (const w of waves) {
-    if (w.state === "flipped" && (cutoff === null || w.started_at > cutoff)) {
-      cutoff = w.started_at;
-    }
-  }
-  if (cutoff === null) return waves;
-  const c = cutoff;
-  return waves.filter(
-    (w) => ACTIVE_STATES.has(w.state) || w.started_at >= c,
-  );
-}
 
 /** frontend (repo) 1 つの追跡サマリ。`computeFrontendTracks` が wave 群から導出。 */
 interface FrontendTrack {
@@ -338,78 +304,6 @@ function renderFrontendSection(tracks: FrontendTrack[]): string {
     </div>`;
 }
 
-/** stage / flip phase の色付きセル。 */
-function phaseCell(s: string): string {
-  return s === "done"
-    ? `<span class="ok">done</span>`
-    : s === "failed"
-    ? `<span class="err">failed</span>`
-    : `<span class="pending">pending</span>`;
-}
-
-/**
- * 1 wave を repo (front) ごとの行に分解して描画する。
- *
- * wave 共通セル (Wave ID / State / Started At / Flip Policy / Actions) は
- * 先頭 repo 行に rowspan=repo数 で持たせ、Repo / Preview / Stage / Flip は front
- * ごとに 1 行ずつ出す。repo が 0 件の wave は 1 行 (front 列は "—")。
- */
-function renderWaveRows(w: WaveState): string {
-  // 一括 flip = Approve & Flip。pending-approval の時だけ有効。
-  // 一覧では force を付けない (compat gate ブロック時は失敗 → 詳細ページで
-  // override する運用)。CSP 上 JS 無しで POST form として動かす。
-  const canApprove = w.state === "pending-approval";
-  const n = Math.max(1, w.repos.length);
-  const flipButton = `
-    <form method="post" action="/api/release-wave/${encodeURIComponent(w.wave_id)}/approve" style="margin:0">
-      <button type="submit" ${canApprove ? "" : "disabled"}
-        title="Approve & flip this wave (enabled only in pending-approval; no compat-gate override here)">
-        Approve &amp; Flip
-      </button>
-    </form>`;
-
-  // 先頭行にだけ出す wave 共通セル (rowspan で全 front 行をまたぐ)。
-  const waveCells = `
-    <td rowspan="${n}"><a href="/release-wave/${encodeURIComponent(w.wave_id)}">${escapeHtml(w.wave_id)}</a></td>
-    <td rowspan="${n}"><span class="badge" style="background:${stateColor(w.state)}">${escapeHtml(w.state)}</span></td>
-    <td rowspan="${n}" class="meta">${escapeHtml(w.started_at)}</td>
-    <td rowspan="${n}" class="meta">${escapeHtml(w.flip_policy)}</td>`;
-  const actionCell = `<td rowspan="${n}" class="actions">${flipButton}</td>`;
-
-  if (w.repos.length === 0) {
-    return `
-      <tr>
-        ${waveCells}
-        <td><span class="meta">—</span></td>
-        <td><span class="meta">—</span></td>
-        <td><span class="meta">—</span></td>
-        <td><span class="meta">—</span></td>
-        ${actionCell}
-      </tr>`;
-  }
-
-  return w.repos
-    .map((r, idx) => {
-      const sha = r.head_sha ? escapeHtml(r.head_sha.slice(0, 7)) : "?";
-      const safe = safeHttpUrl(r.preview_url);
-      // preview は front ごとに分けて出す。link 化できる時は preview リンク +
-      // sha、無ければ sha のみ (image を識別できるよう常に出す)。
-      const previewCell = safe
-        ? `<a href="${escapeHtml(safe)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(safe)}">preview</a> <span class="meta">${sha}</span>`
-        : `<span class="meta">${sha}</span>`;
-      return `
-        <tr>
-          ${idx === 0 ? waveCells : ""}
-          <td>${escapeHtml(r.repo)}</td>
-          <td class="preview-inline">${previewCell}</td>
-          <td>${phaseCell(r.stage_status)}</td>
-          <td>${phaseCell(r.flip_status)}</td>
-          ${idx === 0 ? actionCell : ""}
-        </tr>`;
-    })
-    .join("");
-}
-
 // ----------------------------------------------------------------------------
 // GET /release-wave  →  全 wave 一覧
 // ----------------------------------------------------------------------------
@@ -467,31 +361,27 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
       trafficByRepo = new Map();
     }
   }
+  // Pending releases は単一真実 (Refs #237): workers=traffic:: の no-traffic
+  // version / cloudrun=pending-release:: を統合し、Traffic セクションと一致させる。
+  // compat section の「Staged previews」内 ⚡ Flip all ボタンの出し分けに件数を使う
+  // ため、compatSection より先に算出する。
+  const unifiedPending = computeUnifiedPending(trafficByRepo, pendingReleases);
   const compatSection = renderGlobalCompatibilitySection(
     globalCompat,
     buildActiveWaveInfo(waves),
     trafficByRepo,
+    unifiedPending.length,
   );
-
-  // Pending releases は単一真実 (Refs #237): workers=traffic:: の no-traffic
-  // version / cloudrun=pending-release:: を統合し、Traffic セクションと一致させる。
-  const unifiedPending = computeUnifiedPending(trafficByRepo, pendingReleases);
   const pendingReleaseSection = renderPendingReleaseSection(
     unifiedPending,
     flipGroup,
   );
 
-  // frontend (repo) 単位の追跡セクション (全 wave から導出、wave 絞り込み前)。
+  // frontend (repo) 単位の追跡セクション (全 wave から導出)。wave 中心の一覧
+  // テーブルは廃止し、frontend 単位の追跡 + compat グラフ (Tag Release / Staged
+  // previews + 一括 flip) に集約した。完了/失敗した個別 wave は
+  // `/release-wave/<id>` 直リンクで参照可能。
   const frontendSection = renderFrontendSection(computeFrontendTracks(waves));
-
-  // wave 一覧は最新の成功デプロイより前の terminal wave を畳んで出す。
-  // 各 wave の行は repo (front) ごとに分割する: wave 共通セル (Wave ID / State /
-  // Started At / Flip Policy / Actions) を rowspan でまとめ、Repo / Preview /
-  // Stage / Flip は front ごとに 1 行ずつ出す。
-  const displayWaves = visibleWaves(waves);
-  const rows = displayWaves.length === 0
-    ? `<tr><td colspan="9" class="empty">No release waves yet.</td></tr>`
-    : displayWaves.map((w) => renderWaveRows(w)).join("");
 
   const html = `<!doctype html>
 <html lang="ja">
@@ -516,26 +406,6 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
     ${compatSection}
     ${pendingReleaseSection}
     ${frontendSection}
-    <h2>Release waves</h2>
-    <p class="meta">最新の成功デプロイ (flipped) より前に始まった完了 wave は畳んで
-      非表示。直リンク <code>/release-wave/&lt;id&gt;</code> で個別参照は可能。
-      各 wave は front (repo) ごとに 1 行ずつに分けて表示。</p>
-    <table>
-      <thead>
-        <tr>
-          <th>Wave ID</th>
-          <th>State</th>
-          <th>Started At</th>
-          <th>Flip Policy</th>
-          <th>Repo (front)</th>
-          <th>Preview</th>
-          <th>Stage</th>
-          <th>Flip</th>
-          <th>Actions</th>
-        </tr>
-      </thead>
-      <tbody>${rows}</tbody>
-    </table>
   </div>
 </body>
 </html>`;
@@ -967,6 +837,7 @@ function renderGlobalCompatibilitySection(
   compat: WaveCompatibility | null,
   active?: ActiveWaveInfo,
   trafficByRepo?: Map<string, TrafficRecord>,
+  pendingFlipCount = 0,
 ): string {
   if (!compat || compat.backends.length === 0) {
     return `
@@ -998,7 +869,7 @@ function renderGlobalCompatibilitySection(
         Refs <a href="https://github.com/ippoan/ci-dashboard/issues/157">#157</a>.</p>
       ${body}
       ${renderGlobalRetestButtons(compat)}
-      ${renderActiveWaveOverlay(active)}
+      ${renderActiveWaveOverlay(active, pendingFlipCount)}
     </div>`;
 }
 
@@ -1058,7 +929,10 @@ function renderGlobalRetestButtons(compat: WaveCompatibility): string {
  * active wave が無い時も block 自体は常に描画し、placeholder / disabled ボタンを
  * 出す (= UI affordance を常設して「ここで flip できる」ことを見せる)。
  */
-function renderActiveWaveOverlay(active?: ActiveWaveInfo): string {
+function renderActiveWaveOverlay(
+  active?: ActiveWaveInfo,
+  pendingFlipCount = 0,
+): string {
   const previewEntries = active ? [...active.preview.entries()] : [];
   const pendingFlips = active ? active.pendingFlips : [];
 
@@ -1078,9 +952,26 @@ function renderActiveWaveOverlay(active?: ActiveWaveInfo): string {
         : `<p class="meta" style="margin:4px 0 0">active な wave (staging / pending-approval) はありません。</p>`}
     </div>`;
 
+  // 一括 flip: 全 pending release (no-traffic version) を 100% へ promote する。
+  // Pending releases セクションの "⚡ Flip all" と同じ endpoint を叩く (= staged
+  // preview を確認した上でここから直接まとめて flip できる affordance)。
+  // **flip 対象 (pending release) が 0 件なら出さない** — 「active な wave は
+  // ありません」と矛盾するため (= 何も flip できないのにボタンを出さない)。
+  const bulkFlipBtn =
+    pendingFlipCount > 0
+      ? `
+    <form method="post" action="/api/release-wave/pending-release/flip-all"
+          style="margin:0 8px 0 0"
+          onsubmit="return confirm('${pendingFlipCount} 件の pending release (no-traffic version) を一括で 100% flip します。よろしいですか？');">
+      <button type="submit"
+        title="全 pending release (no-traffic version) を一括で 100% traffic へ flip">
+        ⚡ Flip all to 100% (${pendingFlipCount})
+      </button>
+    </form>`
+      : "";
+
   // pending-approval の wave ごとに Approve & Flip ボタン。一覧 (list page) と
   // 同じく force は付けない (compat gate ブロック時は詳細ページで override)。
-  // 対象 wave が無い時は disabled ボタンを 1 つ出して affordance を残す。
   const flips = pendingFlips
     .map(
       (f) => `
@@ -1092,13 +983,17 @@ function renderActiveWaveOverlay(active?: ActiveWaveInfo): string {
         </form>`,
     )
     .join("");
-  const flipBlock = `
+
+  // flip 対象も active wave も無ければ actions block 自体を出さない
+  // (空の <div> でボタン枠だけ残るのを防ぐ)。
+  const flipBlock =
+    bulkFlipBtn || flips
+      ? `
     <div class="actions" style="margin-top:10px">
-      ${flips
-        ? flips
-        : `<button type="button" disabled
-             title="pending-approval の wave がありません">Approve &amp; Flip</button>`}
-    </div>`;
+      ${bulkFlipBtn}
+      ${flips}
+    </div>`
+      : "";
 
   return previewBlock + flipBlock;
 }
