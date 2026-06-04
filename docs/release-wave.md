@@ -181,6 +181,29 @@ preview は hard gate できない**。理由:
 **admin-only は「preview URL を CF Access 配下の `/release-wave` からしか発見できない」=
 発見経路を絞る** ことで十分 (URL は推測困難 + revision tag は次 release で揮発)。
 
+#### 「preview を email 限定にできないか」(auth-worker 経由)
+
+結論: **作る必要はない。preview は既に app 層で email 限定されている。**
+
+- ログインは auth-worker (Google OAuth) を通り、`src/lib/acl.ts` の email allowlist
+  (`USER_ACL` → `checkOrgAccess` / `matchesOrgAllowlist`、`APP_TENANT_ACL.bypass_emails`)
+  が **`src/handlers/google-callback.ts` で email を照合してから**アクセスを許可する。
+  → **許可 email にだけ JWT が発行**され、未許可 email は JWT を得られない。
+- backend は `require_jwt` + RLS なので **JWT 無し = データ取得不可**。つまり preview
+  endpoint が公開でも、**許可 email の Google ログインを経た JWT が無ければ何も取れない**
+  = 実質 email 限定 (本番と同じ)。
+
+GCP レベルで preview を email 限定にする (Cloud Run invoker IAM を特定 email に絞る /
+IAP を被せる) のは **不可かつ不要**:
+
+- invoker IAM は **service 単位**なので 0% preview revision だけを email 限定にできず、
+  prod revision まで巻き込む。
+- browser-direct frontends は GCP identity token ではなく auth-worker の JWT を送るため、
+  IAM/IAP の email gate は **ブラウザ XHR の E2E を壊す** (上と同根)。
+- どうしても pre-auth の network surface を絞りたい場合のみ、**別 preview service +
+  IAP + server-proxy 経由アクセス** という重い構成になる (browser-direct frontend では
+  使えない)。通常は app 層の email allowlist + JWT + RLS で十分。
+
 CF Access wildcard (`preview-*.ippoan.org`、上の「Cloudflare Access setup」節) が
 意味を持つのは:
 
