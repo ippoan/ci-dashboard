@@ -163,7 +163,33 @@ const COMMON_STYLES = `
     padding: 8px 16px; border-radius: 4px; font-size: 14px; font-weight: 500;
     text-decoration: none; cursor: pointer; }
   .refresh-btn:hover { background: #1765cc; text-decoration: none; }
+  .help-tip { display: inline-flex; align-items: center; justify-content: center;
+    width: 16px; height: 16px; margin-left: 6px; border-radius: 50%;
+    background: #dadce0; color: #3c4043; font-size: 11px; font-weight: 700;
+    line-height: 1; cursor: help; position: relative; vertical-align: middle;
+    user-select: none; }
+  .help-tip .help-pop { display: none; position: absolute; top: 100%; left: 0;
+    z-index: 30; width: max-content; max-width: 420px; margin-top: 4px;
+    padding: 10px 12px; background: #202124; color: #e8eaed; font-size: 12px;
+    font-weight: 400; line-height: 1.6; border-radius: 6px; white-space: normal;
+    text-align: left; box-shadow: 0 2px 8px rgba(0,0,0,0.25); }
+  .help-tip .help-pop code { background: rgba(255,255,255,0.12); color: #fff;
+    padding: 1px 4px; border-radius: 3px; }
+  .help-tip .help-pop strong { color: #fff; }
+  .help-tip .help-pop a { color: #8ab4f8; }
+  .help-tip:hover .help-pop, .help-tip:focus .help-pop,
+  .help-tip:focus-within .help-pop { display: block; }
 `;
+
+/**
+ * セクション見出しの右に出す「?」ヘルプアイコン。hover / focus で説明文を
+ * ツールチップ表示する。説明は rich HTML (code / strong / a) を保持できる。
+ * 従来 <h2> 直下に <p class="meta"> で出していた説明をここに畳む用途。
+ */
+function helpMark(html: string): string {
+  return `<span class="help-tip" tabindex="0" role="note"
+    aria-label="説明"><span aria-hidden="true">?</span><span class="help-pop">${html}</span></span>`;
+}
 
 // ----------------------------------------------------------------------------
 // Hub access
@@ -320,13 +346,14 @@ function renderFrontendSection(
 
   return `
     <div class="section">
-      <h2>Frontends (per-repo tracking)</h2>
-      <p class="meta">repo (frontend) ごとの最新 preview URL、現 live deploy
+      <h2>Frontends (per-repo tracking)${helpMark(
+        `repo (frontend) ごとの最新 preview URL、現 live deploy
         (traffic 100%)、最後にデプロイ (flip) された wave、最新 wave。
         <strong>Current (live)</strong> は traffic 100% の実 version なので、
         <strong>Latest wave</strong> が failed でもその後 flip 済みなら実態が
         ここに出る (両方見れば現状が分かる)。preview は各 frontend の最新 flip
-        より前のものは隠す。</p>
+        より前のものは隠す。`,
+      )}</h2>
       <table>
         <thead>
           <tr>
@@ -777,11 +804,12 @@ function renderPendingReleaseSection(
 
   return `
     <div class="section">
-      <h2>Pending releases (no-traffic)</h2>
-      <p class="meta">flip 待ちの no-traffic version (= Cloudflare 実機 0% / cloudrun
+      <h2>Pending releases (no-traffic)${helpMark(
+        `flip 待ちの no-traffic version (= Cloudflare 実機 0% / cloudrun
         pending revision)。Flip で 100% traffic へ promote する。Traffic セクションと
         同じ単一真実 (traffic 由来) から導出。
-        Refs <a href="https://github.com/ippoan/ci-dashboard/issues/237">#237</a>.</p>
+        Refs <a href="https://github.com/ippoan/ci-dashboard/issues/237">#237</a>.`,
+      )}</h2>
       ${body}
       ${renderFlipGroupRollback(flipGroup)}
     </div>`;
@@ -884,12 +912,13 @@ function renderGlobalCompatibilitySection(
   if (!compat || compat.backends.length === 0) {
     return `
     <div class="section">
-      <h2>Compatibility (all consumers)</h2>
-      <p class="meta">No backend deploy records yet. backend deploy が
+      <h2>Compatibility (all consumers)${helpMark(
+        `No backend deploy records yet. backend deploy が
         <code>backend-deploy-report</code> を打ち、consumer frontend が
         integration test green で <code>frontend-test-report</code> を打つと、
         ここに wave 横断の俯瞰グラフが出る。
-        Refs <a href="https://github.com/ippoan/ci-dashboard/issues/157">#157</a>.</p>
+        Refs <a href="https://github.com/ippoan/ci-dashboard/issues/157">#157</a>.`,
+      )}</h2>
     </div>`;
   }
   const verdict = !compat.checked
@@ -904,11 +933,12 @@ function renderGlobalCompatibilitySection(
         report していない (consumer edge 無し)。</p>`;
   return `
     <div class="section">
-      <h2>Compatibility (all consumers) — ${verdict}</h2>
-      <p class="meta">全 backend の<strong>現 production image</strong>を既 deploy
+      <h2>Compatibility (all consumers) — ${verdict}${helpMark(
+        `全 backend の<strong>現 production image</strong>を既 deploy
         frontend が integration test 済みか (wave 横断)。緑 = tested / 赤 = untested。
         赤 (untested) の consumer は下のボタンから直接 retest できる。
-        Refs <a href="https://github.com/ippoan/ci-dashboard/issues/157">#157</a>.</p>
+        Refs <a href="https://github.com/ippoan/ci-dashboard/issues/157">#157</a>.`,
+      )}</h2>
       ${body}
       ${renderGlobalRetestButtons(compat)}
       ${renderActiveWaveOverlay(active, pendingFlipCount)}
@@ -1051,9 +1081,10 @@ function renderCompatibilitySection(
   if (compat.backends.length === 0) {
     return `
     <div class="section">
-      <h2>Compatibility (frontend ↔ backend)</h2>
-      <p class="meta">No backend deploy records for this wave's repos yet
-        (nothing to check against).</p>
+      <h2>Compatibility (frontend ↔ backend)${helpMark(
+        `No backend deploy records for this wave's repos yet
+        (nothing to check against).`,
+      )}</h2>
     </div>`;
   }
 
@@ -1133,12 +1164,13 @@ function renderCompatibilitySection(
 
   return `
     <div class="section">
-      <h2>Compatibility (frontend ↔ backend) — ${verdict}</h2>
-      <p class="meta">既 deploy frontend が wave 内 backend の<strong>現 production
+      <h2>Compatibility (frontend ↔ backend) — ${verdict}${helpMark(
+        `既 deploy frontend が wave 内 backend の<strong>現 production
         image</strong>を integration test 済みか。赤は未検証 — "Re-test" で
         <code>release-wave-retest</code> を frontend に dispatch し、green 化後に
         matrix が自動更新される。edge / node に hover すると過去 test 履歴が出る。
-        Refs <a href="https://github.com/ippoan/ci-dashboard/issues/157">#157</a>.</p>
+        Refs <a href="https://github.com/ippoan/ci-dashboard/issues/157">#157</a>.`,
+      )}</h2>
       ${renderCompatibilitySvg(compat)}
       ${retestAllBlock}
       ${blocks}
