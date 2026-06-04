@@ -181,17 +181,17 @@ const COMMON_STYLES = `
   .help-tip .help-pop a { color: #8ab4f8; }
   .help-tip:hover .help-pop, .help-tip:focus .help-pop,
   .help-tip:focus-within .help-pop { display: block; }
-  /* セクションを縦一列ではなく画面幅に応じて動的に段組みする。
-     compat (横長グラフ) はフル幅で上段に、Frontends (左) と pending リリース
-     (右) は下段で 2 カラムに並べる。狭い画面では auto-fit + minmax により
-     自動で 1 列に折り返す (メディアクエリ不要)。各カラムは内容量で高さが
-     決まるよう align-items:start。gap を使うので子 .section の縦 margin は
+  /* 画面幅に応じて動的に 2 カラムへ段組みする。左カラムに Compatibility
+     (互換グラフ)、右カラムにその他 (リリース状況 / per-repo tracking /
+     no-traffic) を縦積みする。狭い画面では auto-fit + minmax により自動で
+     1 列に折り返す (メディアクエリ不要)。各カラムは内容量で高さが決まるよう
+     align-items:start。min-width:0 で子のテーブル / pre が overflow しても
+     カラムが伸びないようにする。gap を使うので子 .section の縦 margin は
      打ち消す。 */
-  .wave-grid { display: flex; flex-direction: column; gap: 16px; }
-  .wave-grid > .section { margin: 0; }
-  .wave-row { display: grid; gap: 16px; align-items: start;
+  .wave-grid { display: grid; gap: 16px; align-items: start;
     grid-template-columns: repeat(auto-fit, minmax(560px, 1fr)); }
-  .wave-row > .section { margin: 0; }
+  .wave-col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+  .wave-col > .section { margin: 0; }
 `;
 
 /**
@@ -513,8 +513,10 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
         title="ページを再取得して最新状態に更新する (ブラウザキャッシュ無視 = ハードリセット)">🔄 更新（ハードリセット）</a>
     </div>
     <div class="wave-grid">
-      ${compatSection}
-      <div class="wave-row">
+      <div class="wave-col">
+        ${compatSection}
+      </div>
+      <div class="wave-col">
         ${frontendSection}
         ${pendingReleaseSection}
       </div>
