@@ -31,6 +31,7 @@ import {
   type PendingReleaseRecord,
   type FlipGroupItem,
   type UnifiedPending,
+  type PendingSource,
 } from "./pending-release";
 import {
   getTraffic,
@@ -460,6 +461,52 @@ function buildTrafficRollbackDispatch(
  *
  * 実 flip の成否は GitHub Actions 側で確認する (callback は来ない)。
  */
+/**
+ * pending release flip の core ロジック (HTTP handler と MCP tool が共有)。
+ *
+ * getPendingRelease → `release-wave-flip` dispatch → 着火成功なら record clear。
+ * 戻り値は判別 union で、HTTP handler は status code に、MCP tool は isError に
+ * map する。実 flip の成否は GitHub Actions 側で確認する (callback は来ない)。
+ */
+export type PendingFlipResult =
+  | { ok: true; repo: string; tag: string; version_id: string }
+  | {
+      ok: false;
+      code: "KV_NOT_CONFIGURED" | "BAD_REQUEST" | "NOT_FOUND" | "DISPATCH_FAILED";
+      error: string;
+    };
+
+export async function pendingFlipCore(
+  env: Env,
+  repo: string,
+): Promise<PendingFlipResult> {
+  if (!env.COMPAT_KV) {
+    return { ok: false, code: "KV_NOT_CONFIGURED", error: "COMPAT_KV is not bound" };
+  }
+  const r = repo.trim();
+  if (!r) {
+    return { ok: false, code: "BAD_REQUEST", error: "repo is required" };
+  }
+  const record = await getPendingRelease(env.COMPAT_KV, r);
+  if (!record) {
+    return { ok: false, code: "NOT_FOUND", error: `no pending release for ${r}` };
+  }
+  const results = await dispatchAll(env, [buildPendingFlipDispatch(record)]);
+  const ok = results.length > 0 && results[0]!.ok;
+  if (!ok) {
+    const err = results.length > 0 && !results[0]!.ok ? results[0]!.error : "dispatch failed";
+    return {
+      ok: false,
+      code: "DISPATCH_FAILED",
+      error: `failed to dispatch flip for ${r}: ${err}`,
+    };
+  }
+  // 着火できたら record を消す (optimistic)。着火失敗時は上で return 済みなので
+  // record は残り、operator が再試行できる。
+  await clearPendingRelease(env.COMPAT_KV, r);
+  return { ok: true, repo: r, tag: record.tag, version_id: record.version_id };
+}
+
 export async function handleReleaseWavePendingReleaseFlip(
   req: Request,
   env: Env,
@@ -488,26 +535,17 @@ export async function handleReleaseWavePendingReleaseFlip(
     });
   }
 
-  const record = await getPendingRelease(env.COMPAT_KV, repo);
-  if (!record) {
-    return jsonResponse(404, {
-      code: "NOT_FOUND",
-      error: `no pending release for ${repo}`,
-    });
-  }
-
-  const results = await dispatchAll(env, [buildPendingFlipDispatch(record)]);
-  const ok = results.length > 0 && results[0]!.ok;
-  if (ok) {
-    // dispatch が着火できたら record を消す (optimistic)。実 flip の成否は
-    // GitHub Actions 側で確認する。着火失敗時は record を残し再試行可能にする。
-    await clearPendingRelease(env.COMPAT_KV, repo);
-  } else {
-    const err = results.length > 0 && !results[0]!.ok ? results[0]!.error : "dispatch failed";
-    return jsonResponse(502, {
-      code: "DISPATCH_FAILED",
-      error: `failed to dispatch flip for ${repo}: ${err}`,
-    });
+  const result = await pendingFlipCore(env, repo);
+  if (!result.ok) {
+    const status =
+      result.code === "KV_NOT_CONFIGURED"
+        ? 500
+        : result.code === "NOT_FOUND"
+          ? 404
+          : result.code === "DISPATCH_FAILED"
+            ? 502
+            : 400;
+    return jsonResponse(status, { code: result.code, error: result.error });
   }
   return redirectToList();
 }
@@ -528,26 +566,39 @@ export async function handleReleaseWavePendingReleaseFlip(
  * - dispatch 成功した repo のみ pending-release を clear し flip-group に積む。
  * - 全 dispatch 失敗時のみ 502。一部成功は成功分を記録して一覧へ redirect。
  */
-export async function handleReleaseWavePendingReleaseFlipAll(
-  req: Request,
+/**
+ * pending release 一括 flip の core ロジック (HTTP handler と MCP tool が共有)。
+ *
+ * 単一真実の Pending releases を全件 flip し、各 repo の flip 直前 active version
+ * を flip-group として記録する (後で一括 rollback 可能)。0 件は no-op で
+ * ok:true / flipped:[] を返す。actor は flip-group の audit 記録に使う。
+ */
+export type PendingFlipAllResult =
+  | {
+      ok: true;
+      flipped: Array<{
+        repo: string;
+        version_id: string;
+        tag: string | null;
+        source: PendingSource;
+      }>;
+    }
+  | { ok: false; code: "KV_NOT_CONFIGURED" | "DISPATCH_FAILED"; error: string };
+
+export async function pendingFlipAllCore(
   env: Env,
-): Promise<Response> {
-  if (req.method !== "POST") {
-    return jsonResponse(405, { code: "METHOD_NOT_ALLOWED", error: "use POST" });
-  }
+  actor: string,
+): Promise<PendingFlipAllResult> {
   if (!env.COMPAT_KV) {
-    return jsonResponse(500, {
-      code: "KV_NOT_CONFIGURED",
-      error: "COMPAT_KV is not bound",
-    });
+    return { ok: false, code: "KV_NOT_CONFIGURED", error: "COMPAT_KV is not bound" };
   }
 
   // Pending releases の単一真実 (workers=traffic:: / cloudrun=pending-release::)
   // を導出する (= 画面の表示と同じ source、Refs #237)。
   const unified = await loadUnifiedPending(env);
   if (unified.length === 0) {
-    // flip 対象が無ければ何もせず一覧へ。
-    return redirectToList();
+    // flip 対象が無ければ no-op。
+    return { ok: true, flipped: [] };
   }
 
   // source 別に dispatch を組む:
@@ -563,6 +614,12 @@ export async function handleReleaseWavePendingReleaseFlipAll(
   const results = await dispatchAll(env, dispatches);
 
   const items: FlipGroupItem[] = [];
+  const flipped: Array<{
+    repo: string;
+    version_id: string;
+    tag: string | null;
+    source: PendingSource;
+  }> = [];
   for (let i = 0; i < unified.length; i++) {
     const u = unified[i]!;
     if (!results[i]?.ok) continue;
@@ -573,6 +630,12 @@ export async function handleReleaseWavePendingReleaseFlipAll(
       rollback_to: u.rollback_to,
       rollback_tag: u.rollback_tag,
     });
+    flipped.push({
+      repo: u.repo,
+      version_id: u.version_id,
+      tag: u.tag,
+      source: u.source,
+    });
     // pending-release:: 由来 (cloudrun) は flip したので消す。traffic 由来は
     // traffic-report (flip 後) が状態を更新するので KV 操作不要。
     if (u.source === "pending") await clearPendingRelease(env.COMPAT_KV, u.repo);
@@ -581,17 +644,39 @@ export async function handleReleaseWavePendingReleaseFlipAll(
   if (items.length === 0) {
     const failed = results.find((r) => !r.ok);
     const err = failed && !failed.ok ? failed.error : "dispatch failed";
-    return jsonResponse(502, {
+    return {
+      ok: false,
       code: "DISPATCH_FAILED",
       error: `failed to dispatch flip for all ${unified.length} pending release(s): ${err}`,
-    });
+    };
   }
 
   await recordFlipGroup(env.COMPAT_KV, {
     flipped_at: new Date().toISOString(),
-    actor: actorEmail(req),
+    actor,
     items,
   });
+  return { ok: true, flipped };
+}
+
+export async function handleReleaseWavePendingReleaseFlipAll(
+  req: Request,
+  env: Env,
+): Promise<Response> {
+  if (req.method !== "POST") {
+    return jsonResponse(405, { code: "METHOD_NOT_ALLOWED", error: "use POST" });
+  }
+  if (!env.COMPAT_KV) {
+    return jsonResponse(500, {
+      code: "KV_NOT_CONFIGURED",
+      error: "COMPAT_KV is not bound",
+    });
+  }
+  const result = await pendingFlipAllCore(env, actorEmail(req));
+  if (!result.ok) {
+    const status = result.code === "KV_NOT_CONFIGURED" ? 500 : 502;
+    return jsonResponse(status, { code: result.code, error: result.error });
+  }
   return redirectToList();
 }
 
