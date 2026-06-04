@@ -168,6 +168,174 @@ function hubStub(env: Env): DurableObjectStub<ReleaseWaveHub> {
 }
 
 // ----------------------------------------------------------------------------
+// Wave 一覧の絞り込み + frontend 単位の追跡
+// ----------------------------------------------------------------------------
+
+/** in-progress (= 常に一覧に出す) state。terminal はそれ以外。 */
+const ACTIVE_STATES: ReadonlySet<WaveStateName> = new Set([
+  "staging",
+  "pending-approval",
+  "flipping",
+]);
+
+/**
+ * 一覧に出す wave を絞る。
+ *
+ * - active (staging / pending-approval / flipping) は常に表示。
+ * - terminal (flipped / failed / aborted / rolled-back) のうち、最新の成功
+ *   デプロイ (= 最も新しい flipped wave) より **前に started した** wave は隠す。
+ *   成功デプロイが起きるたびに、それ以前の失敗・成功履歴が一覧から畳まれる
+ *   (= 古い fail / stale preview link がいつまでも残らない)。
+ * - flipped wave が 1 つも無ければ cutoff 無し = 全件表示 (deploy 前は隠さない)。
+ *
+ * 隠した wave も DO には残るので `/release-wave/<id>` 直リンクで参照可能。
+ */
+function visibleWaves(waves: WaveState[]): WaveState[] {
+  // 最新の flipped の started_at を cutoff にする (sort 順に依存せず max を取る)。
+  let cutoff: string | null = null;
+  for (const w of waves) {
+    if (w.state === "flipped" && (cutoff === null || w.started_at > cutoff)) {
+      cutoff = w.started_at;
+    }
+  }
+  if (cutoff === null) return waves;
+  const c = cutoff;
+  return waves.filter(
+    (w) => ACTIVE_STATES.has(w.state) || w.started_at >= c,
+  );
+}
+
+/** frontend (repo) 1 つの追跡サマリ。`computeFrontendTracks` が wave 群から導出。 */
+interface FrontendTrack {
+  repo: string;
+  /** この repo を含む最新 wave。 */
+  latestWaveId: string;
+  latestWaveState: WaveStateName;
+  latestAt: string;
+  /** この repo が最後に flip (deploy) された wave。未 deploy なら null。 */
+  lastFlipWaveId: string | null;
+  lastFlipAt: string | null;
+  lastFlipTag: string | null;
+  /** 最新 flip 以降で preview_url を持つ最新 wave のもの (古い preview は隠す)。 */
+  previewUrl: string | null;
+  previewWaveId: string | null;
+  previewSha: string | null;
+}
+
+/**
+ * 全 wave を repo (frontend) 単位に畳んで、各 frontend の「最新 preview URL /
+ * 最後の flip (deploy) / 最新 wave」を導出する。
+ *
+ * preview は各 frontend の **最新 flip より前のものを隠す** (= deploy 済みの
+ * frontend について、その deploy より古い stale preview link を出さない)。
+ * まだ flip されていない frontend は最新の preview をそのまま見せる。
+ */
+function computeFrontendTracks(waves: WaveState[]): FrontendTrack[] {
+  // started_at 降順に揃える (list() は降順だが sort 順に依存しないよう copy-sort)。
+  const sorted = [...waves].sort((a, b) =>
+    a.started_at < b.started_at ? 1 : -1,
+  );
+
+  const tracks = new Map<string, FrontendTrack>();
+
+  // pass 1: 最新 wave (= 最初に出会う) と最後の flip を記録。
+  for (const w of sorted) {
+    for (const r of w.repos) {
+      let t = tracks.get(r.repo);
+      if (!t) {
+        t = {
+          repo: r.repo,
+          latestWaveId: w.wave_id,
+          latestWaveState: w.state,
+          latestAt: w.started_at,
+          lastFlipWaveId: null,
+          lastFlipAt: null,
+          lastFlipTag: null,
+          previewUrl: null,
+          previewWaveId: null,
+          previewSha: null,
+        };
+        tracks.set(r.repo, t);
+      }
+      if (t.lastFlipAt === null && r.flip_status === "done") {
+        t.lastFlipWaveId = w.wave_id;
+        t.lastFlipAt = w.started_at;
+        t.lastFlipTag = r.target_tag;
+      }
+    }
+  }
+
+  // pass 2: 最新 flip 以降で preview を持つ最新 wave を採用 (古い preview は除外)。
+  for (const w of sorted) {
+    for (const r of w.repos) {
+      const t = tracks.get(r.repo);
+      if (!t || t.previewUrl !== null) continue;
+      const safe = safeHttpUrl(r.preview_url);
+      if (!safe) continue;
+      if (t.lastFlipAt !== null && w.started_at < t.lastFlipAt) continue;
+      t.previewUrl = safe;
+      t.previewWaveId = w.wave_id;
+      t.previewSha = r.head_sha ? r.head_sha.slice(0, 7) : null;
+    }
+  }
+
+  return [...tracks.values()].sort((a, b) => (a.repo < b.repo ? -1 : 1));
+}
+
+/**
+ * frontend (repo) 単位の追跡セクション。各 frontend の最新 preview URL と最後に
+ * deploy (flip) された wave を 1 行ずつ出す。preview を wave 行ではなく
+ * frontend 行に分けて持つことで「どの front の preview がどれか」を分離する。
+ */
+function renderFrontendSection(tracks: FrontendTrack[]): string {
+  const rows =
+    tracks.length === 0
+      ? `<tr><td colspan="4" class="empty">No frontends tracked yet.</td></tr>`
+      : tracks
+          .map((t) => {
+            const previewCell = t.previewUrl
+              ? `<a href="${escapeHtml(t.previewUrl)}" target="_blank" rel="noopener noreferrer">preview</a>
+                 ${t.previewSha ? `<span class="meta">${escapeHtml(t.previewSha)}</span>` : ""}
+                 <span class="meta">(${escapeHtml(t.previewWaveId ?? "")})</span>`
+              : `<span class="meta">—</span>`;
+            const deployCell = t.lastFlipWaveId
+              ? `<a href="/release-wave/${encodeURIComponent(t.lastFlipWaveId)}">${escapeHtml(t.lastFlipTag ?? t.lastFlipWaveId)}</a>
+                 <span class="meta">${escapeHtml(t.lastFlipAt ?? "")}</span>`
+              : `<span class="meta">not deployed</span>`;
+            const latestCell = `<a href="/release-wave/${encodeURIComponent(t.latestWaveId)}">${escapeHtml(t.latestWaveId)}</a>
+                <span class="badge" style="background:${stateColor(t.latestWaveState)}">${escapeHtml(t.latestWaveState)}</span>`;
+            return `
+              <tr>
+                <td>${escapeHtml(t.repo)}</td>
+                <td>${previewCell}</td>
+                <td class="meta">${deployCell}</td>
+                <td>${latestCell}</td>
+              </tr>`;
+          })
+          .join("");
+
+  return `
+    <div class="section">
+      <h2>Frontends (per-repo tracking)</h2>
+      <p class="meta">repo (frontend) ごとの最新 preview URL と、最後にデプロイ
+        (flip) された wave。preview は各 frontend の<strong>最新 flip より前のもの
+        を隠す</strong> (= deploy より古い stale preview link は出さない)。
+        まだ deploy 前の frontend は最新の preview をそのまま表示。</p>
+      <table>
+        <thead>
+          <tr>
+            <th>Repo</th>
+            <th>Latest preview</th>
+            <th>Last deploy (flip)</th>
+            <th>Latest wave</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
+// ----------------------------------------------------------------------------
 // GET /release-wave  →  全 wave 一覧
 // ----------------------------------------------------------------------------
 
@@ -238,9 +406,14 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
     flipGroup,
   );
 
-  const rows = waves.length === 0
+  // frontend (repo) 単位の追跡セクション (全 wave から導出、wave 絞り込み前)。
+  const frontendSection = renderFrontendSection(computeFrontendTracks(waves));
+
+  // wave 一覧は最新の成功デプロイより前の terminal wave を畳んで出す。
+  const displayWaves = visibleWaves(waves);
+  const rows = displayWaves.length === 0
     ? `<tr><td colspan="6" class="empty">No release waves yet.</td></tr>`
-    : waves
+    : displayWaves
         .map((w) => {
           const repos = w.repos.map((r) => escapeHtml(r.repo)).join(", ");
 
@@ -306,6 +479,10 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
     </p>
     ${compatSection}
     ${pendingReleaseSection}
+    ${frontendSection}
+    <h2>Release waves</h2>
+    <p class="meta">最新の成功デプロイ (flipped) より前に始まった完了 wave は畳んで
+      非表示。直リンク <code>/release-wave/&lt;id&gt;</code> で個別参照は可能。</p>
     <table>
       <thead>
         <tr>
