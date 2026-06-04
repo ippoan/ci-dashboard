@@ -123,6 +123,15 @@ describe("handleReleaseWaveListPage", () => {
     expect(html).toContain("No release waves yet");
   });
 
+  it("renders a hard-reset refresh button on the list page", async () => {
+    const env = fakeEnv({ listReturn: [] });
+    const html = await (await handleReleaseWaveListPage(env)).text();
+    expect(html).toContain('class="refresh-btn"');
+    expect(html).toContain("更新（ハードリセット）");
+    // 一覧ページ自身へ戻すリンク (= no-store により再取得 = ハードリセット)。
+    expect(html).toContain('href="/release-wave"');
+  });
+
   it("shows the Pending releases section placeholder when none (Refs #181 / #237)", async () => {
     const env = fakeEnv({ listReturn: [], compatKv: memKv() });
     const html = await (await handleReleaseWaveListPage(env)).text();
@@ -362,6 +371,17 @@ describe("handleReleaseWaveDetailPage", () => {
     expect(html).toContain("Repos");
     expect(html).toContain("Events");
     expect(html).toContain("Raw State");
+  });
+
+  it("renders a hard-reset refresh button on the detail page", async () => {
+    const env = fakeEnv({
+      getReturn: { ok: true, data: makeWave({ wave_id: "w1" }) },
+    });
+    const html = await (await handleReleaseWaveDetailPage(env, "w1")).text();
+    expect(html).toContain('class="refresh-btn"');
+    expect(html).toContain("更新（ハードリセット）");
+    // この wave 詳細ページ自身へ戻すリンク。
+    expect(html).toContain('href="/release-wave/w1"');
   });
 
   it("approve button enabled only in pending-approval", async () => {
@@ -668,6 +688,8 @@ describe("handleReleaseWaveDetailPage", () => {
     expect(csp).toContain("frame-ancestors 'none'");
     expect(resp.headers.get("X-Content-Type-Options")).toBe("nosniff");
     expect(resp.headers.get("Referrer-Policy")).toBe("no-referrer");
+    // 「更新（ハードリセット）」ボタン用にブラウザ/bfcache キャッシュを無効化する。
+    expect(resp.headers.get("Cache-Control")).toContain("no-store");
   });
 
   it("escapes HTML in repo names / wave_id / event summaries", async () => {

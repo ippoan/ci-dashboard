@@ -92,6 +92,12 @@ function htmlResponse(body: string, status = 200): Response {
     status,
     headers: {
       "Content-Type": "text/html; charset=utf-8",
+      // 「更新（ハードリセット）」ボタン用: ページは SSR で DO/KV の現在状態を
+      // 毎回引き直す。no-store でブラウザ/bfcache のキャッシュを一切無効化し、
+      // リンク再訪時に必ずサーバから取り直させる (= ハードリロード相当)。
+      // strict CSP (script-src 無し) で JS の location.reload(true) が使えないため、
+      // キャッシュ制御は response header 側で担保する。
+      "Cache-Control": "no-store, must-revalidate",
       // Defense in depth against XSS:
       // - `script-src 'none'` で <script> / event handler 経由の実行をブロック
       // - `style-src 'self' 'unsafe-inline'` は本ページが inline <style> を
@@ -143,6 +149,11 @@ const COMMON_STYLES = `
   .ok { color: #188038; }
   .err { color: #d93025; }
   .pending { color: #9aa0a6; }
+  .toolbar { margin: 8px 0 16px; display: flex; gap: 8px; align-items: center; }
+  .refresh-btn { display: inline-block; background: #1a73e8; color: #fff;
+    padding: 8px 16px; border-radius: 4px; font-size: 14px; font-weight: 500;
+    text-decoration: none; cursor: pointer; }
+  .refresh-btn:hover { background: #1765cc; text-decoration: none; }
 `;
 
 // ----------------------------------------------------------------------------
@@ -280,6 +291,10 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
   <div class="container">
     ${renderTabs("release-wave")}
     <h1>Release Waves</h1>
+    <div class="toolbar">
+      <a class="refresh-btn" href="/release-wave"
+        title="ページを再取得して最新状態に更新する (ブラウザキャッシュ無視 = ハードリセット)">🔄 更新（ハードリセット）</a>
+    </div>
     <p class="meta">
       Cross-repo coordinated release flows. Refs
       <a href="https://github.com/ippoan/ci-dashboard/issues/137">#137</a>.
@@ -481,6 +496,10 @@ export async function handleReleaseWaveDetailPage(
       ${escapeHtml(w.wave_id)}
       <span class="badge" style="background:${stateColor(w.state)}">${escapeHtml(w.state)}</span>
     </h1>
+    <div class="toolbar">
+      <a class="refresh-btn" href="/release-wave/${encodeURIComponent(w.wave_id)}"
+        title="この wave の状態を再取得して更新する (ブラウザキャッシュ無視 = ハードリセット)">🔄 更新（ハードリセット）</a>
+    </div>
     <p class="meta">
       flip_policy: <strong>${escapeHtml(w.flip_policy)}</strong> &middot;
       started_at: ${escapeHtml(w.started_at)}
