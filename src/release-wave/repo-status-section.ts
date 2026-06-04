@@ -17,7 +17,7 @@
  */
 
 import type { Env } from "../index";
-import { handleReleaseWaveListPage } from "./page";
+import { handleReleaseWaveListPage, helpMark } from "./page";
 import {
   getRepoReleaseStatuses,
   type RepoReleaseStatus,
@@ -138,11 +138,12 @@ export function renderRepoReleaseStatusSection(
 
   return `
     <div class="section">
-      <h2>Repo リリース状況</h2>
-      <p class="meta">監視対象 repo の tag 有無と main HEAD からの乖離 (tagless repo は除外)。
+      <h2>Repo リリース状況${helpMark(
+        `監視対象 repo の tag 有無と main HEAD からの乖離 (tagless repo は除外)。
         <span class="badge" style="background:${GREEN}">緑 = tag あり</span>
         <span class="badge" style="background:${RED}">赤 = 未tag</span>
-        の repo を直接 Tag Release できる (tag 採番は各 repo の tag-release.yml)。</p>
+        の repo を直接 Tag Release できる (tag 採番は各 repo の tag-release.yml)。`,
+      )}</h2>
       <div style="margin:8px 0">${summary}</div>
       ${tableOrEmpty}
     </div>`;
@@ -484,10 +485,11 @@ export function renderBackendRollbackBlock(
 
   return `
     <div style="margin-top:10px">
-      <strong class="meta">Backend traffic / rollback (Cloud Run revision)</strong>
-      <p class="meta" style="margin:4px 0">Cloud Run の実 traffic split (status.traffic[])。
+      <strong class="meta">Backend traffic / rollback (Cloud Run revision)</strong>${helpMark(
+        `Cloud Run の実 traffic split (status.traffic[])。
         tag push → no-traffic deploy (新 0%) → Flip (新 100%) 運用なので、Flip 前は
-        「旧 100% + 新 pending 0%」が並ぶ。revision / image sha は hover で full。</p>
+        「旧 100% + 新 pending 0%」が並ぶ。revision / image sha は hover で full。`,
+      )}
       <table style="margin-top:6px">
         <thead><tr><th>Backend repo</th><th>%</th><th>Revision / Image / Tag</th><th>When (UTC)</th><th>Rollback</th></tr></thead>
         <tbody>${rows}</tbody>
