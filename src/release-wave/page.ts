@@ -282,18 +282,22 @@ function computeFrontendTracks(waves: WaveState[]): FrontendTrack[] {
 }
 
 /**
- * frontend (repo) の現 live deploy (traffic 100% の version) を表すセル。
- * traffic:: record の versions から percentage 最大の version を採用し、tag
- * (無ければ short version_id) + % を出す。traffic 無 / 全 0% なら "—"。
- *
- * 「Latest wave」が failed でも、その後 flip 済みなら実 deploy がここに出るので
- * 両方を見れば実態が分かる (= wave state と live deploy の二本立て)。
+ * frontend (repo) の現 live deploy (traffic で最大 % の version) を解決する。
+ * traffic:: record の versions から percentage 最大の version を採用する。
+ * traffic 無 / 全 0% (= まだ live でない) なら `live: null`。
  */
-function liveDeployCell(traffic: TrafficRecord | undefined): string {
+function resolveLiveDeploy(
+  traffic: TrafficRecord | undefined,
+): { live: TrafficRecord["versions"][number] | null } {
   const tv = traffic?.versions ?? [];
-  if (tv.length === 0) return `<span class="meta">—</span>`;
-  const live = [...tv].sort((a, b) => b.percentage - a.percentage)[0];
-  if (!live || live.percentage <= 0) return `<span class="meta">—</span>`;
+  if (tv.length === 0) return { live: null };
+  const top = [...tv].sort((a, b) => b.percentage - a.percentage)[0];
+  return { live: top && top.percentage > 0 ? top : null };
+}
+
+/** live version の表示セル (tag / short id + %)。live が無ければ "—"。 */
+function liveDeployCell(live: TrafficRecord["versions"][number] | null): string {
+  if (!live) return `<span class="meta">—</span>`;
   const label =
     live.tag ??
     (live.version_id.length > 12
@@ -308,9 +312,11 @@ function liveDeployCell(traffic: TrafficRecord | undefined): string {
  * preview を wave 行ではなく frontend 行に分けて持つことで「どの front の
  * preview がどれか」を分離する。
  *
- * 「Latest wave」(= 最新 wave の state、failed の場合あり) と「Current (live)」
- * (= traffic 100% の実 deploy) を**両方**並べることで、failed wave の後に flip
- * 済みでも現在のデプロイ実態が分かるようにする。
+ * 「Latest wave」のバッジは frontend の**現在の健全性**を表す:
+ * - live deploy (traffic 100%) が出ていれば緑 **live** (= 今は OK)。直近 wave が
+ *   failed でも、その後 flip 済み = 現状 OK なので failed バッジは出さない。
+ * - live deploy が無ければ直近 wave の実 state (failed / aborted 等) を出す
+ *   (= まだ deploy されていない / 失敗したまま、を赤で示す)。
  */
 function renderFrontendSection(
   tracks: FrontendTrack[],
@@ -326,13 +332,19 @@ function renderFrontendSection(
                  ${t.previewSha ? `<span class="meta">${escapeHtml(t.previewSha)}</span>` : ""}
                  <span class="meta">(${escapeHtml(t.previewWaveId ?? "")})</span>`
               : `<span class="meta">—</span>`;
-            const liveCell = liveDeployCell(trafficByRepo?.get(t.repo));
+            const { live } = resolveLiveDeploy(trafficByRepo?.get(t.repo));
+            const liveCell = liveDeployCell(live);
             const deployCell = t.lastFlipWaveId
               ? `<a href="/release-wave/${encodeURIComponent(t.lastFlipWaveId)}">${escapeHtml(t.lastFlipTag ?? t.lastFlipWaveId)}</a>
                  <span class="meta">${escapeHtml(t.lastFlipAt ?? "")}</span>`
               : `<span class="meta">not deployed</span>`;
+            // live なら緑 "live" (failed wave でも現状 OK)。live でなければ
+            // 直近 wave の実 state を出す。
+            const waveBadge = live
+              ? `<span class="badge" style="background:#188038" title="traffic 100% で live。直近 wave が failed でも現状は OK">live</span>`
+              : `<span class="badge" style="background:${stateColor(t.latestWaveState)}">${escapeHtml(t.latestWaveState)}</span>`;
             const latestCell = `<a href="/release-wave/${encodeURIComponent(t.latestWaveId)}">${escapeHtml(t.latestWaveId)}</a>
-                <span class="badge" style="background:${stateColor(t.latestWaveState)}">${escapeHtml(t.latestWaveState)}</span>`;
+                ${waveBadge}`;
             return `
               <tr>
                 <td>${escapeHtml(t.repo)}</td>
@@ -349,10 +361,11 @@ function renderFrontendSection(
       <h2>Frontends (per-repo tracking)${helpMark(
         `repo (frontend) ごとの最新 preview URL、現 live deploy
         (traffic 100%)、最後にデプロイ (flip) された wave、最新 wave。
-        <strong>Current (live)</strong> は traffic 100% の実 version なので、
-        <strong>Latest wave</strong> が failed でもその後 flip 済みなら実態が
-        ここに出る (両方見れば現状が分かる)。preview は各 frontend の最新 flip
-        より前のものは隠す。`,
+        <strong>Current (live)</strong> は traffic 100% の実 version。
+        <strong>Latest wave</strong> のバッジは現在の健全性を示す:
+        live deploy があれば緑 <strong>live</strong> (直近 wave が failed でも
+        その後 flip 済み = 現状 OK)、live deploy が無ければ直近 wave の実 state
+        (failed 等) を出す。preview は各 frontend の最新 flip より前のものは隠す。`,
       )}</h2>
       <table>
         <thead>

@@ -335,15 +335,17 @@ describe("handleReleaseWaveListPage", () => {
     });
     const html = await (await handleReleaseWaveListPage(env)).text();
     expect(html).toContain("Current (live)");
-    // Latest wave は failed バッジ
+    // Latest wave のリンクは残る
     expect(html).toContain("/release-wave/wave_2026_06_03_1245");
-    expect(html).toContain(">failed<");
+    // live deploy があるので、failed wave でもバッジは緑 "live" (failed は出さない)
+    expect(html).toContain('title="traffic 100% で live');
+    expect(html).not.toContain(">failed<");
     // Current (live) に traffic 100% の実 version (tag) と %
     expect(html).toContain('<span class="ok">v0.5.99</span>');
     expect(html).toContain("100%");
   });
 
-  it("shows '—' for Current (live) when there is no traffic record", async () => {
+  it("shows the wave state badge (failed) when there is no live deploy", async () => {
     const env = fakeEnv({
       listReturn: [
         makeWave({ wave_id: "w-x", state: "failed" }),
@@ -353,6 +355,9 @@ describe("handleReleaseWaveListPage", () => {
     expect(html).toContain("Current (live)");
     // traffic 無 → live セルは "—" (ok span を作らない)
     expect(html).not.toContain('<span class="ok">');
+    // live deploy が無いので Latest wave は実 state (failed) を出す
+    expect(html).toContain(">failed<");
+    expect(html).not.toContain('title="traffic 100% で live');
   });
 
   it("hides a frontend preview that predates that frontend's last flip", async () => {
