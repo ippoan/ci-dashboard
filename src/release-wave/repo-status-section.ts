@@ -22,7 +22,11 @@ import {
   getRepoReleaseStatuses,
   type RepoReleaseStatus,
 } from "./repo-release-status";
-import { computeGlobalCompatibility, type WaveCompatibility } from "./compat";
+import {
+  computeGlobalCompatibility,
+  type WaveCompatibility,
+  type WaveBackendCompat,
+} from "./compat";
 import { parseTaglessRepos } from "../tagless-repos";
 import {
   getTrafficForRepos,
@@ -392,44 +396,30 @@ function renderTrafficRollbackRow(repo: string, rec: TrafficRecord): string {
 }
 
 /**
- * Compatibility グラフに出ている backend repo の Cloud Run revision rollback
- * ボタンを HTML で返す (Refs #197)。`backend::<repo>.deploy_history` から
- * 「現 active 以外」の過去 revision を rollback 先候補とし、各候補に
- * `Rollback to <tag/revision>` ボタンを出す。候補がある repo が無ければ ""。
+ * Compatibility グラフに出ている backend repo の Cloud Run revision 状態 +
+ * rollback ボタンを HTML で返す (Refs #197)。
  *
- * frontend の Traffic rollback と方針を揃える: 任意の過去 revision を選択 / 即 100%。
+ * frontend の「Traffic (version split)」と対称に、各 backend について:
+ *   - **現 active 行**: 100% badge + git tag (ver) + image sha (full は hover) +
+ *     deploy 日時。Cloud Run backend は「最新 ready revision に 100% flip」運用
+ *     (canary % 配分なし) なので、現 active = 100% traffic として出す。これで
+ *     ver / image sha / traffic が一目で分かる。従来は rollback 候補 (過去
+ *     revision) が無い backend を丸ごと隠していたため、deploy 直後で履歴 1 件の
+ *     Cloud Run repo は image sha も tag も traffic も見えなかった。それを解消する。
+ *   - **rollback 行**: `deploy_history` のうち「現 active 以外」(= 過去に active
+ *     だった revision) があれば各候補に `Rollback to <tag/sha>` ボタンを出す。
+ *     frontend の Traffic rollback と方針を揃える (任意の過去 revision を即 100%)。
+ *
+ * backend record (`backend::<repo>`) を持ち current_image が分かる repo は必ず
+ * 現 active 行を出す (rollback 候補の有無に依らない)。current_image 不明 (稀) な
+ * repo だけ skip。1 行も出せなければ ""。
  */
 export function renderBackendRollbackBlock(compat: WaveCompatibility): string {
   const rows = compat.backends
     .map((b) => {
-      const history = b.deploy_history ?? [];
-      if (history.length === 0) return "";
-      const candidates = history.filter((e) => e.image !== b.current_image);
-      if (candidates.length === 0) return "";
-
-      const buttons = candidates
-        .map((e) => {
-          const label = e.tag ? escapeHtml(e.tag) : escapeHtml(shortId(e.image));
-          const when = escapeHtml(shortWhen(e.became_active_at));
-          return `
-            <form method="post" action="/api/release-wave/backend-rollback" style="margin:0 6px 4px 0;display:inline-block">
-              <input type="hidden" name="repo" value="${escapeHtml(b.backend_repo)}">
-              <input type="hidden" name="image" value="${escapeHtml(e.image)}">
-              <button type="submit" class="danger"
-                title="${escapeHtml(b.backend_repo)} の Cloud Run traffic を ${escapeHtml(e.image)} に即 100% で戻す">
-                Rollback to ${label} <span class="meta">(${when})</span>
-              </button>
-            </form>`;
-        })
-        .join("");
-
-      const curTag = b.current_tag ? `${escapeHtml(b.current_tag)} · ` : "";
-      return `
-        <tr>
-          <td>${escapeHtml(b.backend_repo)}</td>
-          <td class="meta" title="${escapeHtml(b.current_image ?? "—")}">${curTag}${escapeHtml(shortId(b.current_image ?? "—"))}</td>
-          <td><div>${buttons}</div></td>
-        </tr>`;
+      const active = renderBackendActiveRow(b);
+      if (!active) return ""; // current_image 不明な record は出さない
+      return active + renderBackendRollbackRow(b);
     })
     .filter((r) => r !== "")
     .join("");
@@ -438,12 +428,74 @@ export function renderBackendRollbackBlock(compat: WaveCompatibility): string {
 
   return `
     <div style="margin-top:10px">
-      <strong class="meta">Backend rollback (Cloud Run revision)</strong>
+      <strong class="meta">Backend traffic / rollback (Cloud Run revision)</strong>
+      <p class="meta" style="margin:4px 0">Cloud Run backend は現 active revision に 100% traffic
+        (canary % 配分なし)。image sha は hover で full、tag は git release tag。</p>
       <table style="margin-top:6px">
-        <thead><tr><th>Backend repo</th><th>Current</th><th>Rollback to (過去 revision)</th></tr></thead>
+        <thead><tr><th>Backend repo</th><th>%</th><th>Tag / Image (sha)</th><th>Deployed (UTC)</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </div>`;
+}
+
+/**
+ * 1 backend の現 active 行 (100% badge + tag + image sha + deployed)。
+ * current_image 不明なら "" (= 行を出さない)。
+ *
+ * Tag (ver) は `<strong>`、image sha は `<code>` (short 表示 / full は title
+ * hover) に分けて markup し、「どれが ver でどれが sha か」を一目で区別できる
+ * ようにする (= 旧 `Current` 列で tag と image が `·` 区切りで混在していた問題)。
+ */
+function renderBackendActiveRow(b: WaveBackendCompat): string {
+  const image = b.current_image;
+  if (!image) return "";
+  const tagPart = b.current_tag
+    ? `<strong>${escapeHtml(b.current_tag)}</strong> `
+    : "";
+  const imgCode = `<code title="${escapeHtml(image)}">${escapeHtml(shortId(image))}</code>`;
+  const when = `<span class="meta" title="${escapeHtml(b.deployed_at ?? "")}">${escapeHtml(shortWhen(b.deployed_at))}</span>`;
+  return `
+            <tr>
+              <td>${escapeHtml(b.backend_repo)}</td>
+              <td><span class="badge" style="background:${GREEN}">100%</span></td>
+              <td>${tagPart}${imgCode}</td>
+              <td>${when}</td>
+            </tr>`;
+}
+
+/**
+ * 1 backend の rollback 行 (deploy_history の「現 active 以外」)。候補無しなら ""。
+ * frontend の Traffic rollback と同じ方針: 過去 revision を即 100% に戻す。
+ */
+function renderBackendRollbackRow(b: WaveBackendCompat): string {
+  const history = b.deploy_history ?? [];
+  const candidates = history.filter((e) => e.image !== b.current_image);
+  if (candidates.length === 0) return "";
+
+  const buttons = candidates
+    .map((e) => {
+      const label = e.tag ? escapeHtml(e.tag) : escapeHtml(shortId(e.image));
+      const when = escapeHtml(shortWhen(e.became_active_at));
+      return `
+            <form method="post" action="/api/release-wave/backend-rollback" style="margin:0 6px 4px 0;display:inline-block">
+              <input type="hidden" name="repo" value="${escapeHtml(b.backend_repo)}">
+              <input type="hidden" name="image" value="${escapeHtml(e.image)}">
+              <button type="submit" class="danger"
+                title="${escapeHtml(b.backend_repo)} の Cloud Run traffic を ${escapeHtml(e.image)} に即 100% で戻す">
+                Rollback to ${label} <span class="meta">(${when})</span>
+              </button>
+            </form>`;
+    })
+    .join("");
+
+  return `
+            <tr>
+              <td></td>
+              <td colspan="3">
+                <span class="meta">Rollback to (過去 revision):</span>
+                <div style="margin-top:4px">${buttons}</div>
+              </td>
+            </tr>`;
 }
 
 /**

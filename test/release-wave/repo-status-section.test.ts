@@ -438,13 +438,14 @@ describe("renderBackendRollbackBlock", () => {
     return { verified: true, checked: true, backends };
   }
 
-  it("renders Rollback buttons for prior Cloud Run revisions (Refs #197)", () => {
+  it("renders the current active row (100% + tag + image sha + deployed) and Rollback buttons for prior Cloud Run revisions (Refs #197)", () => {
     const html = renderBackendRollbackBlock(
       compat([
         {
           backend_repo: "ippoan/rust-alc-api",
           current_image: "rust-alc-api-00042-abc",
           current_tag: "v1.4.2",
+          deployed_at: "2026-05-29T09:30:00Z",
           deploy_history: [
             { image: "rust-alc-api-00042-abc", tag: "v1.4.2", became_active_at: "2026-05-29T09:30:00Z" },
             { image: "rust-alc-api-00041-xyz", tag: "v1.4.1", became_active_at: "2026-05-28T11:37:00Z" },
@@ -453,27 +454,102 @@ describe("renderBackendRollbackBlock", () => {
         },
       ]),
     );
-    expect(html).toContain("Backend rollback (Cloud Run revision)");
+    expect(html).toContain("Backend traffic / rollback (Cloud Run revision)");
+    // 現 active 行: 100% badge + tag (ver) + image sha (full は title) + deployed。
+    expect(html).toContain(">100%</span>");
+    expect(html).toContain("v1.4.2");
+    expect(html).toContain('title="rust-alc-api-00042-abc"'); // image full は hover
+    expect(html).toContain("05-29 09:30"); // deployed (UTC, MM-DD HH:mm)
+    // rollback 行: 過去 revision へのボタン。
     expect(html).toContain("/api/release-wave/backend-rollback");
     expect(html).toContain('name="image" value="rust-alc-api-00041-xyz"');
     expect(html).toContain("Rollback to v1.4.1");
-    // 現 active (00042) への rollback ボタンは出さない。
+    // 現 active (00042) への rollback ボタン (input) は出さない。
     expect(html).not.toContain('name="image" value="rust-alc-api-00042-abc"');
   });
 
-  it("returns empty string when no backend has rollback candidates", () => {
+  it("shows the current active row even without rollback candidates (deploy 直後で履歴 1 件)", () => {
+    // 過去 active が無くても image sha / tag / 100% / deployed は出す。従来はここで
+    // "" を返して Cloud Run repo が丸ごと不可視だった (ver も sha も traffic も
+    // 見えない、が今回の修正動機)。
     const html = renderBackendRollbackBlock(
       compat([
         {
           backend_repo: "ippoan/rust-alc-api",
-          current_image: "cur",
+          current_image: "c1b3e5146b15deadbeef",
           current_tag: null,
-          deploy_history: [{ image: "cur", tag: null, became_active_at: "t" }],
+          deployed_at: "2026-06-03T15:00:00Z",
+          deploy_history: [
+            { image: "c1b3e5146b15deadbeef", tag: null, became_active_at: "2026-06-03T15:00:00Z" },
+          ],
+          matrix: [],
+        },
+      ]),
+    );
+    expect(html).toContain("Backend traffic / rollback (Cloud Run revision)");
+    expect(html).toContain(">100%</span>");
+    expect(html).toContain("c1b3e5146b15"); // image sha short 表示 (12 文字)
+    expect(html).toContain('title="c1b3e5146b15deadbeef"'); // full は hover
+    expect(html).toContain("06-03 15:00"); // deployed (UTC)
+    // 過去 revision が無いので rollback ボタンは出さない。
+    expect(html).not.toContain("/api/release-wave/backend-rollback");
+  });
+
+  it("renders — for deployed_at when the record has no timestamp", () => {
+    const html = renderBackendRollbackBlock(
+      compat([
+        {
+          backend_repo: "ippoan/x",
+          current_image: "img-1",
+          current_tag: "v0.1.0",
+          deployed_at: null,
+          deploy_history: [],
+          matrix: [],
+        },
+      ]),
+    );
+    expect(html).toContain(">100%</span>");
+    expect(html).toContain("v0.1.0");
+    expect(html).toContain("—"); // deployed_at 無し → "—"
+  });
+
+  it("returns empty string when a backend record has no current_image", () => {
+    const html = renderBackendRollbackBlock(
+      compat([
+        {
+          backend_repo: "ippoan/rust-alc-api",
+          current_image: null,
+          current_tag: null,
+          deployed_at: null,
+          deploy_history: [],
           matrix: [],
         },
       ]),
     );
     expect(html).toBe("");
+  });
+
+  it("escapes repo names, tags and image ids", () => {
+    const html = renderBackendRollbackBlock(
+      compat([
+        {
+          backend_repo: 'a/<b>"&',
+          current_image: "<img>",
+          current_tag: "<tag>",
+          deployed_at: "2026-06-03T15:00:00Z",
+          deploy_history: [
+            { image: "<img>", tag: "<tag>", became_active_at: "2026-06-03T15:00:00Z" },
+          ],
+          matrix: [],
+        },
+      ]),
+    );
+    expect(html).not.toContain("<b>");
+    expect(html).toContain("&lt;b&gt;");
+    expect(html).not.toContain("<img>");
+    expect(html).toContain("&lt;img&gt;");
+    expect(html).not.toContain("<tag>");
+    expect(html).toContain("&lt;tag&gt;");
   });
 });
 

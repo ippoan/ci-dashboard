@@ -367,6 +367,8 @@ export interface WaveBackendCompat {
   current_image: string | null;
   /** current_image に対応する git release tag (v2 record のみ、無ければ null)。Refs #197。 */
   current_tag: string | null;
+  /** 現 active image を deploy した UTC ISO (`backend::<repo>.deployed_at`、record 無しは null)。 */
+  deployed_at: string | null;
   /** 過去 revision の rollback 先候補 (新しい順、record 無し / v1 なら空)。Refs #197。 */
   deploy_history: BackendDeployHistoryEntry[];
   /** 当該 backend を test 済みの frontend の matrix (consumer 無しなら空)。 */
@@ -408,6 +410,7 @@ export async function computeWaveCompatibility(
       wave_id: rec.wave_id ?? null,
       current_image: rec.current_image,
       current_tag: rec.current_tag ?? null,
+      deployed_at: rec.deployed_at ?? null,
       deploy_history: Array.isArray(rec.deploy_history) ? rec.deploy_history : [],
       matrix: compat.matrix,
     });
