@@ -265,13 +265,27 @@ export function computeUnifiedPending(
     seen.add(repo);
   }
   for (const r of pendingRecords) {
-    if (seen.has(r.repo)) continue; // traffic:: の no-traffic version を持つ repo は traffic:: 優先
+    if (seen.has(r.repo)) continue; // traffic:: の no-traffic promotable を持つ repo は traffic:: 優先
+    const rec = trafficByRepo.get(r.repo) ?? null;
+    // flip 済み判定: pending-release:: が指す version が traffic:: で既に active
+    // (percentage > 0) なら、その release は既に flip 済み。pending-release:: は
+    // deploy 時 (frontend-ci) に作られ traffic-report では clear されないため、
+    // flip 後も stale record として残る。これを出すと「flip 済みなのに Pending に
+    // 残る」状態になる (Refs ippoan/ci-dashboard#248)。
+    // ※ deploy 直後 (未 flip) は traffic:: に当該 version が無い (= active 判定
+    //    false) ので、ちゃんと Pending に出る。
+    if (
+      rec &&
+      (rec.versions ?? []).some(
+        (v) => v.version_id === r.version_id && v.percentage > 0,
+      )
+    ) {
+      continue;
+    }
     // pending source (cloudrun 等) でも traffic:: record があれば現 active を
     // rollback 先として控える (= 一括 flip → flip-group rollback の戻し先確保、
     // Refs ippoan/ci-dashboard#241)。traffic:: が無ければ null (戻し先不明)。
-    const active = trafficByRepo.has(r.repo)
-      ? currentActiveOf(trafficByRepo.get(r.repo)!)
-      : null;
+    const active = rec ? currentActiveOf(rec) : null;
     out.push({
       repo: r.repo,
       version_id: r.version_id,
