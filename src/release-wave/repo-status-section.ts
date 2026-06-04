@@ -373,19 +373,13 @@ function renderTrafficRollbackRow(repo: string, rec: TrafficRecord): string {
   // だった version へ戻す」rollback 専用。戻し先が無ければ行を出さない。
   if (candidates.length === 0) return "";
 
-  const buttons = candidates
+  // 候補が増えると button 横並びが画面を埋めるので、select で 1 つ選んで 1 ボタンで
+  // 戻す list + button 形式にコンパクト化 (戻し先候補は最新が先頭になるよう降順)。
+  const options = candidates
     .map((e) => {
       const label = e.tag ? escapeHtml(e.tag) : escapeHtml(shortId(e.version_id));
       const when = escapeHtml(shortWhen(e.became_active_at));
-      return `
-            <form method="post" action="/api/release-wave/traffic-rollback" style="margin:0 6px 4px 0;display:inline-block">
-              <input type="hidden" name="repo" value="${escapeHtml(repo)}">
-              <input type="hidden" name="version_id" value="${escapeHtml(e.version_id)}">
-              <button type="submit" class="danger"
-                title="${escapeHtml(repo)} を ${escapeHtml(e.version_id)} に即 100% で戻す (wrangler versions deploy ${escapeHtml(e.version_id)}@100%)">
-                Rollback to ${label} <span class="meta">(${when})</span>
-              </button>
-            </form>`;
+      return `<option value="${escapeHtml(e.version_id)}" title="${escapeHtml(e.version_id)}">${label} (${when})</option>`;
     })
     .join("");
 
@@ -393,8 +387,16 @@ function renderTrafficRollbackRow(repo: string, rec: TrafficRecord): string {
             <tr>
               <td></td>
               <td colspan="3">
-                <span class="meta">Rollback to (過去の deployed version):</span>
-                <div style="margin-top:4px">${buttons}</div>
+                <form method="post" action="/api/release-wave/traffic-rollback"
+                  style="margin:0;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+                  <input type="hidden" name="repo" value="${escapeHtml(repo)}">
+                  <span class="meta">Rollback to:</span>
+                  <select name="version_id" style="max-width:280px">${options}</select>
+                  <button type="submit" class="danger"
+                    title="${escapeHtml(repo)} を選択した version に即 100% で戻す (wrangler versions deploy <id>@100%)">
+                    Rollback
+                  </button>
+                </form>
               </td>
             </tr>`;
 }
@@ -536,19 +538,13 @@ function renderBackendRollbackRow(b: WaveBackendCompat): string {
   const candidates = history.filter((e) => e.image !== b.current_image);
   if (candidates.length === 0) return "";
 
-  const buttons = candidates
+  // frontend の Traffic rollback と対称に、候補を select で 1 つ選んで 1 ボタンで
+  // 戻す list + button 形式にコンパクト化する。
+  const options = candidates
     .map((e) => {
       const label = e.tag ? escapeHtml(e.tag) : escapeHtml(shortId(e.image));
       const when = escapeHtml(shortWhen(e.became_active_at));
-      return `
-            <form method="post" action="/api/release-wave/backend-rollback" style="margin:0 6px 4px 0;display:inline-block">
-              <input type="hidden" name="repo" value="${escapeHtml(b.backend_repo)}">
-              <input type="hidden" name="image" value="${escapeHtml(e.image)}">
-              <button type="submit" class="danger"
-                title="${escapeHtml(b.backend_repo)} の Cloud Run traffic を ${escapeHtml(e.image)} に即 100% で戻す">
-                Rollback to ${label} <span class="meta">(${when})</span>
-              </button>
-            </form>`;
+      return `<option value="${escapeHtml(e.image)}" title="${escapeHtml(e.image)}">${label} (${when})</option>`;
     })
     .join("");
 
@@ -556,8 +552,16 @@ function renderBackendRollbackRow(b: WaveBackendCompat): string {
             <tr>
               <td></td>
               <td colspan="3">
-                <span class="meta">Rollback to (過去 revision):</span>
-                <div style="margin-top:4px">${buttons}</div>
+                <form method="post" action="/api/release-wave/backend-rollback"
+                  style="margin:0;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+                  <input type="hidden" name="repo" value="${escapeHtml(b.backend_repo)}">
+                  <span class="meta">Rollback to:</span>
+                  <select name="image" style="max-width:340px">${options}</select>
+                  <button type="submit" class="danger"
+                    title="${escapeHtml(b.backend_repo)} の Cloud Run traffic を選択した revision に即 100% で戻す">
+                    Rollback
+                  </button>
+                </form>
               </td>
             </tr>`;
 }

@@ -383,10 +383,12 @@ describe("renderTrafficVersionsBlock", () => {
     };
     const html = renderTrafficVersionsBlock(["ippoan/auth-worker"], new Map([["ippoan/auth-worker", r]]));
     expect(html).toContain("/api/release-wave/traffic-rollback");
-    expect(html).toContain('name="version_id" value="prev"');
-    expect(html).toContain("Rollback to v0.2.49");
-    // 現 active (cur) への rollback ボタンは出さない。
-    expect(html).not.toContain('name="version_id" value="cur"');
+    // list + button 形式: select の option に過去 version、ボタンは 1 つ。
+    expect(html).toContain('<select name="version_id"');
+    expect(html).toContain('<option value="prev"');
+    expect(html).toContain("v0.2.49 (");
+    // 現 active (cur) は戻し先候補にしない (option に出さない)。
+    expect(html).not.toContain('value="cur"');
   });
 
   it("renders no Rollback button when deploy_history has only the active version", () => {
@@ -461,12 +463,13 @@ describe("renderBackendRollbackBlock", () => {
     expect(html).toContain("v1.4.2");
     expect(html).toContain('title="rust-alc-api-00042-abc"'); // image full は hover
     expect(html).toContain("05-29 09:30"); // deployed (UTC, MM-DD HH:mm)
-    // rollback 行: 過去 revision へのボタン。
+    // rollback 行: list + button 形式 (select の option に過去 revision)。
     expect(html).toContain("/api/release-wave/backend-rollback");
-    expect(html).toContain('name="image" value="rust-alc-api-00041-xyz"');
-    expect(html).toContain("Rollback to v1.4.1");
-    // 現 active (00042) への rollback ボタン (input) は出さない。
-    expect(html).not.toContain('name="image" value="rust-alc-api-00042-abc"');
+    expect(html).toContain('<select name="image"');
+    expect(html).toContain('<option value="rust-alc-api-00041-xyz"');
+    expect(html).toContain("v1.4.1 (");
+    // 現 active (00042) は戻し先候補にしない (option value に出さない)。
+    expect(html).not.toContain('value="rust-alc-api-00042-abc"');
   });
 
   it("shows the current active row even without rollback candidates (deploy 直後で履歴 1 件)", () => {
