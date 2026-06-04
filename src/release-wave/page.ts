@@ -358,15 +358,17 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
       trafficByRepo = new Map();
     }
   }
+  // Pending releases は単一真実 (Refs #237): workers=traffic:: の no-traffic
+  // version / cloudrun=pending-release:: を統合し、Traffic セクションと一致させる。
+  // compat section の「Staged previews」内 ⚡ Flip all ボタンの出し分けに件数を使う
+  // ため、compatSection より先に算出する。
+  const unifiedPending = computeUnifiedPending(trafficByRepo, pendingReleases);
   const compatSection = renderGlobalCompatibilitySection(
     globalCompat,
     buildActiveWaveInfo(waves),
     trafficByRepo,
+    unifiedPending.length,
   );
-
-  // Pending releases は単一真実 (Refs #237): workers=traffic:: の no-traffic
-  // version / cloudrun=pending-release:: を統合し、Traffic セクションと一致させる。
-  const unifiedPending = computeUnifiedPending(trafficByRepo, pendingReleases);
   const pendingReleaseSection = renderPendingReleaseSection(
     unifiedPending,
     flipGroup,
@@ -830,6 +832,7 @@ function renderGlobalCompatibilitySection(
   compat: WaveCompatibility | null,
   active?: ActiveWaveInfo,
   trafficByRepo?: Map<string, TrafficRecord>,
+  pendingFlipCount = 0,
 ): string {
   if (!compat || compat.backends.length === 0) {
     return `
@@ -861,7 +864,7 @@ function renderGlobalCompatibilitySection(
         Refs <a href="https://github.com/ippoan/ci-dashboard/issues/157">#157</a>.</p>
       ${body}
       ${renderGlobalRetestButtons(compat)}
-      ${renderActiveWaveOverlay(active)}
+      ${renderActiveWaveOverlay(active, pendingFlipCount)}
     </div>`;
 }
 
@@ -921,7 +924,10 @@ function renderGlobalRetestButtons(compat: WaveCompatibility): string {
  * active wave が無い時も block 自体は常に描画し、placeholder / disabled ボタンを
  * 出す (= UI affordance を常設して「ここで flip できる」ことを見せる)。
  */
-function renderActiveWaveOverlay(active?: ActiveWaveInfo): string {
+function renderActiveWaveOverlay(
+  active?: ActiveWaveInfo,
+  pendingFlipCount = 0,
+): string {
   const previewEntries = active ? [...active.preview.entries()] : [];
   const pendingFlips = active ? active.pendingFlips : [];
 
@@ -944,16 +950,20 @@ function renderActiveWaveOverlay(active?: ActiveWaveInfo): string {
   // 一括 flip: 全 pending release (no-traffic version) を 100% へ promote する。
   // Pending releases セクションの "⚡ Flip all" と同じ endpoint を叩く (= staged
   // preview を確認した上でここから直接まとめて flip できる affordance)。
-  // pending release が 0 件でも endpoint 側が no-op で安全に返すので常設する。
-  const bulkFlipBtn = `
+  // **flip 対象 (pending release) が 0 件なら出さない** — 「active な wave は
+  // ありません」と矛盾するため (= 何も flip できないのにボタンを出さない)。
+  const bulkFlipBtn =
+    pendingFlipCount > 0
+      ? `
     <form method="post" action="/api/release-wave/pending-release/flip-all"
           style="margin:0 8px 0 0"
-          onsubmit="return confirm('全 pending release (no-traffic version) を一括で 100% flip します。よろしいですか？');">
+          onsubmit="return confirm('${pendingFlipCount} 件の pending release (no-traffic version) を一括で 100% flip します。よろしいですか？');">
       <button type="submit"
         title="全 pending release (no-traffic version) を一括で 100% traffic へ flip">
-        ⚡ Flip all to 100%
+        ⚡ Flip all to 100% (${pendingFlipCount})
       </button>
-    </form>`;
+    </form>`
+      : "";
 
   // pending-approval の wave ごとに Approve & Flip ボタン。一覧 (list page) と
   // 同じく force は付けない (compat gate ブロック時は詳細ページで override)。
@@ -968,11 +978,17 @@ function renderActiveWaveOverlay(active?: ActiveWaveInfo): string {
         </form>`,
     )
     .join("");
-  const flipBlock = `
+
+  // flip 対象も active wave も無ければ actions block 自体を出さない
+  // (空の <div> でボタン枠だけ残るのを防ぐ)。
+  const flipBlock =
+    bulkFlipBtn || flips
+      ? `
     <div class="actions" style="margin-top:10px">
       ${bulkFlipBtn}
       ${flips}
-    </div>`;
+    </div>`
+      : "";
 
   return previewBlock + flipBlock;
 }

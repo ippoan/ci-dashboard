@@ -1151,32 +1151,57 @@ describe("handleReleaseWaveListPage global compat overlay", () => {
     expect(html).toContain("Staged previews");
   });
 
-  it("always renders the overlay with placeholder + 一括 flip button when no active waves", async () => {
+  /** pending release を 1 件持つ KV seed (= ⚡ Flip all を出す条件)。 */
+  const pendingSeed = {
+    ...compatSeed,
+    "pending-release::ippoan/auth-worker": {
+      schema_version: 1,
+      repo: "ippoan/auth-worker",
+      version_id: "530b908c-5385-451c-b163-747caaedafd3",
+      tag: "v0.2.38",
+      preview_url: "https://abc-auth-worker.example.workers.dev",
+      uploaded_at: "2026-05-28T12:00:00Z",
+    },
+  };
+
+  it("omits the 一括 flip button when there are no pending releases (no contradiction)", async () => {
     const env = fakeEnv({
       listReturn: [makeWave({ wave_id: "w-done", state: "flipped" })],
       compatKv: memKv(compatSeed),
     });
     const html = await (await handleReleaseWaveListPage(env)).text();
-    // block 自体は常に出る
+    // block 自体は常に出る (placeholder)
     expect(html).toContain("Staged previews");
     expect(html).toContain("active な wave");
-    // 具体的な flip 対象 (wave_id 付き Approve & Flip ボタン) は無い
-    expect(html).not.toContain("Approve &amp; Flip: ");
-    // 一括 flip ボタンは常設 (pending-release/flip-all へ POST)
-    expect(html).toContain("⚡ Flip all to 100%");
-    expect(html).toContain(
-      'action="/api/release-wave/pending-release/flip-all"',
-    );
+    // flip 対象 (pending release) が 0 件なら ⚡ Flip all は出さない
+    // (= 「active な wave はありません」との矛盾を防ぐ)
+    expect(html).not.toContain("Flip all to 100%");
   });
 
-  it("renders the 一括 flip button in the Staged previews block", async () => {
+  it("renders the 一括 flip button when there are pending releases (even with no active waves)", async () => {
     const env = fakeEnv({
-      listReturn: [activeWave()],
-      compatKv: memKv(compatSeed),
+      listReturn: [makeWave({ wave_id: "w-done", state: "flipped" })],
+      compatKv: memKv(pendingSeed),
     });
     const html = await (await handleReleaseWaveListPage(env)).text();
     expect(html).toContain("Staged previews");
-    expect(html).toContain("⚡ Flip all to 100%");
+    // pending release が 1 件あるので件数付きで出す
+    expect(html).toContain("⚡ Flip all to 100% (1)");
+    expect(html).toContain(
+      'action="/api/release-wave/pending-release/flip-all"',
+    );
+    // 具体的な flip 対象 (wave_id 付き Approve & Flip ボタン) は無い
+    expect(html).not.toContain("Approve &amp; Flip: ");
+  });
+
+  it("renders the 一括 flip button alongside per-wave Approve & Flip", async () => {
+    const env = fakeEnv({
+      listReturn: [activeWave()],
+      compatKv: memKv(pendingSeed),
+    });
+    const html = await (await handleReleaseWaveListPage(env)).text();
+    expect(html).toContain("Staged previews");
+    expect(html).toContain("⚡ Flip all to 100% (1)");
     expect(html).toContain(
       'action="/api/release-wave/pending-release/flip-all"',
     );
