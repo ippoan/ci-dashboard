@@ -280,6 +280,62 @@ describe("handleReleaseWaveListPage", () => {
     expect(formChunk).not.toContain('name="force"');
   });
 
+  it("splits a multi-repo wave into one row per front (rowspan on wave cells)", async () => {
+    const mkRepo = (over: Record<string, unknown>) => ({
+      repo: "ippoan/x",
+      target_tag: "v1",
+      head_sha: "deadbee",
+      require_compatibility: false,
+      stage_status: "done",
+      preview_url: null,
+      stage_error: null,
+      flip_status: "pending",
+      flip_error: null,
+      flip_from_revision: null,
+      rolled_back_to_revision: null,
+      ...over,
+    });
+    const env = fakeEnv({
+      listReturn: [
+        makeWave({
+          wave_id: "w-multi",
+          state: "pending-approval",
+          repos: [
+            mkRepo({
+              repo: "ippoan/auth-worker",
+              head_sha: "aaaaaaa",
+              preview_url: "https://preview-auth.ippoan.org/",
+              stage_status: "done",
+              flip_status: "pending",
+            }),
+            mkRepo({
+              repo: "ippoan/nuxt-notify",
+              head_sha: "bbbbbbb",
+              preview_url: null,
+              stage_status: "failed",
+              flip_status: "pending",
+            }),
+          ],
+        }),
+      ],
+    });
+    const html = await (await handleReleaseWaveListPage(env)).text();
+    // wave 共通セルは rowspan=2 (= repo 数) で 1 度だけ出る
+    expect(html).toContain('rowspan="2"');
+    // 各 front が独立した <td> として出る
+    expect(html).toContain("ippoan/auth-worker");
+    expect(html).toContain("ippoan/nuxt-notify");
+    // front ごとの preview / sha
+    expect(html).toContain('href="https://preview-auth.ippoan.org/"');
+    expect(html).toContain("aaaaaaa");
+    expect(html).toContain("bbbbbbb");
+    // front ごとの stage 状態 (nuxt-notify は failed)
+    expect(html).toContain('<span class="err">failed</span>');
+    // Approve & Flip ボタンは wave あたり 1 度だけ (rowspan セル。compat overlay は
+    // COMPAT_KV 未 bind なので出ない)
+    expect(html.match(/Approve &amp; Flip/g)?.length).toBe(1);
+  });
+
   it("hides terminal waves older than the latest flipped wave (active always shown)", async () => {
     const env = fakeEnv({
       listReturn: [
