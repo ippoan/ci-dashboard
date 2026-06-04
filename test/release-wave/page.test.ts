@@ -280,6 +280,168 @@ describe("handleReleaseWaveListPage", () => {
     expect(formChunk).not.toContain('name="force"');
   });
 
+  it("hides terminal waves older than the latest flipped wave (active always shown)", async () => {
+    const env = fakeEnv({
+      listReturn: [
+        // 最新の成功デプロイ
+        makeWave({
+          wave_id: "w-flip",
+          state: "flipped",
+          started_at: "2026-06-01T00:00:00Z",
+        }),
+        // flip より前の失敗 → 隠す
+        makeWave({
+          wave_id: "w-old-fail",
+          state: "failed",
+          started_at: "2026-05-30T00:00:00Z",
+        }),
+        // flip より前の中止 → 隠す
+        makeWave({
+          wave_id: "w-old-abort",
+          state: "aborted",
+          started_at: "2026-05-29T00:00:00Z",
+        }),
+        // flip より後の失敗 → 残す (まだ次の成功 deploy が無い)
+        makeWave({
+          wave_id: "w-new-fail",
+          state: "failed",
+          started_at: "2026-06-02T00:00:00Z",
+        }),
+        // active は常に表示
+        makeWave({
+          wave_id: "w-active",
+          state: "staging",
+          started_at: "2026-05-01T00:00:00Z",
+        }),
+      ],
+    });
+    const html = await (await handleReleaseWaveListPage(env)).text();
+    // cutoff (= w-flip) 自身と、それ以降の terminal、active は表示
+    expect(html).toContain("/release-wave/w-flip");
+    expect(html).toContain("/release-wave/w-new-fail");
+    expect(html).toContain("/release-wave/w-active");
+    // cutoff より前の terminal は一覧から消える
+    expect(html).not.toContain("/release-wave/w-old-fail");
+    expect(html).not.toContain("/release-wave/w-old-abort");
+  });
+
+  it("shows all waves when none has flipped yet (no deploy → no hiding)", async () => {
+    const env = fakeEnv({
+      listReturn: [
+        makeWave({
+          wave_id: "f1",
+          state: "failed",
+          started_at: "2026-05-30T00:00:00Z",
+        }),
+        makeWave({
+          wave_id: "f2",
+          state: "aborted",
+          started_at: "2026-05-29T00:00:00Z",
+        }),
+      ],
+    });
+    const html = await (await handleReleaseWaveListPage(env)).text();
+    expect(html).toContain("/release-wave/f1");
+    expect(html).toContain("/release-wave/f2");
+  });
+
+  it("renders a per-frontend tracking section with latest preview + last flip", async () => {
+    const repo = (over: Record<string, unknown>) => ({
+      repo: "ippoan/auth-worker",
+      target_tag: "v1",
+      head_sha: "abc1234",
+      require_compatibility: false,
+      stage_status: "done",
+      preview_url: null,
+      stage_error: null,
+      flip_status: "pending",
+      flip_error: null,
+      flip_from_revision: null,
+      rolled_back_to_revision: null,
+      ...over,
+    });
+    const env = fakeEnv({
+      listReturn: [
+        // 最新 wave: preview あり、まだ flip 前
+        makeWave({
+          wave_id: "w-new",
+          state: "pending-approval",
+          started_at: "2026-06-03T00:00:00Z",
+          repos: [
+            repo({
+              preview_url: "https://preview-auth.ippoan.org/",
+              head_sha: "newsha0",
+              flip_status: "pending",
+            }),
+          ],
+        }),
+        // 過去 wave: ここで flip (deploy) 済み、preview は古い
+        makeWave({
+          wave_id: "w-deployed",
+          state: "flipped",
+          started_at: "2026-06-01T00:00:00Z",
+          repos: [
+            repo({
+              target_tag: "v0.9",
+              preview_url: "https://stale-auth.ippoan.org/",
+              head_sha: "oldsha0",
+              flip_status: "done",
+            }),
+          ],
+        }),
+      ],
+    });
+    const html = await (await handleReleaseWaveListPage(env)).text();
+    expect(html).toContain("Frontends (per-repo tracking)");
+    expect(html).toContain("ippoan/auth-worker");
+    // 最新 flip 以降 (w-new) の preview を採用
+    expect(html).toContain('href="https://preview-auth.ippoan.org/"');
+    // 最後の deploy = w-deployed (tag v0.9) へリンク
+    expect(html).toContain("/release-wave/w-deployed");
+    expect(html).toContain("v0.9");
+  });
+
+  it("hides a frontend preview that predates that frontend's last flip", async () => {
+    const repo = (over: Record<string, unknown>) => ({
+      repo: "ippoan/auth-worker",
+      target_tag: "v1",
+      head_sha: "abc1234",
+      require_compatibility: false,
+      stage_status: "done",
+      preview_url: null,
+      stage_error: null,
+      flip_status: "pending",
+      flip_error: null,
+      flip_from_revision: null,
+      rolled_back_to_revision: null,
+      ...over,
+    });
+    const env = fakeEnv({
+      listReturn: [
+        // 最新 wave = flip 済み、preview 無し
+        makeWave({
+          wave_id: "w-deployed",
+          state: "flipped",
+          started_at: "2026-06-02T00:00:00Z",
+          repos: [repo({ preview_url: null, flip_status: "done" })],
+        }),
+        // flip より前の preview → frontend section では隠す
+        makeWave({
+          wave_id: "w-old",
+          state: "aborted",
+          started_at: "2026-06-01T00:00:00Z",
+          repos: [
+            repo({ preview_url: "https://stale-auth.ippoan.org/" }),
+          ],
+        }),
+      ],
+    });
+    const html = await (await handleReleaseWaveListPage(env)).text();
+    expect(html).toContain("Frontends (per-repo tracking)");
+    // 古い preview は frontend section に出さない (Latest preview = —)
+    expect(html).not.toContain("https://stale-auth.ippoan.org/");
+  });
+
   it("shows version traffic (100% / 0%) in the compat graph frontend node hover", async () => {
     const env = fakeEnv({
       listReturn: [],
