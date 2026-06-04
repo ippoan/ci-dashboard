@@ -155,6 +155,10 @@ const COMMON_STYLES = `
   .err { color: #d93025; }
   .pending { color: #9aa0a6; }
   .toolbar { margin: 8px 0 16px; display: flex; gap: 8px; align-items: center; }
+  .page-header { display: flex; align-items: baseline; gap: 12px; margin: 8px 0 16px;
+    flex-wrap: wrap; }
+  .page-header h1 { margin: 0; }
+  .page-header .refresh-btn { margin-left: auto; }
   .refresh-btn { display: inline-block; background: #1a73e8; color: #fff;
     padding: 8px 16px; border-radius: 4px; font-size: 14px; font-weight: 500;
     text-decoration: none; cursor: pointer; }
@@ -394,15 +398,12 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
 <body>
   <div class="container">
     ${renderTabs("release-wave")}
-    <h1>Release Waves</h1>
-    <div class="toolbar">
+    <div class="page-header">
+      <h1>Release Waves</h1>
+      <span class="meta">Cross-repo coordinated release flows. Refs <a href="https://github.com/ippoan/ci-dashboard/issues/137">#137</a>.</span>
       <a class="refresh-btn" href="/release-wave"
         title="ページを再取得して最新状態に更新する (ブラウザキャッシュ無視 = ハードリセット)">🔄 更新（ハードリセット）</a>
     </div>
-    <p class="meta">
-      Cross-repo coordinated release flows. Refs
-      <a href="https://github.com/ippoan/ci-dashboard/issues/137">#137</a>.
-    </p>
     ${compatSection}
     ${pendingReleaseSection}
     ${frontendSection}
