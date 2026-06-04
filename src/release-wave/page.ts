@@ -128,7 +128,9 @@ const COMMON_STYLES = `
   th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid #e8eaed; }
   th { background: #f1f3f4; font-weight: 600; font-size: 13px; color: #5f6368; }
   td { font-size: 14px; }
-  .container { max-width: 1100px; margin: 0 auto; }
+  /* フル HD (1920px) / WQHD などのワイド画面で横幅を活用する。table は
+     width:100% なので container 拡大に追従して広がり、左右の余白が減る。 */
+  .container { max-width: 1600px; margin: 0 auto; }
   .badge { display: inline-block; padding: 2px 8px; border-radius: 10px;
     color: #fff; font-size: 12px; font-weight: 600; }
   .empty { padding: 24px; color: #5f6368; text-align: center; font-style: italic; }
@@ -179,6 +181,14 @@ const COMMON_STYLES = `
   .help-tip .help-pop a { color: #8ab4f8; }
   .help-tip:hover .help-pop, .help-tip:focus .help-pop,
   .help-tip:focus-within .help-pop { display: block; }
+  /* セクションを縦一列ではなく画面幅に応じて動的に段組みする。
+     auto-fit + minmax により、広い画面 (フル HD 等) では横並び、狭い画面では
+     自動で 1 列に折り返す (メディアクエリ不要)。各カラムは内容量で高さが
+     決まるよう align-items:start。grid の gap を使うので子 .section の
+     縦 margin は打ち消す。 */
+  .wave-grid { display: grid; gap: 16px; align-items: start;
+    grid-template-columns: repeat(auto-fit, minmax(560px, 1fr)); }
+  .wave-grid > .section { margin: 0; }
 `;
 
 /**
@@ -495,9 +505,11 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
       <a class="refresh-btn" href="/release-wave"
         title="ページを再取得して最新状態に更新する (ブラウザキャッシュ無視 = ハードリセット)">🔄 更新（ハードリセット）</a>
     </div>
-    ${compatSection}
-    ${pendingReleaseSection}
-    ${frontendSection}
+    <div class="wave-grid">
+      ${compatSection}
+      ${pendingReleaseSection}
+      ${frontendSection}
+    </div>
   </div>
 </body>
 </html>`;
