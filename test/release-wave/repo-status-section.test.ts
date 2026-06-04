@@ -590,6 +590,7 @@ describe("renderBackendRollbackBlock", () => {
     expect(html).toContain(">100%</span>");
     expect(html).toContain(">0%</span>");
     expect(html).toContain('title="rust-alc-api-00042-abc"'); // revision full は hover
+    expect(html).toContain(">00042-abc</code>"); // service prefix を剥がした revision 番号 (Refs #256)
     expect(html).toContain('title="rust-alc-api-00043-xyz"');
     expect(html).toContain("pending-v1-4-3"); // revision tag
   });
