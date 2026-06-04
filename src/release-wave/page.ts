@@ -186,7 +186,7 @@ const COMMON_STYLES = `
  * ツールチップ表示する。説明は rich HTML (code / strong / a) を保持できる。
  * 従来 <h2> 直下に <p class="meta"> で出していた説明をここに畳む用途。
  */
-function helpMark(html: string): string {
+export function helpMark(html: string): string {
   return `<span class="help-tip" tabindex="0" role="note"
     aria-label="説明"><span aria-hidden="true">?</span><span class="help-pop">${html}</span></span>`;
 }
