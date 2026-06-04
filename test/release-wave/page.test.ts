@@ -113,14 +113,17 @@ function makeWave(over: Partial<WaveState> = {}): WaveState {
 // ============================================================================
 
 describe("handleReleaseWaveListPage", () => {
-  it("renders empty state when no waves", async () => {
+  it("renders the page (Frontends placeholder) when no waves", async () => {
     const env = fakeEnv({ listReturn: [] });
     const resp = await handleReleaseWaveListPage(env);
     expect(resp.status).toBe(200);
     expect(resp.headers.get("Content-Type")).toContain("text/html");
     const html = await resp.text();
     expect(html).toContain("Release Waves");
-    expect(html).toContain("No release waves yet");
+    // wave 中心の一覧テーブルは廃止。frontend 単位の追跡セクションに集約。
+    expect(html).toContain("Frontends (per-repo tracking)");
+    expect(html).toContain("No frontends tracked yet");
+    expect(html).not.toContain("<th>Wave ID</th>");
   });
 
   it("renders a hard-reset refresh button on the list page", async () => {
@@ -163,23 +166,6 @@ describe("handleReleaseWaveListPage", () => {
     expect(html).toContain('name="repo" value="ippoan/auth-worker"');
     // safeHttpUrl は new URL().toString() で末尾スラッシュを正規化する
     expect(html).toContain('href="https://abc-auth-worker.example.workers.dev/"');
-  });
-
-  it("lists each wave with state badge + detail link", async () => {
-    const env = fakeEnv({
-      listReturn: [
-        makeWave({ wave_id: "w1", state: "flipped" }),
-        makeWave({ wave_id: "w2", state: "staging" }),
-      ],
-    });
-    const resp = await handleReleaseWaveListPage(env);
-    const html = await resp.text();
-    expect(html).toContain("w1");
-    expect(html).toContain("w2");
-    expect(html).toContain("/release-wave/w1");
-    expect(html).toContain("/release-wave/w2");
-    expect(html).toContain("flipped");
-    expect(html).toContain("staging");
   });
 
   it("escapes HTML special chars in wave_id / repo", async () => {
@@ -247,158 +233,6 @@ describe("handleReleaseWaveListPage", () => {
     });
     const html = await (await handleReleaseWaveListPage(env)).text();
     expect(html).not.toContain("javascript:alert(1)");
-  });
-
-  it("enables the per-wave Approve & Flip button only in pending-approval", async () => {
-    const env = fakeEnv({
-      listReturn: [
-        makeWave({ wave_id: "w-pending", state: "pending-approval" }),
-        makeWave({ wave_id: "w-staging", state: "staging" }),
-      ],
-    });
-    const html = await (await handleReleaseWaveListPage(env)).text();
-    expect(html).toContain("Approve &amp; Flip");
-    // pending-approval wave の form は approve endpoint を向く
-    expect(html).toContain(
-      'action="/api/release-wave/w-pending/approve"',
-    );
-    // staging wave のボタンは disabled
-    const stagingFormIdx = html.indexOf(
-      'action="/api/release-wave/w-staging/approve"',
-    );
-    const stagingButton = html.slice(stagingFormIdx, stagingFormIdx + 200);
-    expect(stagingButton).toContain("disabled");
-  });
-
-  it("does not pass force=true from the list flip button", async () => {
-    const env = fakeEnv({
-      listReturn: [makeWave({ wave_id: "w1", state: "pending-approval" })],
-    });
-    const html = await (await handleReleaseWaveListPage(env)).text();
-    const formIdx = html.indexOf('action="/api/release-wave/w1/approve"');
-    const formChunk = html.slice(formIdx, formIdx + 300);
-    expect(formChunk).not.toContain('name="force"');
-  });
-
-  it("splits a multi-repo wave into one row per front (rowspan on wave cells)", async () => {
-    const mkRepo = (over: Record<string, unknown>) => ({
-      repo: "ippoan/x",
-      target_tag: "v1",
-      head_sha: "deadbee",
-      require_compatibility: false,
-      stage_status: "done",
-      preview_url: null,
-      stage_error: null,
-      flip_status: "pending",
-      flip_error: null,
-      flip_from_revision: null,
-      rolled_back_to_revision: null,
-      ...over,
-    });
-    const env = fakeEnv({
-      listReturn: [
-        makeWave({
-          wave_id: "w-multi",
-          state: "pending-approval",
-          repos: [
-            mkRepo({
-              repo: "ippoan/auth-worker",
-              head_sha: "aaaaaaa",
-              preview_url: "https://preview-auth.ippoan.org/",
-              stage_status: "done",
-              flip_status: "pending",
-            }),
-            mkRepo({
-              repo: "ippoan/nuxt-notify",
-              head_sha: "bbbbbbb",
-              preview_url: null,
-              stage_status: "failed",
-              flip_status: "pending",
-            }),
-          ],
-        }),
-      ],
-    });
-    const html = await (await handleReleaseWaveListPage(env)).text();
-    // wave 共通セルは rowspan=2 (= repo 数) で 1 度だけ出る
-    expect(html).toContain('rowspan="2"');
-    // 各 front が独立した <td> として出る
-    expect(html).toContain("ippoan/auth-worker");
-    expect(html).toContain("ippoan/nuxt-notify");
-    // front ごとの preview / sha
-    expect(html).toContain('href="https://preview-auth.ippoan.org/"');
-    expect(html).toContain("aaaaaaa");
-    expect(html).toContain("bbbbbbb");
-    // front ごとの stage 状態 (nuxt-notify は failed)
-    expect(html).toContain('<span class="err">failed</span>');
-    // Approve & Flip ボタンは wave あたり 1 度だけ (rowspan セル。compat overlay は
-    // COMPAT_KV 未 bind なので出ない)
-    expect(html.match(/Approve &amp; Flip/g)?.length).toBe(1);
-  });
-
-  it("hides terminal waves older than the latest flipped wave (active always shown)", async () => {
-    const env = fakeEnv({
-      listReturn: [
-        // 最新の成功デプロイ
-        makeWave({
-          wave_id: "w-flip",
-          state: "flipped",
-          started_at: "2026-06-01T00:00:00Z",
-        }),
-        // flip より前の失敗 → 隠す
-        makeWave({
-          wave_id: "w-old-fail",
-          state: "failed",
-          started_at: "2026-05-30T00:00:00Z",
-        }),
-        // flip より前の中止 → 隠す
-        makeWave({
-          wave_id: "w-old-abort",
-          state: "aborted",
-          started_at: "2026-05-29T00:00:00Z",
-        }),
-        // flip より後の失敗 → 残す (まだ次の成功 deploy が無い)
-        makeWave({
-          wave_id: "w-new-fail",
-          state: "failed",
-          started_at: "2026-06-02T00:00:00Z",
-        }),
-        // active は常に表示
-        makeWave({
-          wave_id: "w-active",
-          state: "staging",
-          started_at: "2026-05-01T00:00:00Z",
-        }),
-      ],
-    });
-    const html = await (await handleReleaseWaveListPage(env)).text();
-    // cutoff (= w-flip) 自身と、それ以降の terminal、active は表示
-    expect(html).toContain("/release-wave/w-flip");
-    expect(html).toContain("/release-wave/w-new-fail");
-    expect(html).toContain("/release-wave/w-active");
-    // cutoff より前の terminal は一覧から消える
-    expect(html).not.toContain("/release-wave/w-old-fail");
-    expect(html).not.toContain("/release-wave/w-old-abort");
-  });
-
-  it("shows all waves when none has flipped yet (no deploy → no hiding)", async () => {
-    const env = fakeEnv({
-      listReturn: [
-        makeWave({
-          wave_id: "f1",
-          state: "failed",
-          started_at: "2026-05-30T00:00:00Z",
-        }),
-        makeWave({
-          wave_id: "f2",
-          state: "aborted",
-          started_at: "2026-05-29T00:00:00Z",
-        }),
-      ],
-    });
-    const html = await (await handleReleaseWaveListPage(env)).text();
-    expect(html).toContain("/release-wave/f1");
-    expect(html).toContain("/release-wave/f2");
   });
 
   it("renders a per-frontend tracking section with latest preview + last flip", async () => {
@@ -1317,7 +1151,7 @@ describe("handleReleaseWaveListPage global compat overlay", () => {
     expect(html).toContain("Staged previews");
   });
 
-  it("always renders the overlay with placeholder + disabled flip when no active waves", async () => {
+  it("always renders the overlay with placeholder + 一括 flip button when no active waves", async () => {
     const env = fakeEnv({
       listReturn: [makeWave({ wave_id: "w-done", state: "flipped" })],
       compatKv: memKv(compatSeed),
@@ -1326,11 +1160,28 @@ describe("handleReleaseWaveListPage global compat overlay", () => {
     // block 自体は常に出る
     expect(html).toContain("Staged previews");
     expect(html).toContain("active な wave");
-    // 具体的な flip 対象 (wave_id 付きボタン) は無く、disabled ボタンが出る
+    // 具体的な flip 対象 (wave_id 付き Approve & Flip ボタン) は無い
     expect(html).not.toContain("Approve &amp; Flip: ");
-    const idx = html.indexOf("Approve &amp; Flip</button>");
-    expect(idx).toBeGreaterThan(-1);
-    expect(html.slice(Math.max(0, idx - 120), idx)).toContain("disabled");
+    // 一括 flip ボタンは常設 (pending-release/flip-all へ POST)
+    expect(html).toContain("⚡ Flip all to 100%");
+    expect(html).toContain(
+      'action="/api/release-wave/pending-release/flip-all"',
+    );
+  });
+
+  it("renders the 一括 flip button in the Staged previews block", async () => {
+    const env = fakeEnv({
+      listReturn: [activeWave()],
+      compatKv: memKv(compatSeed),
+    });
+    const html = await (await handleReleaseWaveListPage(env)).text();
+    expect(html).toContain("Staged previews");
+    expect(html).toContain("⚡ Flip all to 100%");
+    expect(html).toContain(
+      'action="/api/release-wave/pending-release/flip-all"',
+    );
+    // active な pending-approval wave の Approve & Flip も併存する
+    expect(html).toContain("Approve &amp; Flip: w-active");
   });
 
   it("renders a per-untested-consumer Re-test button posting to the wave-independent retest-consumer endpoint", async () => {

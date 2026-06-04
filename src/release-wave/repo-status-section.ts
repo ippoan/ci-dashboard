@@ -198,6 +198,11 @@ export function renderCompatTagReleaseButtons(
 ): string {
   const list = [...new Set(repos)].filter((r) => !tagless.has(r)).sort();
   if (list.length === 0) return "";
+  // release 可能 (最新でない / status 不明) な repo。一括 tag release の対象。
+  const releasable = list.filter((r) => {
+    const st = statusByRepo?.get(r);
+    return st ? !isUpToDate(st) : true;
+  });
   const buttons = list
     .map((r) => {
       const st = statusByRepo?.get(r);
@@ -217,10 +222,26 @@ export function renderCompatTagReleaseButtons(
         </form>`;
     })
     .join("");
+
+  // 一括 tag release: release 可能な repo の tag-release.yml をまとめて dispatch。
+  // 2 件以上で表示 (1 件なら個別ボタンと同じなので出さない)。最新 repo は除外。
+  const bulkBtn =
+    releasable.length >= 2
+      ? `
+        <form method="post" action="/api/release-wave/tag-release-all"
+              style="margin:0 6px 8px 0;display:inline-block"
+              onsubmit="return confirm('${releasable.length} 件の repo の tag-release.yml をまとめて dispatch します。よろしいですか？');">
+          <input type="hidden" name="repos" value="${escapeHtml(releasable.join(","))}">
+          <button type="submit" title="release 可能な ${releasable.length} repo の tag-release.yml を一括 dispatch する">
+            ⚡ Tag Release all (${releasable.length})
+          </button>
+        </form>`
+      : "";
+
   return `
     <div class="actions" style="margin-top:10px">
       <strong class="meta">Tag Release (compatibility graph の repo)</strong>
-      <div style="margin-top:6px">${buttons}</div>
+      <div style="margin-top:6px">${bulkBtn}${buttons}</div>
     </div>`;
 }
 

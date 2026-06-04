@@ -85,3 +85,65 @@ describe("POST /api/tag-release", () => {
     fetchSpy.mockRestore();
   });
 });
+
+describe("POST /api/release-wave/tag-release-all (一括 tag release)", () => {
+  function formReq(repos: string): Request {
+    return new Request("http://localhost/api/release-wave/tag-release-all", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ repos }).toString(),
+    });
+  }
+
+  it("dispatches every repo and 303-redirects on full success", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(null, { status: 204 }));
+
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(
+      formReq("ippoan/auth-worker,ippoan/rust-alc-api"),
+      testEnv(),
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(303);
+    expect(res.headers.get("Location")).toBe("/release-wave");
+    // repo ごとに 1 dispatch
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "https://api.github.com/repos/ippoan/auth-worker/actions/workflows/tag-release.yml/dispatches",
+      expect.objectContaining({ method: "POST" }),
+    );
+    fetchSpy.mockRestore();
+  });
+
+  it("returns 502 listing failures on partial dispatch failure", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(null, { status: 204 })) // auth-worker ok
+      .mockResolvedValueOnce(new Response("boom", { status: 500 })); // rust-alc-api fail
+
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(
+      formReq("ippoan/auth-worker,ippoan/rust-alc-api"),
+      testEnv(),
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(502);
+    const html = await res.text();
+    expect(html).toContain("1/2 dispatched");
+    expect(html).toContain("ippoan/rust-alc-api");
+    fetchSpy.mockRestore();
+  });
+
+  it("returns 400 when no repos are provided", async () => {
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(formReq(""), testEnv(), ctx);
+    await waitOnExecutionContext(ctx);
+    expect(res.status).toBe(400);
+  });
+});
