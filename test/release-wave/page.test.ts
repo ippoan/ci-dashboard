@@ -744,6 +744,32 @@ describe("handleReleaseWaveDetailPage", () => {
     expect(resp.headers.get("Cache-Control")).toContain("no-store");
   });
 
+  it("relaxes CSP just enough for the live-update script (Refs #275)", async () => {
+    const env = fakeEnv({ listReturn: [] });
+    const resp = await handleReleaseWaveListPage(env);
+    const csp = resp.headers.get("Content-Security-Policy") ?? "";
+    // 外部 live.js 1 個 + 同一オリジン wss のみ許可。inline JS は依然ブロック。
+    expect(csp).toContain("script-src 'self'");
+    expect(csp).toContain("connect-src 'self'");
+    expect(csp).not.toContain("script-src 'none'");
+    expect(csp).not.toContain("connect-src 'none'");
+  });
+
+  it("includes the live.js <script> tag in the list page head (Refs #275)", async () => {
+    const env = fakeEnv({ listReturn: [] });
+    const resp = await handleReleaseWaveListPage(env);
+    const html = await resp.text();
+    expect(html).toContain('<script src="/release-wave/live.js"');
+  });
+
+  it("includes the live.js <script> tag in the detail page head (Refs #275)", async () => {
+    const wave = makeWave({ wave_id: "w-live" });
+    const env = fakeEnv({ getReturn: { ok: true, data: wave } });
+    const resp = await handleReleaseWaveDetailPage(env, "w-live");
+    const html = await resp.text();
+    expect(html).toContain('<script src="/release-wave/live.js"');
+  });
+
   it("escapes HTML in repo names / wave_id / event summaries", async () => {
     const wave = makeWave({
       wave_id: "evil<wave>",

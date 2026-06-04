@@ -525,3 +525,66 @@ describe("ReleaseWaveHub.approve compatibility gate", () => {
     expect(res.ok).toBe(true);
   });
 });
+
+describe("ReleaseWaveHub live update (Hibernatable WebSocket, Refs #275)", () => {
+  it("accepts GET /ws and returns a 101 with a client WebSocket", async () => {
+    const hub = freshHub();
+    // webSocket を持つ Response は runInDurableObject の境界を越えて返せないので、
+    // callback 内で検査して plain な結果だけ返す。
+    const out = await runInDurableObject(hub, async (i) => {
+      const res = await i.fetch(
+        new Request("http://hub/ws", { headers: { Upgrade: "websocket" } }),
+      );
+      const hasSocket = !!res.webSocket;
+      res.webSocket?.accept();
+      res.webSocket?.close();
+      return { status: res.status, hasSocket };
+    });
+    expect(out.status).toBe(101);
+    expect(out.hasSocket).toBe(true);
+  });
+
+  it("returns 404 for non-/ws paths", async () => {
+    const hub = freshHub();
+    const status = await runInDurableObject(hub, async (i) => {
+      const res = await i.fetch(new Request("http://hub/nope"));
+      return res.status;
+    });
+    expect(status).toBe(404);
+  });
+
+  it("broadcasts a reload signal to connected clients on state change (saveWave)", async () => {
+    const hub = freshHub();
+    const received: string[] = [];
+    await runInDurableObject(hub, async (i) => {
+      // /ws を accept して client 側を掴む。
+      const res = await i.fetch(
+        new Request("http://hub/ws", { headers: { Upgrade: "websocket" } }),
+      );
+      const client = res.webSocket!;
+      client.accept();
+      client.addEventListener("message", (e) => {
+        received.push(String((e as MessageEvent).data));
+      });
+      // 任意の state 変更 (start) は saveWave を通るので broadcast が走る。
+      await i.start({ wave_id: "w-live", flip_policy: "auto", repos: REPOS });
+    });
+    // start 中に少なくとも 1 回 "reload" が届いている。
+    expect(received.length).toBeGreaterThan(0);
+    expect(received).toContain("reload");
+  });
+
+  it("broadcast() swallows send errors from a closed socket", async () => {
+    const hub = freshHub();
+    // socket を accept → close した状態で broadcast を呼んでも throw しない。
+    await runInDurableObject(hub, async (i) => {
+      const res = await i.fetch(
+        new Request("http://hub/ws", { headers: { Upgrade: "websocket" } }),
+      );
+      const client = res.webSocket!;
+      client.accept();
+      client.close();
+      expect(() => i.broadcast()).not.toThrow();
+    });
+  });
+});

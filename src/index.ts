@@ -40,6 +40,7 @@ import {
 import {
   handleReleaseWaveDetailPage,
 } from "./release-wave/page";
+import { handleReleaseWaveLiveJs } from "./release-wave/live";
 import {
   handleReleaseWaveApprove,
   handleReleaseWaveRollback,
@@ -106,6 +107,13 @@ app.use("*", cors());
 function getHub(env: Env): DurableObjectStub {
   const id = env.CI_HUB.idFromName("singleton");
   return env.CI_HUB.get(id);
+}
+
+// Release Wave は単一 singleton DO に全 wave を集約している (src/release-wave/do.ts)。
+// live 更新の WebSocket もこの singleton に張る (Refs #275)。
+function getReleaseWaveHub(env: Env): DurableObjectStub {
+  const id = env.RELEASE_WAVE_HUB.idFromName("singleton");
+  return env.RELEASE_WAVE_HUB.get(id);
 }
 
 // Dashboard
@@ -285,6 +293,18 @@ app.get("/backend-current-image", (c) =>
 // Auth は ci-dashboard 全体に被さる Cloudflare Access (Google OAuth + email
 // allowlist) edge gate に委譲。/releases ページと同じトラストモデル。
 app.get("/release-wave", (c) => handleReleaseWaveListPageWithRepoStatus(c.env));
+// live 更新 (Refs #275)。下の `:wave_id` 動的 route より **前** に登録して
+// "ws" / "live.js" が wave_id として捕捉されるのを防ぐ (Hono は登録順マッチ)。
+// WebSocket は RELEASE_WAVE_HUB singleton に proxy。state 変化時に DO 側
+// `saveWave` → `broadcast` がシグナルを送り、live.js が location.reload() する。
+app.get("/release-wave/ws", (c) => {
+  // DO 側 fetch は pathname === "/ws" で受理するので、Upgrade header 等を保った
+  // まま URL だけ /ws に書き換えて proxy する。
+  const wsUrl = new URL(c.req.url);
+  wsUrl.pathname = "/ws";
+  return getReleaseWaveHub(c.env).fetch(new Request(wsUrl, c.req.raw));
+});
+app.get("/release-wave/live.js", () => handleReleaseWaveLiveJs());
 app.get("/release-wave/:wave_id", (c) =>
   handleReleaseWaveDetailPage(c.env, c.req.param("wave_id")),
 );
