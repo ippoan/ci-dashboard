@@ -360,6 +360,75 @@ describe("handleReleaseWaveListPage", () => {
     expect(html).not.toContain('title="traffic 100% で live');
   });
 
+  it("keeps a CF Worker backend (has backend:: AND traffic::) in the Frontends section", async () => {
+    // auth-worker は compat 上 backend:: を持つが CF Worker (traffic:: あり) なので
+    // frontend として残す。rust-alc-api は backend:: + traffic:: 無し (Cloud Run)
+    // なので除外する (#268 と同じ判定軸)。
+    const mkRepo = (repo: string) => ({
+      repo,
+      target_tag: "v1",
+      head_sha: "abc1234",
+      require_compatibility: false,
+      stage_status: "done",
+      preview_url: null,
+      stage_error: null,
+      flip_status: "pending",
+      flip_error: null,
+      flip_from_revision: null,
+      rolled_back_to_revision: null,
+    });
+    const env = fakeEnv({
+      listReturn: [
+        makeWave({
+          wave_id: "w-mix",
+          state: "failed",
+          repos: [mkRepo("ippoan/auth-worker"), mkRepo("ippoan/rust-alc-api")],
+        }),
+      ],
+      compatKv: memKv({
+        // 両方とも backend:: を持つ
+        "backend::ippoan/auth-worker": {
+          schema_version: 1,
+          repo: "ippoan/auth-worker",
+          current_image: "aw-img",
+          deployed_at: "2026-06-01T00:00:00Z",
+          deployed_by: "ci",
+          wave_id: null,
+        },
+        "backend::ippoan/rust-alc-api": {
+          schema_version: 1,
+          repo: "ippoan/rust-alc-api",
+          current_image: "cur-img",
+          deployed_at: "2026-06-01T00:00:00Z",
+          deployed_by: "ci",
+          wave_id: null,
+        },
+        // auth-worker だけ CF Worker の version traffic を持つ
+        "traffic::ippoan/auth-worker": {
+          schema_version: 3,
+          repo: "ippoan/auth-worker",
+          versions: [
+            {
+              version_id: "aw-live",
+              percentage: 100,
+              created_on: "2026-06-03T00:00:00Z",
+              tag: "v0.2.52",
+            },
+          ],
+          reported_at: "2026-06-03T00:01:00Z",
+        },
+      }),
+    });
+    const html = await (await handleReleaseWaveListPage(env)).text();
+    const frontendsHtml = html.slice(
+      html.indexOf("Frontends (per-repo tracking)"),
+    );
+    // CF Worker backend (auth-worker) は残る
+    expect(frontendsHtml).toContain("<td>ippoan/auth-worker</td>");
+    // Cloud Run backend (rust-alc-api) は除外
+    expect(frontendsHtml).not.toContain("<td>ippoan/rust-alc-api</td>");
+  });
+
   it("excludes backend repos (backend:: record) from the Frontends section", async () => {
     // wave に frontend (auth-worker) と backend (rust-alc-api) が混在。
     // backend:: record を持つ rust-alc-api は frontend ではないので除外する。

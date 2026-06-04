@@ -432,22 +432,12 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
 
   // frontend (repo) 単位の追跡 (全 wave から導出)。各 repo の現 live deploy
   // (traffic 100%) も併記するため、traffic 取得対象にこの repo 群も足す。
-  // Frontends セクションは frontend repo だけを出す。wave には backend
-  // (例: rust-alc-api = Cloud Run) も混ざるが、それは frontend ではないので除外。
-  // backend の判定は compat の `backend::` record (= globalCompat.backends) を
-  // source of truth にする。globalCompat 未取得 (COMPAT_KV 未 bind) 時は判別不能
-  // なので全件出す (degrade)。
-  const backendRepos = new Set(
-    (globalCompat?.backends ?? []).map((b) => b.backend_repo),
-  );
-  const frontendTracks = computeFrontendTracks(waves).filter(
-    (t) => !backendRepos.has(t.repo),
-  );
+  const allTracks = computeFrontendTracks(waves);
 
-  // compat グラフに出る repo (backend + frontend) + pending repo + frontend
-  // 追跡 repo の version traffic を引く。グラフの frontend ノード hover に「現
-  // active version の % / id」を出す用 + Pending releases の単一真実導出用 +
-  // Frontends セクションの「Current (live)」列用 (Refs #237)。
+  // compat グラフに出る repo (backend + frontend) + pending repo + 追跡 repo の
+  // version traffic を引く。グラフの frontend ノード hover に「現 active version の
+  // % / id」を出す用 + Pending releases の単一真実導出用 + Frontends セクションの
+  // 「Current (live)」列 + frontend/backend 判定用 (Refs #237 / #268)。
   let trafficByRepo: Map<string, TrafficRecord> = new Map();
   if (env.COMPAT_KV) {
     const repos = new Set<string>();
@@ -458,13 +448,27 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
       }
     }
     for (const r of pendingReleases) repos.add(r.repo);
-    for (const t of frontendTracks) repos.add(t.repo);
+    for (const t of allTracks) repos.add(t.repo);
     try {
       trafficByRepo = await getTrafficForRepos(env.COMPAT_KV, repos);
     } catch {
       trafficByRepo = new Map();
     }
   }
+
+  // Frontends セクションは frontend (= CF Worker) repo だけを出す。wave には
+  // backend も混ざるが、**Cloud Run backend (例: rust-alc-api) は除外**する。
+  // ただし CF Worker は compat 上 `backend::` を持っていても (auth-worker 等)
+  // frontend として残す。判定軸は #268 と同じ: CF Worker は version traffic
+  // (`traffic::` = trafficByRepo) を持ち、Cloud Run backend は持たない。
+  // => 除外条件 = 「`backend::` を持ち、かつ traffic:: が無い (= Cloud Run)」。
+  // globalCompat 未取得 (COMPAT_KV 未 bind) 時は判別不能なので全件出す (degrade)。
+  const backendRepos = new Set(
+    (globalCompat?.backends ?? []).map((b) => b.backend_repo),
+  );
+  const frontendTracks = allTracks.filter(
+    (t) => !backendRepos.has(t.repo) || trafficByRepo.has(t.repo),
+  );
   // Pending releases は単一真実 (Refs #237): workers=traffic:: の no-traffic
   // version / cloudrun=pending-release:: を統合し、Traffic セクションと一致させる。
   // compat section の「Staged previews」内 ⚡ Flip all ボタンの出し分けに件数を使う
