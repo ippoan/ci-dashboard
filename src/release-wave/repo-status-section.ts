@@ -428,12 +428,21 @@ function renderTrafficRollbackCell(repo: string, rec: TrafficRecord): string {
  * backend record (`backend::<repo>`) を持つ repo は traffic 行 or fallback 行を
  * 必ず出す (traffic も current_image も無い稀な record だけ skip)。1 行も出せ
  * なければ ""。
+ *
+ * **`workerRepos` (CF Workers = `traffic::` を持つ repo) は除外する。** compat の
+ * "backend" は「frontend が互換性テストする対象」であって platform を区別しない
+ * ため、auth-worker のような Cloudflare Workers backend もここに混ざる。CF Workers
+ * は wrangler の version split を `traffic::` で報告し、上の「Traffic (version
+ * split)」section に既に出ているので、Cloud Run revision として二重に出さない
+ * (Refs #268)。platform 規約は「workers=traffic:: / cloudrun=pending-release::」。
  */
 export function renderBackendRollbackBlock(
   compat: WaveCompatibility,
   trafficByRepo?: Map<string, BackendTrafficRecord>,
+  workerRepos?: ReadonlySet<string>,
 ): string {
   const rows = compat.backends
+    .filter((b) => !workerRepos?.has(b.backend_repo))
     .map((b) => {
       const traffic = trafficByRepo?.get(b.backend_repo);
       // rollback UI は traffic/fallback 行の先頭に rowspan セルとして並べる
@@ -662,9 +671,12 @@ export async function handleReleaseWaveListPageWithRepoStatus(
         env.COMPAT_KV,
         repos,
       );
+      // CF Workers backend (auth-worker 等) は traffic:: を持ち上の version split
+      // に出ているので、Cloud Run revision section からは除外する (Refs #268)。
       const backendRollbackBlock = renderBackendRollbackBlock(
         compat,
         backendTrafficByRepo,
+        new Set(trafficByRepo.keys()),
       );
 
       // traffic → backend rollback → Tag Release ボタンの順で 1 回で注入する。
