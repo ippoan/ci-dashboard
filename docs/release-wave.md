@@ -158,6 +158,53 @@ webhook → COMPAT_KV に記録される (Refs #157)。
    - **retest compatibility gate** が未 test frontend を検出していれば approve/flip は
      `force` なしでは通らない (= 自動の安全網はこちら)
 
+### backend を「本番データ」で E2E する手順
+
+このしくみの主目的は **新 backend を flip 前に本番データで検証する** こと。staging は
+別 DB・揮発・auth バイパスで本番を一切反映しないので、この目的では使わない。
+
+**鍵となる事実**: backend preview (preview tag の revision) は **同じ本番 service の 0%
+revision**。= **本番 DB (Supabase) に接続**、**本番 `JWT_SECRET` を共有**、CORS は `Any`。
+→ **通常の本番ログインで得た JWT がそのまま backend preview に対して有効**で、RLS も
+本番テナントで効く。
+
+#### 経路 A: API/curl レベル (preview に redirect しない → 追加準備なし)
+
+新 backend のエンドポイント挙動を本番データで叩く分にはこれで足りる:
+
+1. tag release → backend 0% revision に preview tag → `/release-wave` の Pending releases に
+   URL が出る (block A + C)。
+2. admin が **本番フロント** (`alc-api.ippoan.org`、auth-worker に既登録の origin) で通常
+   ログイン → **本番 JWT** を取得。**OAuth は本番 origin で完結し、preview には一切 redirect
+   しない**。
+3. その JWT を `Authorization: Bearer <jwt>` で backend preview URL に投げる:
+   ```bash
+   curl -H "Authorization: Bearer $PROD_JWT" \
+     "https://v1-42-0---rust-alc-api-gateway-<hash>.run.app/api/<path>"
+   ```
+4. backend preview は **本番 DB を読む** ので新 backend を本番データで検証できる
+   (RLS が admin テナントにスコープ)。問題なければ Flip。
+
+> なぜ準備不要か: 認証は本番 origin で完結し (許可 origin 既存)、発行 JWT は同一
+> `JWT_SECRET` の backend preview に通る。CORS は `Any`。redirect_uri が preview を
+> 経由しないので auth-worker 側の登録は不要。
+
+#### 経路 B: ブラウザで preview フロントから入る (= preview に redirect する → 準備が要る)
+
+preview フロントのページを開いてその場で Google ログイン (= redirect_uri が preview
+origin) する場合は、**追加準備が必須**:
+
+- auth-worker の許可 origin (`origins:<env>` / `origins:dev` / `origins:wt` KV) は
+  **exact match (wildcard 無し、`src/lib/security.ts` `isAllowedRedirectUri`)**。
+  per-release で変わる preview origin (`<hash>-<worker>.workers.dev` 等) を登録しないと
+  redirect_uri が **400 で弾かれログインできない** (`origins:wt` の ephemeral 流用 or
+  安定 preview hostname が必要)。
+- さらに新 frontend を新 backend に向けるなら frontend preview の API base override も要る
+  (= 落とした block B)。
+
+→ **「本番データで backend を検証」だけなら経路 A (準備なし) で完結**。ブラウザで新 front
+ごと通す full E2E が要るときだけ経路 B の準備に踏み込む。
+
 ### preview を admin だけに見せる (block E)
 
 no-traffic preview は本番トラフィックを受けない検証用だが、**backend (Cloud Run)
