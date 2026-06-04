@@ -150,20 +150,49 @@ webhook → COMPAT_KV に記録される (Refs #157)。
 ### admin の運用フロー
 
 1. tag release → backend (no-traffic, preview tag 付き) + frontend (no-traffic version) が上がる
-2. 両者の `preview_url` が `/release-wave` の Pending releases に出る
-3. admin が `preview-*.ippoan.org` (CF Access、上記 wildcard、admin allowlist) 経由で
-   preview URL を開いて E2E spot-check (frontend preview は backend preview を向く設定)
+2. 両者の `preview_url` が `/release-wave` の Pending releases に出る (= `/release-wave`
+   自体が ci-dashboard の Cloudflare Access 配下なので、**preview URL の発見経路が admin 限定**)
+3. admin が Pending releases のリンクから preview URL を開いて E2E spot-check
+   (frontend preview は backend preview を向くよう手元で確認)
 4. 問題なければ Flip (単一) / Flip all (wave) で 100% に切替
    - **retest compatibility gate** が未 test frontend を検出していれば approve/flip は
      `force` なしでは通らない (= 自動の安全網はこちら)
 
-### preview を admin だけに見せる (block E、要手動 setup)
+### preview を admin だけに見せる (block E)
 
-no-traffic preview は本番トラフィックを受けない検証用なので、**到達は admin 限定**。
-raw な `*.workers.dev` / `*.run.app` を直接使わず、上記 `preview-*.ippoan.org`
-wildcard の **Cloudflare Access (admin email allowlist)** に寄せる。headless な
-自動 E2E runner を将来足す場合は同 Access app に **service token** policy を 1 本
-追加して bypass する (human=Google OAuth / machine=service token の 2 policy)。
+no-traffic preview は本番トラフィックを受けない検証用だが、**backend (Cloud Run)
+preview は hard gate できない**。理由:
+
+- backend gateway は本番 `--allow-unauthenticated` で、frontends (nuxt-trouble /
+  alc-app 等) は **ブラウザから backend API を直叩き** する (CORS、server proxy 無し)。
+  Cloud Run の invoker IAM は **service 単位** (revision/tag 単位ではない) なので、
+  preview tag の revision だけを private にはできない。
+- preview tag の前に Cloudflare Access の hard gate を置くと、preview を使う
+  E2E の **ブラウザ XHR が Access cookie 不在で 403** になり E2E 自体が壊れる。
+
+→ backend preview は **到達可能なまま (公開)** が正しい。**network endpoint が開いていても
+データは漏れない**: データ取得には JWT (`require_jwt`) または tenant scope
+(`require_tenant` = JWT / X-Tenant-ID) が必須で、さらに Postgres **RLS**
+(`alc_api_app` は NOBYPASSRLS、`app.current_tenant_id` は認証済み JWT/header 由来) が
+テナント分離を強制する。= 本番と同じ認可ポスチャ。network gate は被せない。
+
+つまり preview の "admin-only" 懸念は **データ保護ではなく** (それは JWT + RLS が担う)、
+「staging endpoint を広めない / 誤トラフィックを避ける」程度の話。よって
+**admin-only は「preview URL を CF Access 配下の `/release-wave` からしか発見できない」=
+発見経路を絞る** ことで十分 (URL は推測困難 + revision tag は次 release で揮発)。
+
+CF Access wildcard (`preview-*.ippoan.org`、上の「Cloudflare Access setup」節) が
+意味を持つのは:
+
+- **`/release-wave` ダッシュボード** — 既に ci-dashboard 全体の Access 配下 (preview URL の発見元)
+- **frontend preview の "ページ"** — human admin がブラウザで開く HTML origin は
+  gate 可能 (workers preview を `preview-*.ippoan.org` に route する場合)。ただし
+  preview URL は per-release で変わるため静的 hostname → preview の route は別途必要
+  (= raw preview URL を `/release-wave` から開く運用なら不要)。
+
+将来 headless な自動 E2E runner を足す場合、frontend page を gate する構成にしたなら
+同 Access app に **service token** policy を 1 本足して bypass する
+(human=Google OAuth / machine=service token)。backend は元から公開なので runner も素通り。
 
 ---
 
