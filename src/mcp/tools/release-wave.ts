@@ -21,6 +21,7 @@ import type { Env } from "../../index";
 import type { ReleaseWaveHub, RpcResult } from "../../release-wave/do";
 import type { WaveState } from "../../release-wave/types";
 import { computeWaveCompatibility } from "../../release-wave/compat";
+import { pendingFlipCore, pendingFlipAllCore } from "../../release-wave/api";
 
 // ----------------------------------------------------------------------------
 // Hub helper
@@ -282,6 +283,69 @@ export function registerReleaseWaveTools(server: McpServer, env: Env): void {
         migration_id,
       });
       return formatRpcResult(result);
+    },
+  );
+
+  // ============================================================
+  // release_wave_pending_flip   (operator が単一 repo を flip 起動)
+  // ============================================================
+  // 注: 上の release_wave_flip は per-repo flip "callback" (handler →
+  // ci-dashboard) で、operator が flip を起動する口ではない。こちらは
+  // /release-wave の「Flip」ボタンと同じ経路を MCP から叩く: pending release
+  // (release CI が報告した no-traffic version) を 100% traffic へ promote する。
+  // wave state machine は経由しない。
+  server.registerTool(
+    "release_wave_pending_flip",
+    {
+      description:
+        "Flip a single repo's pending release (the no-traffic version its release CI reported) to 100% traffic, without the wave state machine. Mirrors the /release-wave 'Flip' button. cloudrun promotes the latest-ready revision; workers deploys the previewed version at 100%. The actual flip runs in GitHub Actions (no callback); inspect the run for the result.",
+      inputSchema: {
+        repo: z
+          .string()
+          .min(1)
+          .describe("owner/name whose pending release to flip to 100%"),
+      },
+      annotations: { readOnlyHint: false },
+    },
+    async ({ repo }) => {
+      const result = await pendingFlipCore(env, repo);
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(result, null, 2) },
+        ],
+        ...(result.ok ? {} : { isError: true }),
+      };
+    },
+  );
+
+  // ============================================================
+  // release_wave_pending_flip_all   (wave 一括 flip 起動)
+  // ============================================================
+  // /release-wave の「Flip all」ボタンと同じ経路。全 pending release を一括
+  // flip し、flip-group を記録する (= 後で一括 rollback できるよう戻し先を確保)。
+  server.registerTool(
+    "release_wave_pending_flip_all",
+    {
+      description:
+        "Flip ALL pending releases (no-traffic versions across repos) to 100% traffic at once — the /release-wave 'Flip all' button. Records a flip-group so the same set can be rolled back together. Returns the list of flipped repos; no-op (flipped:[]) when nothing is pending.",
+      inputSchema: {
+        flipped_by: z
+          .string()
+          .min(1)
+          .describe(
+            "Email or identifier of the operator (recorded in the flip-group audit trail)",
+          ),
+      },
+      annotations: { readOnlyHint: false },
+    },
+    async ({ flipped_by }) => {
+      const result = await pendingFlipAllCore(env, flipped_by);
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(result, null, 2) },
+        ],
+        ...(result.ok ? {} : { isError: true }),
+      };
     },
   );
 }

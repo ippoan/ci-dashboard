@@ -122,7 +122,7 @@ const STUB_ERR = {
 // ----------------------------------------------------------------------------
 
 describe("registerReleaseWaveTools registration", () => {
-  it("registers exactly 7 tools with expected names", () => {
+  it("registers exactly 9 tools with expected names", () => {
     const { tools } = setup();
     expect(Array.from(tools.keys()).sort()).toEqual(
       [
@@ -131,6 +131,8 @@ describe("registerReleaseWaveTools registration", () => {
         "release_wave_contract_applied",
         "release_wave_fail",
         "release_wave_flip",
+        "release_wave_pending_flip",
+        "release_wave_pending_flip_all",
         "release_wave_rollback",
         "release_wave_status",
       ].sort(),
@@ -323,6 +325,34 @@ describe("release_wave_contract_applied", () => {
       repo: "ippoan/rust-alc-api",
       migration_id: "20260601_001_drop",
     });
+  });
+});
+
+// pending flip 系は DO RPC ではなく COMPAT_KV + dispatch を直接叩く
+// (= /release-wave の Flip / Flip all ボタンと同じ core)。fakeEnv は
+// emptyCompatKv なので、ここでは「pending 無し」経路の wiring だけを見る。
+// 実 dispatch を伴う成功経路は api.test.ts の handler test がカバーする。
+describe("release_wave_pending_flip", () => {
+  it("returns NOT_FOUND (isError) when the repo has no pending release", async () => {
+    const { tools } = setup();
+    const r = await tools
+      .get("release_wave_pending_flip")!
+      .handler({ repo: "ippoan/no-such" });
+    expect(r.isError).toBe(true);
+    expect(JSON.parse(r.content[0]!.text).code).toBe("NOT_FOUND");
+  });
+});
+
+describe("release_wave_pending_flip_all", () => {
+  it("is a no-op (ok, flipped:[]) when nothing is pending", async () => {
+    const { tools } = setup();
+    const r = await tools
+      .get("release_wave_pending_flip_all")!
+      .handler({ flipped_by: "ops@example.com" });
+    expect(r.isError).toBeUndefined();
+    const payload = JSON.parse(r.content[0]!.text);
+    expect(payload.ok).toBe(true);
+    expect(payload.flipped).toEqual([]);
   });
 });
 
