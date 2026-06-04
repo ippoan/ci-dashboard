@@ -182,13 +182,16 @@ const COMMON_STYLES = `
   .help-tip:hover .help-pop, .help-tip:focus .help-pop,
   .help-tip:focus-within .help-pop { display: block; }
   /* セクションを縦一列ではなく画面幅に応じて動的に段組みする。
-     auto-fit + minmax により、広い画面 (フル HD 等) では横並び、狭い画面では
+     compat (横長グラフ) はフル幅で上段に、Frontends (左) と pending リリース
+     (右) は下段で 2 カラムに並べる。狭い画面では auto-fit + minmax により
      自動で 1 列に折り返す (メディアクエリ不要)。各カラムは内容量で高さが
-     決まるよう align-items:start。grid の gap を使うので子 .section の
-     縦 margin は打ち消す。 */
-  .wave-grid { display: grid; gap: 16px; align-items: start;
-    grid-template-columns: repeat(auto-fit, minmax(560px, 1fr)); }
+     決まるよう align-items:start。gap を使うので子 .section の縦 margin は
+     打ち消す。 */
+  .wave-grid { display: flex; flex-direction: column; gap: 16px; }
   .wave-grid > .section { margin: 0; }
+  .wave-row { display: grid; gap: 16px; align-items: start;
+    grid-template-columns: repeat(auto-fit, minmax(560px, 1fr)); }
+  .wave-row > .section { margin: 0; }
 `;
 
 /**
@@ -511,8 +514,10 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
     </div>
     <div class="wave-grid">
       ${compatSection}
-      ${pendingReleaseSection}
-      ${frontendSection}
+      <div class="wave-row">
+        ${frontendSection}
+        ${pendingReleaseSection}
+      </div>
     </div>
   </div>
 </body>

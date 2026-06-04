@@ -153,13 +153,21 @@ export function renderRepoReleaseStatusSection(
  * レンダリング済み一覧 HTML に section を注入する。
  *
  * 配置優先順:
- *   1. Compatibility section の直後 (= Pending releases section の <div> 直前)
- *   2. h1 (`Release Waves`) 直後
- *   3. </body> 直前
+ *   1. 下段 2 カラム (.wave-row = Frontends / Pending releases) の直前
+ *      (= Compatibility section の直後、フル幅)
+ *   2. Pending releases section の <div> 直前 (旧 1 列レイアウト互換)
+ *   3. h1 (`Release Waves`) 直後
+ *   4. </body> 直前
  */
 export function injectRepoStatusSection(html: string, section: string): string {
-  // Pending releases section を起点に、その section の開始 <div> 直前へ入れる。
-  // = Compatibility (all consumers) section の直後。
+  // 下段 2 カラム (Frontends 左 / Pending releases 右) を grid 化したレイアウトでは、
+  // repo status はフル幅でその上 (= compat の直後) に置く。.wave-row 直前へ入れる。
+  const row = html.indexOf('<div class="wave-row">');
+  if (row !== -1) {
+    return html.slice(0, row) + section + "\n      " + html.slice(row);
+  }
+  // 旧 1 列レイアウト互換: Pending releases section を起点に、その section の
+  // 開始 <div> 直前へ入れる (= Compatibility section の直後)。
   const pending = html.indexOf("<h2>Pending releases");
   if (pending !== -1) {
     const divStart = html.lastIndexOf('<div class="section">', pending);
