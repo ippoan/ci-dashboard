@@ -114,6 +114,59 @@ issue #137 の open question 9 で挙げた「CF Access policy を Terraform で
 
 ---
 
+## no-traffic preview による flip 前 E2E (Refs #260)
+
+tag release 済みの front + backend を **traffic を振る前 (no-traffic)** に
+admin が実環境で E2E 確認してから flip する運用。専用の自動 E2E gate は
+**設けない** — flip 前の互換 gate は既存の retest (compatibility) gate を正とし、
+preview URL は admin の手動 spot-check に使う、というのが本機構の方針。
+
+### 何が「flip 前 gate」か (= retest compatibility gate)
+
+flip を止める唯一の自動 gate は `approve()` の **compatibility gate**
+(`src/release-wave/do.ts` の `compatibilityGateBlockers`)。`require_compatibility=true`
+な backend に対して **未 test の frontend が居れば force なしの approve を拒否**する。
+ここで言う "test" は各 frontend CI の **retest (integration test)** = `compat_backend_repo`
+で宣言した backend の image に対する統合テストで、結果は `frontend-test-report`
+webhook → COMPAT_KV に記録される (Refs #157)。
+
+→ **front↔backend のペアリングと互換検証は retest が担う**。live no-traffic E2E を
+別の必須 gate として二重化しない (実装・運用コストに見合わないと判断)。
+
+### preview URL の出どころ (block A + C)
+
+| platform | no-traffic revision | preview URL の生成 | ci-dashboard への報告 |
+|---|---|---|---|
+| Cloud Run (backend) | `deploy.yml` が release tag の 0% revision に **revision tag** (`v1.42.0`→`v1-42-0`) を付与 | `https://<tag>---<svc>-<hash>.run.app` | `report-pending-release` job が gateway の tagged URL を `gcloud run services describe` で解決し `preview_url` に載せて `pending-release` webhook に POST |
+| Cloudflare Workers (frontend) | `frontend-ci.yml` が `wrangler versions upload` で 0% version | `https://<hash>.workers.dev` | 同 `pending-release` webhook (frontend は既存経路) |
+
+報告された `preview_url` は `/release-wave` の **Pending releases** に
+クリック可能リンクとして出る (`computeUnifiedPending` → `page.ts`)。
+
+> **flip は tag に依存しない**: cloudrun の flip は release-wave-gcp proxy が
+> service の `latestReadyRevision` を anchor にする (Refs #248)。preview tag は
+> **到達 (E2E) 専用のラベル**で、flip 切替には使わない。
+
+### admin の運用フロー
+
+1. tag release → backend (no-traffic, preview tag 付き) + frontend (no-traffic version) が上がる
+2. 両者の `preview_url` が `/release-wave` の Pending releases に出る
+3. admin が `preview-*.ippoan.org` (CF Access、上記 wildcard、admin allowlist) 経由で
+   preview URL を開いて E2E spot-check (frontend preview は backend preview を向く設定)
+4. 問題なければ Flip (単一) / Flip all (wave) で 100% に切替
+   - **retest compatibility gate** が未 test frontend を検出していれば approve/flip は
+     `force` なしでは通らない (= 自動の安全網はこちら)
+
+### preview を admin だけに見せる (block E、要手動 setup)
+
+no-traffic preview は本番トラフィックを受けない検証用なので、**到達は admin 限定**。
+raw な `*.workers.dev` / `*.run.app` を直接使わず、上記 `preview-*.ippoan.org`
+wildcard の **Cloudflare Access (admin email allowlist)** に寄せる。headless な
+自動 E2E runner を将来足す場合は同 Access app に **service token** policy を 1 本
+追加して bypass する (human=Google OAuth / machine=service token の 2 policy)。
+
+---
+
 ## MCP tool 経由の運用 (Claude Code / 他 MCP client)
 
 `https://ci-dashboard.ippoan.org/mcp` に OAuth (auth-worker delegation) で
