@@ -285,11 +285,28 @@ export function handleDashboard(): Response {
       text-decoration: none;
     }
     .release-banner .issue-chip:hover { color: #58a6ff; border-color: #58a6ff; }
+    .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 16px; }
+    .refresh-btn {
+      display: inline-block;
+      background: #1f6feb;
+      color: #fff;
+      border: 1px solid #388bfd;
+      border-radius: 6px;
+      padding: 6px 14px;
+      font-size: 13px;
+      font-weight: 600;
+      text-decoration: none;
+      cursor: pointer;
+    }
+    .refresh-btn:hover { background: #388bfd; }
   </style>
 </head>
 <body>
   ${renderTabs("dashboard")}
   <h1>CI Dashboard</h1>
+  <div class="toolbar">
+    <a class="refresh-btn" href="/" title="ページを再読み込みして最新状態に更新する (ブラウザキャッシュ無視 = ハードリセット)">🔄 更新（ハードリセット）</a>
+  </div>
   <div id="release-banner-list" class="release-banners"></div>
   <div class="status-bar">
     WS: <span id="sse-status" class="disconnected">connecting...</span>
@@ -663,6 +680,13 @@ export function handleDashboard(): Response {
 </html>`;
 
   return new Response(html, {
-    headers: { "Content-Type": "text/html; charset=utf-8" },
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      // 「毎回キャッシュが残ってうざい」対策 + 「更新（ハードリセット）」ボタン用。
+      // ダッシュボードは WS / snapshot で最新データを取り直すので、HTML 自体は
+      // no-store でブラウザ/bfcache に残さず、再訪・リロードで必ず最新を読ませる。
+      // (デプロイで JS ロジックが変わっても古い HTML が貼り付かない。)
+      "Cache-Control": "no-store, must-revalidate",
+    },
   });
 }
