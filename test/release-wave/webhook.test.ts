@@ -4,9 +4,11 @@ import {
   handleFlipReportWebhook,
   handlePendingReleaseWebhook,
   handleTrafficReportWebhook,
+  handleBackendTrafficReportWebhook,
 } from "../../src/release-wave/webhook";
 import { getPendingRelease } from "../../src/release-wave/pending-release";
 import { getTraffic } from "../../src/release-wave/traffic";
+import { getBackendTraffic } from "../../src/release-wave/backend-traffic";
 import type { Env } from "../../src/index";
 import type { ReleaseWaveHub } from "../../src/release-wave/do";
 
@@ -615,6 +617,143 @@ describe("handleTrafficReportWebhook", () => {
         body: {
           repo: "ippoan/auth-worker",
           versions: [{ version_id: "a", percentage: 100 }],
+        },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(401);
+  });
+});
+
+// ============================================================================
+// /webhooks/release-wave/backend-traffic-report
+// ============================================================================
+
+const BACKEND_TRAFFIC_URL =
+  "https://ci-dashboard.ippoan.org/webhooks/release-wave/backend-traffic-report";
+
+describe("handleBackendTrafficReportWebhook", () => {
+  it("records service traffic sorted by percent desc (ok=true)", async () => {
+    const kv = memKv();
+    const { env } = fakeEnv({ compatKv: kv });
+    const resp = await handleBackendTrafficReportWebhook(
+      jsonRequest({
+        url: BACKEND_TRAFFIC_URL,
+        secret: "expected-secret",
+        body: {
+          repo: "ippoan/rust-alc-api",
+          services: [
+            {
+              service: "rust-alc-api",
+              revisions: [
+                { revision: "rust-alc-api-00043-xyz", percent: 0, tag: "pending-v1-4-3" },
+                { revision: "rust-alc-api-00042-abc", percent: 100, tag: "v1.4.2" },
+              ],
+            },
+          ],
+        },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(200);
+    const rec = await getBackendTraffic(kv, "ippoan/rust-alc-api");
+    expect(rec).not.toBeNull();
+    expect(rec!.services[0]!.revisions[0]!.percent).toBe(100);
+    expect(rec!.services[0]!.revisions[0]!.revision).toBe("rust-alc-api-00042-abc");
+    expect(rec!.services[0]!.revisions[1]!.percent).toBe(0);
+    expect(rec!.services[0]!.revisions[1]!.tag).toBe("pending-v1-4-3");
+  });
+
+  it("defaults a missing revision tag to null", async () => {
+    const kv = memKv();
+    const { env } = fakeEnv({ compatKv: kv });
+    const resp = await handleBackendTrafficReportWebhook(
+      jsonRequest({
+        url: BACKEND_TRAFFIC_URL,
+        secret: "expected-secret",
+        body: {
+          repo: "ippoan/x",
+          services: [{ service: "x", revisions: [{ revision: "x-1", percent: 100 }] }],
+        },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(200);
+    const rec = await getBackendTraffic(kv, "ippoan/x");
+    expect(rec!.services[0]!.revisions[0]!.tag).toBeNull();
+  });
+
+  it("accepts a service with an empty revisions array (traffic 未設定)", async () => {
+    const kv = memKv();
+    const { env } = fakeEnv({ compatKv: kv });
+    const resp = await handleBackendTrafficReportWebhook(
+      jsonRequest({
+        url: BACKEND_TRAFFIC_URL,
+        secret: "expected-secret",
+        body: { repo: "ippoan/x", services: [{ service: "x", revisions: [] }] },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(200);
+  });
+
+  it("rejects an empty services array with 400", async () => {
+    const kv = memKv();
+    const { env } = fakeEnv({ compatKv: kv });
+    const resp = await handleBackendTrafficReportWebhook(
+      jsonRequest({
+        url: BACKEND_TRAFFIC_URL,
+        secret: "expected-secret",
+        body: { repo: "ippoan/x", services: [] },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(400);
+  });
+
+  it("rejects a percent out of range with 400", async () => {
+    const kv = memKv();
+    const { env } = fakeEnv({ compatKv: kv });
+    const resp = await handleBackendTrafficReportWebhook(
+      jsonRequest({
+        url: BACKEND_TRAFFIC_URL,
+        secret: "expected-secret",
+        body: {
+          repo: "ippoan/x",
+          services: [{ service: "x", revisions: [{ revision: "r", percent: 150 }] }],
+        },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(400);
+  });
+
+  it("returns 500 when COMPAT_KV is unbound", async () => {
+    const { env } = fakeEnv({ compatKv: undefined });
+    const resp = await handleBackendTrafficReportWebhook(
+      jsonRequest({
+        url: BACKEND_TRAFFIC_URL,
+        secret: "expected-secret",
+        body: {
+          repo: "ippoan/x",
+          services: [{ service: "x", revisions: [{ revision: "r", percent: 100 }] }],
+        },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(500);
+  });
+
+  it("rejects a bad webhook secret with 401", async () => {
+    const kv = memKv();
+    const { env } = fakeEnv({ compatKv: kv });
+    const resp = await handleBackendTrafficReportWebhook(
+      jsonRequest({
+        url: BACKEND_TRAFFIC_URL,
+        secret: "wrong-secret",
+        body: {
+          repo: "ippoan/x",
+          services: [{ service: "x", revisions: [{ revision: "r", percent: 100 }] }],
         },
       }),
       env,

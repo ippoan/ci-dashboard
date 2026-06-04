@@ -27,6 +27,10 @@ import {
   type WaveCompatibility,
   type WaveBackendCompat,
 } from "./compat";
+import {
+  getBackendTrafficForRepos,
+  type BackendTrafficRecord,
+} from "./backend-traffic";
 import { parseTaglessRepos } from "../tagless-repos";
 import {
   getTrafficForRepos,
@@ -396,30 +400,39 @@ function renderTrafficRollbackRow(repo: string, rec: TrafficRecord): string {
 }
 
 /**
- * Compatibility グラフに出ている backend repo の Cloud Run revision 状態 +
- * rollback ボタンを HTML で返す (Refs #197)。
+ * Compatibility グラフに出ている backend repo の Cloud Run traffic 状態 +
+ * rollback ボタンを HTML で返す (Refs #197 / #256)。
  *
  * frontend の「Traffic (version split)」と対称に、各 backend について:
- *   - **現 active 行**: 100% badge + git tag (ver) + image sha (full は hover) +
- *     deploy 日時。Cloud Run backend は「最新 ready revision に 100% flip」運用
- *     (canary % 配分なし) なので、現 active = 100% traffic として出す。これで
- *     ver / image sha / traffic が一目で分かる。従来は rollback 候補 (過去
- *     revision) が無い backend を丸ごと隠していたため、deploy 直後で履歴 1 件の
- *     Cloud Run repo は image sha も tag も traffic も見えなかった。それを解消する。
+ *   - **traffic 行**: `backend-traffic::<repo>` に GCP の実 traffic split
+ *     (`status.traffic[]`) があれば、service × revision ごとに percent badge +
+ *     revision sha (full は hover) + revision tag を出す。Cloud Run は tag push →
+ *     `--no-traffic` deploy (新 0%) → Flip (新 100%) 運用なので、Flip 前は
+ *     「旧 100% + 新 pending 0%」が実態として並ぶ。
+ *   - 実 traffic 報告がまだ無い backend は **fallback 行** (`backend::<repo>.
+ *     current_image` を 100% と仮定: tag + image sha + deploy 日時)。実 traffic を
+ *     報告する配線 (release-wave-handler の cloudrun flip/rollback) が回り始める
+ *     までの暫定表示。
  *   - **rollback 行**: `deploy_history` のうち「現 active 以外」(= 過去に active
  *     だった revision) があれば各候補に `Rollback to <tag/sha>` ボタンを出す。
- *     frontend の Traffic rollback と方針を揃える (任意の過去 revision を即 100%)。
  *
- * backend record (`backend::<repo>`) を持ち current_image が分かる repo は必ず
- * 現 active 行を出す (rollback 候補の有無に依らない)。current_image 不明 (稀) な
- * repo だけ skip。1 行も出せなければ ""。
+ * backend record (`backend::<repo>`) を持つ repo は traffic 行 or fallback 行を
+ * 必ず出す (traffic も current_image も無い稀な record だけ skip)。1 行も出せ
+ * なければ ""。
  */
-export function renderBackendRollbackBlock(compat: WaveCompatibility): string {
+export function renderBackendRollbackBlock(
+  compat: WaveCompatibility,
+  trafficByRepo?: Map<string, BackendTrafficRecord>,
+): string {
   const rows = compat.backends
     .map((b) => {
-      const active = renderBackendActiveRow(b);
-      if (!active) return ""; // current_image 不明な record は出さない
-      return active + renderBackendRollbackRow(b);
+      const traffic = trafficByRepo?.get(b.backend_repo);
+      // 実 traffic split (GCP 実態) があれば優先。無ければ current_image fallback。
+      const head = hasBackendTraffic(traffic)
+        ? renderBackendTrafficRows(b.backend_repo, traffic!)
+        : renderBackendActiveRow(b);
+      if (!head) return ""; // traffic も current_image も無い record は出さない
+      return head + renderBackendRollbackRow(b);
     })
     .filter((r) => r !== "")
     .join("");
@@ -429,13 +442,58 @@ export function renderBackendRollbackBlock(compat: WaveCompatibility): string {
   return `
     <div style="margin-top:10px">
       <strong class="meta">Backend traffic / rollback (Cloud Run revision)</strong>
-      <p class="meta" style="margin:4px 0">Cloud Run backend は現 active revision に 100% traffic
-        (canary % 配分なし)。image sha は hover で full、tag は git release tag。</p>
+      <p class="meta" style="margin:4px 0">Cloud Run の実 traffic split (status.traffic[])。
+        tag push → no-traffic deploy (新 0%) → Flip (新 100%) 運用なので、Flip 前は
+        「旧 100% + 新 pending 0%」が並ぶ。revision / image sha は hover で full。</p>
       <table style="margin-top:6px">
-        <thead><tr><th>Backend repo</th><th>%</th><th>Tag / Image (sha)</th><th>Deployed (UTC)</th></tr></thead>
+        <thead><tr><th>Backend repo</th><th>%</th><th>Revision / Image / Tag</th><th>When (UTC)</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </div>`;
+}
+
+/** backend に実 traffic split (revision 1 件以上) があるか。 */
+function hasBackendTraffic(t: BackendTrafficRecord | undefined): boolean {
+  return !!t && t.services.some((s) => s.revisions.length > 0);
+}
+
+/**
+ * 1 backend の実 traffic 行群 (GCP `status.traffic[]` ベース)。service × revision
+ * を percent 降順 (record 側で整列済み) で並べ、各行に percent badge + revision
+ * sha (full は hover) + revision tag を出す。repo 名は最初の行だけ。複数 service
+ * の repo は service 名も前置する。GCP の traffic には deploy 日時が無いので
+ * When 列は "—"。
+ */
+function renderBackendTrafficRows(
+  repo: string,
+  traffic: BackendTrafficRecord,
+): string {
+  const multiService = traffic.services.length > 1;
+  const flat = traffic.services.flatMap((svc) =>
+    svc.revisions.map((rev) => ({ service: svc.service, rev })),
+  );
+  return flat
+    .map(({ service, rev }, i) => {
+      // 100% = 緑 / 0% = 灰 / その他 (canary 等) = 黄。
+      const color =
+        rev.percent >= 100 ? GREEN : rev.percent <= 0 ? GRAY : AMBER;
+      const pctBadge = `<span class="badge" style="background:${color}">${rev.percent}%</span>`;
+      const svcPart = multiService
+        ? `<span class="meta">${escapeHtml(service)}</span> `
+        : "";
+      const revCode = `<code title="${escapeHtml(rev.revision)}">${escapeHtml(shortId(rev.revision))}</code>`;
+      const tagPart = rev.tag
+        ? ` <span class="meta">${escapeHtml(rev.tag)}</span>`
+        : "";
+      return `
+            <tr>
+              <td>${i === 0 ? escapeHtml(repo) : ""}</td>
+              <td>${pctBadge}</td>
+              <td>${svcPart}${revCode}${tagPart}</td>
+              <td><span class="meta">—</span></td>
+            </tr>`;
+    })
+    .join("");
 }
 
 /**
@@ -570,8 +628,17 @@ export async function handleReleaseWaveListPageWithRepoStatus(
       const trafficByRepo = await getTrafficForRepos(env.COMPAT_KV, repos);
       const trafficBlock = renderTrafficVersionsBlock(repos, trafficByRepo);
 
-      // backend (Cloud Run) revision の rollback ボタンをグラフ下に出す (Refs #197)。
-      const backendRollbackBlock = renderBackendRollbackBlock(compat);
+      // backend (Cloud Run) の実 traffic split + rollback ボタンをグラフ下に出す。
+      // 実 traffic (backend-traffic::) があれば GCP 実態を、無ければ current_image
+      // ベースの fallback を表示する (Refs #197 / #256)。
+      const backendTrafficByRepo = await getBackendTrafficForRepos(
+        env.COMPAT_KV,
+        repos,
+      );
+      const backendRollbackBlock = renderBackendRollbackBlock(
+        compat,
+        backendTrafficByRepo,
+      );
 
       // traffic → backend rollback → Tag Release ボタンの順で 1 回で注入する。
       html = injectCompatTagReleaseButtons(
