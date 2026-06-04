@@ -335,6 +335,78 @@ function renderFrontendSection(tracks: FrontendTrack[]): string {
     </div>`;
 }
 
+/** stage / flip phase の色付きセル。 */
+function phaseCell(s: string): string {
+  return s === "done"
+    ? `<span class="ok">done</span>`
+    : s === "failed"
+    ? `<span class="err">failed</span>`
+    : `<span class="pending">pending</span>`;
+}
+
+/**
+ * 1 wave を repo (front) ごとの行に分解して描画する。
+ *
+ * wave 共通セル (Wave ID / State / Started At / Flip Policy / Actions) は
+ * 先頭 repo 行に rowspan=repo数 で持たせ、Repo / Preview / Stage / Flip は front
+ * ごとに 1 行ずつ出す。repo が 0 件の wave は 1 行 (front 列は "—")。
+ */
+function renderWaveRows(w: WaveState): string {
+  // 一括 flip = Approve & Flip。pending-approval の時だけ有効。
+  // 一覧では force を付けない (compat gate ブロック時は失敗 → 詳細ページで
+  // override する運用)。CSP 上 JS 無しで POST form として動かす。
+  const canApprove = w.state === "pending-approval";
+  const n = Math.max(1, w.repos.length);
+  const flipButton = `
+    <form method="post" action="/api/release-wave/${encodeURIComponent(w.wave_id)}/approve" style="margin:0">
+      <button type="submit" ${canApprove ? "" : "disabled"}
+        title="Approve & flip this wave (enabled only in pending-approval; no compat-gate override here)">
+        Approve &amp; Flip
+      </button>
+    </form>`;
+
+  // 先頭行にだけ出す wave 共通セル (rowspan で全 front 行をまたぐ)。
+  const waveCells = `
+    <td rowspan="${n}"><a href="/release-wave/${encodeURIComponent(w.wave_id)}">${escapeHtml(w.wave_id)}</a></td>
+    <td rowspan="${n}"><span class="badge" style="background:${stateColor(w.state)}">${escapeHtml(w.state)}</span></td>
+    <td rowspan="${n}" class="meta">${escapeHtml(w.started_at)}</td>
+    <td rowspan="${n}" class="meta">${escapeHtml(w.flip_policy)}</td>`;
+  const actionCell = `<td rowspan="${n}" class="actions">${flipButton}</td>`;
+
+  if (w.repos.length === 0) {
+    return `
+      <tr>
+        ${waveCells}
+        <td><span class="meta">—</span></td>
+        <td><span class="meta">—</span></td>
+        <td><span class="meta">—</span></td>
+        <td><span class="meta">—</span></td>
+        ${actionCell}
+      </tr>`;
+  }
+
+  return w.repos
+    .map((r, idx) => {
+      const sha = r.head_sha ? escapeHtml(r.head_sha.slice(0, 7)) : "?";
+      const safe = safeHttpUrl(r.preview_url);
+      // preview は front ごとに分けて出す。link 化できる時は preview リンク +
+      // sha、無ければ sha のみ (image を識別できるよう常に出す)。
+      const previewCell = safe
+        ? `<a href="${escapeHtml(safe)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(safe)}">preview</a> <span class="meta">${sha}</span>`
+        : `<span class="meta">${sha}</span>`;
+      return `
+        <tr>
+          ${idx === 0 ? waveCells : ""}
+          <td>${escapeHtml(r.repo)}</td>
+          <td class="preview-inline">${previewCell}</td>
+          <td>${phaseCell(r.stage_status)}</td>
+          <td>${phaseCell(r.flip_status)}</td>
+          ${idx === 0 ? actionCell : ""}
+        </tr>`;
+    })
+    .join("");
+}
+
 // ----------------------------------------------------------------------------
 // GET /release-wave  →  全 wave 一覧
 // ----------------------------------------------------------------------------
@@ -410,53 +482,13 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
   const frontendSection = renderFrontendSection(computeFrontendTracks(waves));
 
   // wave 一覧は最新の成功デプロイより前の terminal wave を畳んで出す。
+  // 各 wave の行は repo (front) ごとに分割する: wave 共通セル (Wave ID / State /
+  // Started At / Flip Policy / Actions) を rowspan でまとめ、Repo / Preview /
+  // Stage / Flip は front ごとに 1 行ずつ出す。
   const displayWaves = visibleWaves(waves);
   const rows = displayWaves.length === 0
-    ? `<tr><td colspan="6" class="empty">No release waves yet.</td></tr>`
-    : displayWaves
-        .map((w) => {
-          const repos = w.repos.map((r) => escapeHtml(r.repo)).join(", ");
-
-          // Flip ボタンの右に出す preview リンク。repo が複数 (= front ごとに別 image)
-          // の時に区別できるよう repo 名 + short head_sha を併記する
-          // (例: auth-worker=a1b2c3d nuxt-notify=d4e5f6a)。preview_url がある repo は
-          // link 化、無ければ素の text (sha だけは常に出して image を識別可能にする)。
-          const previewItems = w.repos.map((r) => {
-            const name = escapeHtml(r.repo.split("/").pop() ?? r.repo);
-            const sha = r.head_sha ? escapeHtml(r.head_sha.slice(0, 7)) : "?";
-            const label = `${name}=${sha}`;
-            const safe = safeHttpUrl(r.preview_url);
-            return safe
-              ? `<a href="${escapeHtml(safe)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(safe)}">${label}</a>`
-              : `<span class="meta">${label}</span>`;
-          });
-          const previewInline = previewItems.length > 0
-            ? `<span class="preview-inline">${previewItems.join(" ")}</span>`
-            : "";
-
-          // 一括 flip = Approve & Flip。pending-approval の時だけ有効。
-          // 一覧では force を付けない (compat gate ブロック時は失敗 → 詳細ページで
-          // override する運用)。CSP 上 JS 無しで POST form として動かす。
-          const canApprove = w.state === "pending-approval";
-          const flipButton = `
-            <form method="post" action="/api/release-wave/${encodeURIComponent(w.wave_id)}/approve" style="margin:0">
-              <button type="submit" ${canApprove ? "" : "disabled"}
-                title="Approve & flip this wave (enabled only in pending-approval; no compat-gate override here)">
-                Approve &amp; Flip
-              </button>
-            </form>`;
-
-          return `
-            <tr>
-              <td><a href="/release-wave/${encodeURIComponent(w.wave_id)}">${escapeHtml(w.wave_id)}</a></td>
-              <td><span class="badge" style="background:${stateColor(w.state)}">${escapeHtml(w.state)}</span></td>
-              <td class="meta">${escapeHtml(w.started_at)}</td>
-              <td class="meta">${escapeHtml(w.flip_policy)}</td>
-              <td class="meta">${repos}</td>
-              <td class="actions">${flipButton}${previewInline}</td>
-            </tr>`;
-        })
-        .join("");
+    ? `<tr><td colspan="9" class="empty">No release waves yet.</td></tr>`
+    : displayWaves.map((w) => renderWaveRows(w)).join("");
 
   const html = `<!doctype html>
 <html lang="ja">
@@ -482,7 +514,8 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
     ${frontendSection}
     <h2>Release waves</h2>
     <p class="meta">最新の成功デプロイ (flipped) より前に始まった完了 wave は畳んで
-      非表示。直リンク <code>/release-wave/&lt;id&gt;</code> で個別参照は可能。</p>
+      非表示。直リンク <code>/release-wave/&lt;id&gt;</code> で個別参照は可能。
+      各 wave は front (repo) ごとに 1 行ずつに分けて表示。</p>
     <table>
       <thead>
         <tr>
@@ -490,7 +523,10 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
           <th>State</th>
           <th>Started At</th>
           <th>Flip Policy</th>
-          <th>Repos</th>
+          <th>Repo (front)</th>
+          <th>Preview</th>
+          <th>Stage</th>
+          <th>Flip</th>
           <th>Actions</th>
         </tr>
       </thead>
