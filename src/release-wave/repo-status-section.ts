@@ -153,15 +153,24 @@ export function renderRepoReleaseStatusSection(
  * レンダリング済み一覧 HTML に section を注入する。
  *
  * 配置優先順:
- *   1. 下段 2 カラム (.wave-row = Frontends / Pending releases) の直前
- *      (= Compatibility section の直後、フル幅)
- *   2. Pending releases section の <div> 直前 (旧 1 列レイアウト互換)
- *   3. h1 (`Release Waves`) 直後
- *   4. </body> 直前
+ *   1. 右カラムの先頭 (= per-repo tracking section の <div> 直前)。
+ *      左カラム = Compatibility / 右カラム = その他、の 2 カラムレイアウト用。
+ *   2. 旧 .wave-row (下段 2 カラム) の直前
+ *   3. Pending releases section の <div> 直前 (旧 1 列レイアウト互換)
+ *   4. h1 (`Release Waves`) 直後
+ *   5. </body> 直前
  */
 export function injectRepoStatusSection(html: string, section: string): string {
-  // 下段 2 カラム (Frontends 左 / Pending releases 右) を grid 化したレイアウトでは、
-  // repo status はフル幅でその上 (= compat の直後) に置く。.wave-row 直前へ入れる。
+  // 左カラム = Compatibility / 右カラム = その他 の 2 カラムレイアウトでは、
+  // repo status は右カラムの先頭 (= per-repo tracking section の直前) に置く。
+  const frontends = html.indexOf("<h2>Frontends");
+  if (frontends !== -1) {
+    const divStart = html.lastIndexOf('<div class="section">', frontends);
+    if (divStart !== -1) {
+      return html.slice(0, divStart) + section + "\n        " + html.slice(divStart);
+    }
+  }
+  // 旧 下段 2 カラム (.wave-row) レイアウト互換: .wave-row 直前へ入れる。
   const row = html.indexOf('<div class="wave-row">');
   if (row !== -1) {
     return html.slice(0, row) + section + "\n      " + html.slice(row);
