@@ -256,14 +256,43 @@ function computeFrontendTracks(waves: WaveState[]): FrontendTrack[] {
 }
 
 /**
- * frontend (repo) 単位の追跡セクション。各 frontend の最新 preview URL と最後に
- * deploy (flip) された wave を 1 行ずつ出す。preview を wave 行ではなく
- * frontend 行に分けて持つことで「どの front の preview がどれか」を分離する。
+ * frontend (repo) の現 live deploy (traffic 100% の version) を表すセル。
+ * traffic:: record の versions から percentage 最大の version を採用し、tag
+ * (無ければ short version_id) + % を出す。traffic 無 / 全 0% なら "—"。
+ *
+ * 「Latest wave」が failed でも、その後 flip 済みなら実 deploy がここに出るので
+ * 両方を見れば実態が分かる (= wave state と live deploy の二本立て)。
  */
-function renderFrontendSection(tracks: FrontendTrack[]): string {
+function liveDeployCell(traffic: TrafficRecord | undefined): string {
+  const tv = traffic?.versions ?? [];
+  if (tv.length === 0) return `<span class="meta">—</span>`;
+  const live = [...tv].sort((a, b) => b.percentage - a.percentage)[0];
+  if (!live || live.percentage <= 0) return `<span class="meta">—</span>`;
+  const label =
+    live.tag ??
+    (live.version_id.length > 12
+      ? `${live.version_id.slice(0, 12)}…`
+      : live.version_id);
+  return `<span class="ok">${escapeHtml(label)}</span> <span class="meta">${live.percentage}%</span>`;
+}
+
+/**
+ * frontend (repo) 単位の追跡セクション。各 frontend の最新 preview URL、現 live
+ * deploy (traffic 100%)、最後に flip された wave、最新 wave を 1 行ずつ出す。
+ * preview を wave 行ではなく frontend 行に分けて持つことで「どの front の
+ * preview がどれか」を分離する。
+ *
+ * 「Latest wave」(= 最新 wave の state、failed の場合あり) と「Current (live)」
+ * (= traffic 100% の実 deploy) を**両方**並べることで、failed wave の後に flip
+ * 済みでも現在のデプロイ実態が分かるようにする。
+ */
+function renderFrontendSection(
+  tracks: FrontendTrack[],
+  trafficByRepo?: Map<string, TrafficRecord>,
+): string {
   const rows =
     tracks.length === 0
-      ? `<tr><td colspan="4" class="empty">No frontends tracked yet.</td></tr>`
+      ? `<tr><td colspan="5" class="empty">No frontends tracked yet.</td></tr>`
       : tracks
           .map((t) => {
             const previewCell = t.previewUrl
@@ -271,6 +300,7 @@ function renderFrontendSection(tracks: FrontendTrack[]): string {
                  ${t.previewSha ? `<span class="meta">${escapeHtml(t.previewSha)}</span>` : ""}
                  <span class="meta">(${escapeHtml(t.previewWaveId ?? "")})</span>`
               : `<span class="meta">—</span>`;
+            const liveCell = liveDeployCell(trafficByRepo?.get(t.repo));
             const deployCell = t.lastFlipWaveId
               ? `<a href="/release-wave/${encodeURIComponent(t.lastFlipWaveId)}">${escapeHtml(t.lastFlipTag ?? t.lastFlipWaveId)}</a>
                  <span class="meta">${escapeHtml(t.lastFlipAt ?? "")}</span>`
@@ -281,6 +311,7 @@ function renderFrontendSection(tracks: FrontendTrack[]): string {
               <tr>
                 <td>${escapeHtml(t.repo)}</td>
                 <td>${previewCell}</td>
+                <td>${liveCell}</td>
                 <td class="meta">${deployCell}</td>
                 <td>${latestCell}</td>
               </tr>`;
@@ -290,15 +321,18 @@ function renderFrontendSection(tracks: FrontendTrack[]): string {
   return `
     <div class="section">
       <h2>Frontends (per-repo tracking)</h2>
-      <p class="meta">repo (frontend) ごとの最新 preview URL と、最後にデプロイ
-        (flip) された wave。preview は各 frontend の<strong>最新 flip より前のもの
-        を隠す</strong> (= deploy より古い stale preview link は出さない)。
-        まだ deploy 前の frontend は最新の preview をそのまま表示。</p>
+      <p class="meta">repo (frontend) ごとの最新 preview URL、現 live deploy
+        (traffic 100%)、最後にデプロイ (flip) された wave、最新 wave。
+        <strong>Current (live)</strong> は traffic 100% の実 version なので、
+        <strong>Latest wave</strong> が failed でもその後 flip 済みなら実態が
+        ここに出る (両方見れば現状が分かる)。preview は各 frontend の最新 flip
+        より前のものは隠す。</p>
       <table>
         <thead>
           <tr>
             <th>Repo</th>
             <th>Latest preview</th>
+            <th>Current (live)</th>
             <th>Last deploy (flip)</th>
             <th>Latest wave</th>
           </tr>
@@ -346,9 +380,14 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
     }
   }
 
-  // compat グラフに出る repo (backend + frontend) + pending repo の version
-  // traffic を引く。グラフの frontend ノード hover に「現 active version の
-  // % / id」を出す用 + Pending releases の単一真実導出用 (Refs #237)。
+  // frontend (repo) 単位の追跡 (全 wave から導出)。各 repo の現 live deploy
+  // (traffic 100%) も併記するため、traffic 取得対象にこの repo 群も足す。
+  const frontendTracks = computeFrontendTracks(waves);
+
+  // compat グラフに出る repo (backend + frontend) + pending repo + frontend
+  // 追跡 repo の version traffic を引く。グラフの frontend ノード hover に「現
+  // active version の % / id」を出す用 + Pending releases の単一真実導出用 +
+  // Frontends セクションの「Current (live)」列用 (Refs #237)。
   let trafficByRepo: Map<string, TrafficRecord> = new Map();
   if (env.COMPAT_KV) {
     const repos = new Set<string>();
@@ -359,6 +398,7 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
       }
     }
     for (const r of pendingReleases) repos.add(r.repo);
+    for (const t of frontendTracks) repos.add(t.repo);
     try {
       trafficByRepo = await getTrafficForRepos(env.COMPAT_KV, repos);
     } catch {
@@ -381,11 +421,12 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
     flipGroup,
   );
 
-  // frontend (repo) 単位の追跡セクション (全 wave から導出)。wave 中心の一覧
-  // テーブルは廃止し、frontend 単位の追跡 + compat グラフ (Tag Release / Staged
-  // previews + 一括 flip) に集約した。完了/失敗した個別 wave は
-  // `/release-wave/<id>` 直リンクで参照可能。
-  const frontendSection = renderFrontendSection(computeFrontendTracks(waves));
+  // frontend (repo) 単位の追跡セクション。wave 中心の一覧テーブルは廃止し、
+  // frontend 単位の追跡 + compat グラフ (Tag Release / Staged previews + 一括
+  // flip) に集約した。完了/失敗した個別 wave は `/release-wave/<id>` 直リンクで
+  // 参照可能。Latest wave (= 最新 wave の state) と Current (live) (= traffic
+  // 100% の実 deploy) の両方を出す (failed wave の後に flip 済みでも実態が見える)。
+  const frontendSection = renderFrontendSection(frontendTracks, trafficByRepo);
 
   const html = `<!doctype html>
 <html lang="ja">

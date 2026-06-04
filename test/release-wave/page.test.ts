@@ -291,6 +291,70 @@ describe("handleReleaseWaveListPage", () => {
     expect(html).toContain("v0.9");
   });
 
+  it("shows the live deploy (traffic 100%) alongside a failed Latest wave", async () => {
+    // 最新 wave は failed だが、その後 traffic 100% で flip 済み → Current (live)
+    // に実 version が出て、Latest wave の failed と両方見える。
+    const env = fakeEnv({
+      listReturn: [
+        makeWave({
+          wave_id: "wave_2026_06_03_1245",
+          state: "failed",
+          started_at: "2026-06-03T12:45:40Z",
+          repos: [
+            {
+              repo: "ippoan/auth-worker",
+              target_tag: "v1",
+              head_sha: "c172d75",
+              require_compatibility: false,
+              stage_status: "done",
+              preview_url: null,
+              stage_error: null,
+              flip_status: "pending",
+              flip_error: null,
+              flip_from_revision: null,
+              rolled_back_to_revision: null,
+            },
+          ],
+        }),
+      ],
+      compatKv: memKv({
+        "traffic::ippoan/auth-worker": {
+          schema_version: 3,
+          repo: "ippoan/auth-worker",
+          versions: [
+            {
+              version_id: "live-vid",
+              percentage: 100,
+              created_on: "2026-06-03T20:00:00Z",
+              tag: "v0.5.99",
+            },
+          ],
+          reported_at: "2026-06-03T20:01:00Z",
+        },
+      }),
+    });
+    const html = await (await handleReleaseWaveListPage(env)).text();
+    expect(html).toContain("Current (live)");
+    // Latest wave は failed バッジ
+    expect(html).toContain("/release-wave/wave_2026_06_03_1245");
+    expect(html).toContain(">failed<");
+    // Current (live) に traffic 100% の実 version (tag) と %
+    expect(html).toContain('<span class="ok">v0.5.99</span>');
+    expect(html).toContain("100%");
+  });
+
+  it("shows '—' for Current (live) when there is no traffic record", async () => {
+    const env = fakeEnv({
+      listReturn: [
+        makeWave({ wave_id: "w-x", state: "failed" }),
+      ],
+    });
+    const html = await (await handleReleaseWaveListPage(env)).text();
+    expect(html).toContain("Current (live)");
+    // traffic 無 → live セルは "—" (ok span を作らない)
+    expect(html).not.toContain('<span class="ok">');
+  });
+
   it("hides a frontend preview that predates that frontend's last flip", async () => {
     const repo = (over: Record<string, unknown>) => ({
       repo: "ippoan/auth-worker",
