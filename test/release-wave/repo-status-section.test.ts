@@ -649,6 +649,56 @@ describe("renderBackendRollbackBlock", () => {
     expect(html).toContain('title="c1b3e5146b15deadbeef"');
     expect(html).toContain("v1.4.2");
   });
+
+  it("excludes CF Workers backends (workerRepos) from the Cloud Run section (Refs #268)", () => {
+    // auth-worker は CF Worker だが compat 上は backend (frontend が互換性テスト
+    // する対象) なので backend record を持つ。Cloud Run revision section には
+    // 出さず、上の version split section に任せる。
+    const html = renderBackendRollbackBlock(
+      compat([
+        {
+          backend_repo: "ippoan/auth-worker",
+          current_image: "v0.2.52",
+          current_tag: "v0.2.52",
+          deployed_at: "2026-06-03T23:52:00Z",
+          deploy_history: [],
+          matrix: [],
+        },
+        {
+          backend_repo: "ippoan/rust-alc-api",
+          current_image: "rust-alc-api-00042-abc",
+          current_tag: "v1.4.2",
+          deployed_at: "2026-06-03T15:00:00Z",
+          deploy_history: [],
+          matrix: [],
+        },
+      ]),
+      undefined,
+      new Set(["ippoan/auth-worker"]),
+    );
+    // Cloud Run backend (rust-alc-api) は出るが、CF Worker (auth-worker) は出ない。
+    expect(html).toContain("ippoan/rust-alc-api");
+    expect(html).not.toContain("ippoan/auth-worker");
+  });
+
+  it("renders the whole block empty when every backend is a CF Worker (Refs #268)", () => {
+    const html = renderBackendRollbackBlock(
+      compat([
+        {
+          backend_repo: "ippoan/auth-worker",
+          current_image: "v0.2.52",
+          current_tag: "v0.2.52",
+          deployed_at: "2026-06-03T23:52:00Z",
+          deploy_history: [],
+          matrix: [],
+        },
+      ]),
+      undefined,
+      new Set(["ippoan/auth-worker"]),
+    );
+    // 全 backend が CF Worker なら section ごと出さない。
+    expect(html).toBe("");
+  });
 });
 
 describe("isUpToDate", () => {
