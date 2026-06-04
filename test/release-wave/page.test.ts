@@ -360,6 +360,51 @@ describe("handleReleaseWaveListPage", () => {
     expect(html).not.toContain('title="traffic 100% で live');
   });
 
+  it("excludes backend repos (backend:: record) from the Frontends section", async () => {
+    // wave に frontend (auth-worker) と backend (rust-alc-api) が混在。
+    // backend:: record を持つ rust-alc-api は frontend ではないので除外する。
+    const mkRepo = (repo: string) => ({
+      repo,
+      target_tag: "v1",
+      head_sha: "abc1234",
+      require_compatibility: false,
+      stage_status: "done",
+      preview_url: null,
+      stage_error: null,
+      flip_status: "pending",
+      flip_error: null,
+      flip_from_revision: null,
+      rolled_back_to_revision: null,
+    });
+    const env = fakeEnv({
+      listReturn: [
+        makeWave({
+          wave_id: "w-mix",
+          state: "failed",
+          repos: [mkRepo("ippoan/auth-worker"), mkRepo("ippoan/rust-alc-api")],
+        }),
+      ],
+      compatKv: memKv({
+        "backend::ippoan/rust-alc-api": {
+          schema_version: 1,
+          repo: "ippoan/rust-alc-api",
+          current_image: "cur-img",
+          deployed_at: "2026-06-01T00:00:00Z",
+          deployed_by: "ci",
+          wave_id: null,
+        },
+      }),
+    });
+    const html = await (await handleReleaseWaveListPage(env)).text();
+    // Frontends セクションの行に rust-alc-api は出ない (backend なので除外)
+    const frontendsIdx = html.indexOf("Frontends (per-repo tracking)");
+    const frontendsHtml = html.slice(frontendsIdx);
+    expect(frontendsHtml).toContain("ippoan/auth-worker");
+    expect(frontendsHtml).not.toContain(
+      "<td>ippoan/rust-alc-api</td>",
+    );
+  });
+
   it("hides a frontend preview that predates that frontend's last flip", async () => {
     const repo = (over: Record<string, unknown>) => ({
       repo: "ippoan/auth-worker",

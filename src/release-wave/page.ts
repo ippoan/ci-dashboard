@@ -422,7 +422,17 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
 
   // frontend (repo) 単位の追跡 (全 wave から導出)。各 repo の現 live deploy
   // (traffic 100%) も併記するため、traffic 取得対象にこの repo 群も足す。
-  const frontendTracks = computeFrontendTracks(waves);
+  // Frontends セクションは frontend repo だけを出す。wave には backend
+  // (例: rust-alc-api = Cloud Run) も混ざるが、それは frontend ではないので除外。
+  // backend の判定は compat の `backend::` record (= globalCompat.backends) を
+  // source of truth にする。globalCompat 未取得 (COMPAT_KV 未 bind) 時は判別不能
+  // なので全件出す (degrade)。
+  const backendRepos = new Set(
+    (globalCompat?.backends ?? []).map((b) => b.backend_repo),
+  );
+  const frontendTracks = computeFrontendTracks(waves).filter(
+    (t) => !backendRepos.has(t.repo),
+  );
 
   // compat グラフに出る repo (backend + frontend) + pending repo + frontend
   // 追跡 repo の version traffic を引く。グラフの frontend ノード hover に「現
