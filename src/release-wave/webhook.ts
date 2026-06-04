@@ -23,6 +23,10 @@ import type { WaveState } from "./types";
 import { recordFrontendTest, recordBackendDeploy, getBackendCurrent } from "./compat";
 import { recordPendingRelease } from "./pending-release";
 import { recordTraffic } from "./traffic";
+import {
+  recordBackendTraffic,
+  type BackendServiceTraffic,
+} from "./backend-traffic";
 
 // ----------------------------------------------------------------------------
 // Common helpers
@@ -447,6 +451,82 @@ export async function handleTrafficReportWebhook(
       created_on: x.created_on ?? null,
       tag: x.tag ?? null,
     })),
+    now: new Date().toISOString(),
+  });
+  return jsonResponse(200, { ok: true, record });
+}
+
+// ----------------------------------------------------------------------------
+// /webhooks/release-wave/backend-traffic-report  (Cloud Run 実 traffic、Refs #256)
+// ----------------------------------------------------------------------------
+
+/**
+ * release-wave-handler の cloudrun flip / rollback 後に、release-wave-gcp の
+ * `/cloudrun/stage-check` (GetService) で取得した Cloud Run の **実 traffic split**
+ * (`status.traffic[]`) を service 単位で報告する。ci-dashboard 側で
+ * `backend-traffic::<repo>` に upsert し、/release-wave の backend 表示を GCP の
+ * 実態 (Flip 前の `旧 100% + 新 pending 0%` 含む) に追従させる。
+ *
+ * frontend の `/traffic-report` (Cloudflare Workers の version split) と対称だが、
+ * backend は 1 repo = N service なので service 配列で受ける。
+ *
+ * body:
+ *   {
+ *     "repo": "ippoan/rust-alc-api",
+ *     "services": [
+ *       {
+ *         "service": "rust-alc-api",
+ *         "revisions": [
+ *           { "revision": "rust-alc-api-00042-abc", "percent": 100, "tag": "v1.4.2" },
+ *           { "revision": "rust-alc-api-00043-xyz", "percent": 0,   "tag": "pending-v1-4-3" }
+ *         ]
+ *       }
+ *     ]
+ *   }
+ */
+const backendTrafficReportSchema = z.object({
+  repo: z.string().min(1),
+  services: z
+    .array(
+      z.object({
+        service: z.string().min(1),
+        // traffic 未設定 (revision 0 件) の service も許容する。
+        revisions: z.array(
+          z.object({
+            revision: z.string().min(1),
+            percent: z.number().min(0).max(100),
+            // null / undefined / 省略すべて許容 (tag の無い revision がある)。
+            tag: z.string().min(1).nullish(),
+          }),
+        ),
+      }),
+    )
+    .min(1),
+});
+
+export async function handleBackendTrafficReportWebhook(
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  const v = await validateAndAuth(request, env, backendTrafficReportSchema);
+  if (!v.ok) return v.response;
+  if (!env.COMPAT_KV) {
+    return jsonResponse(500, {
+      code: "KV_NOT_CONFIGURED",
+      error: "COMPAT_KV is not bound",
+    });
+  }
+  const services: BackendServiceTraffic[] = v.data.services.map((s) => ({
+    service: s.service,
+    revisions: s.revisions.map((r) => ({
+      revision: r.revision,
+      percent: r.percent,
+      tag: r.tag ?? null,
+    })),
+  }));
+  const record = await recordBackendTraffic(env.COMPAT_KV, {
+    repo: v.data.repo,
+    services,
     now: new Date().toISOString(),
   });
   return jsonResponse(200, { ok: true, record });

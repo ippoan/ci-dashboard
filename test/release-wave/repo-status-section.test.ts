@@ -12,6 +12,7 @@ import {
 } from "../../src/release-wave/repo-status-section";
 import type { TrafficRecord } from "../../src/release-wave/traffic";
 import type { WaveCompatibility } from "../../src/release-wave/compat";
+import type { BackendTrafficRecord } from "../../src/release-wave/backend-traffic";
 import type { RepoReleaseStatus } from "../../src/release-wave/repo-release-status";
 import type { Env } from "../../src/index";
 
@@ -550,6 +551,99 @@ describe("renderBackendRollbackBlock", () => {
     expect(html).toContain("&lt;img&gt;");
     expect(html).not.toContain("<tag>");
     expect(html).toContain("&lt;tag&gt;");
+  });
+
+  it("renders the real traffic split (100% active + pending 0%) when backend-traffic exists", () => {
+    const trafficByRepo = new Map<string, BackendTrafficRecord>([
+      [
+        "ippoan/rust-alc-api",
+        {
+          schema_version: 1,
+          repo: "ippoan/rust-alc-api",
+          services: [
+            {
+              service: "rust-alc-api",
+              revisions: [
+                { revision: "rust-alc-api-00042-abc", percent: 100, tag: "v1.4.2" },
+                { revision: "rust-alc-api-00043-xyz", percent: 0, tag: "pending-v1-4-3" },
+              ],
+            },
+          ],
+          reported_at: "2026-06-04T00:00:00Z",
+        },
+      ],
+    ]);
+    const html = renderBackendRollbackBlock(
+      compat([
+        {
+          backend_repo: "ippoan/rust-alc-api",
+          current_image: "v1.4.2",
+          current_tag: "v1.4.2",
+          deployed_at: "2026-06-03T00:00:00Z",
+          deploy_history: [],
+          matrix: [],
+        },
+      ]),
+      trafficByRepo,
+    );
+    // 実 traffic split: 100% active + 0% pending の 2 revision が並ぶ。
+    expect(html).toContain(">100%</span>");
+    expect(html).toContain(">0%</span>");
+    expect(html).toContain('title="rust-alc-api-00042-abc"'); // revision full は hover
+    expect(html).toContain('title="rust-alc-api-00043-xyz"');
+    expect(html).toContain("pending-v1-4-3"); // revision tag
+  });
+
+  it("prefixes the service name when a repo has multiple services", () => {
+    const trafficByRepo = new Map<string, BackendTrafficRecord>([
+      [
+        "ippoan/rust-alc-api",
+        {
+          schema_version: 1,
+          repo: "ippoan/rust-alc-api",
+          services: [
+            { service: "rust-alc-api", revisions: [{ revision: "api-1", percent: 100, tag: null }] },
+            { service: "rust-alc-api-gateway", revisions: [{ revision: "gw-1", percent: 100, tag: null }] },
+          ],
+          reported_at: "t",
+        },
+      ],
+    ]);
+    const html = renderBackendRollbackBlock(
+      compat([
+        {
+          backend_repo: "ippoan/rust-alc-api",
+          current_image: "x",
+          current_tag: null,
+          deployed_at: null,
+          deploy_history: [],
+          matrix: [],
+        },
+      ]),
+      trafficByRepo,
+    );
+    expect(html).toContain("rust-alc-api-gateway"); // 複数 service は service 名を前置
+    expect(html).toContain("api-1");
+    expect(html).toContain("gw-1");
+  });
+
+  it("falls back to the current_image row when no backend-traffic is given", () => {
+    // trafficByRepo を渡さない → current_image を 100% で表示 (PR #258 の挙動)。
+    const html = renderBackendRollbackBlock(
+      compat([
+        {
+          backend_repo: "ippoan/rust-alc-api",
+          current_image: "c1b3e5146b15deadbeef",
+          current_tag: "v1.4.2",
+          deployed_at: "2026-06-03T15:00:00Z",
+          deploy_history: [],
+          matrix: [],
+        },
+      ]),
+    );
+    expect(html).toContain(">100%</span>");
+    expect(html).toContain('title="c1b3e5146b15deadbeef"');
+    expect(html).toContain("v1.4.2");
   });
 });
 

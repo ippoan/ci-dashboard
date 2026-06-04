@@ -28,6 +28,7 @@ import {
   handleBackendCurrentImageWebhook,
   handlePendingReleaseWebhook,
   handleTrafficReportWebhook,
+  handleBackendTrafficReportWebhook,
 } from "./release-wave/webhook";
 import {
   handleCompatibility,
@@ -252,6 +253,12 @@ app.post("/webhooks/release-wave/pending-release", (c) =>
 // percentage) を報告する。Compatibility グラフ下に 100%/0% version を出す用。
 app.post("/webhooks/release-wave/traffic-report", (c) =>
   handleTrafficReportWebhook(c.req.raw, c.env),
+);
+// release-wave-handler の cloudrun flip/rollback 後に Cloud Run の実 traffic
+// split (status.traffic[]) を service 単位で報告する。backend 表示を GCP の
+// 実態 (Flip 前の 旧100%+新pending0% 含む) に追従させる。Refs #256。
+app.post("/webhooks/release-wave/backend-traffic-report", (c) =>
+  handleBackendTrafficReportWebhook(c.req.raw, c.env),
 );
 // 認証付き read (CF Access が bypass する /webhooks/* 配下)。frontend CI が
 // 現 prod backend image を解決する用 — CF Access 下の /backend-current-image は
