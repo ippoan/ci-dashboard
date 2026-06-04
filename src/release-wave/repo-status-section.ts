@@ -481,7 +481,13 @@ function renderBackendTrafficRows(
       const svcPart = multiService
         ? `<span class="meta">${escapeHtml(service)}</span> `
         : "";
-      const revCode = `<code title="${escapeHtml(rev.revision)}">${escapeHtml(shortId(rev.revision))}</code>`;
+      // revision 名は <service>-NNNNN-xxx 形式。service prefix を剥がして revision
+      // 番号 (00042-abc) を見せる。先頭 12 文字 truncate だと service 名部分で潰れて
+      // 読めない (= 全 revision が "rust-alc-api…" になる) ため (Refs #256)。
+      const revShort = rev.revision.startsWith(`${service}-`)
+        ? rev.revision.slice(service.length + 1)
+        : shortId(rev.revision);
+      const revCode = `<code title="${escapeHtml(rev.revision)}">${escapeHtml(revShort)}</code>`;
       const tagPart = rev.tag
         ? ` <span class="meta">${escapeHtml(rev.tag)}</span>`
         : "";
