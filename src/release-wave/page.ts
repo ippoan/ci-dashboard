@@ -30,6 +30,10 @@ import {
   type UnifiedPending,
 } from "./pending-release";
 import { getTrafficForRepos, type TrafficRecord } from "./traffic";
+import {
+  computePendingMigrationsForRepos,
+  type RepoPendingMigrations,
+} from "./pending-migrations";
 
 // ----------------------------------------------------------------------------
 // Small HTML helpers
@@ -477,11 +481,23 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
   // compat section の「Staged previews」内 ⚡ Flip all ボタンの出し分けに件数を使う
   // ため、compatSection より先に算出する。
   const unifiedPending = computeUnifiedPending(trafficByRepo, pendingReleases);
+
+  // 未適用マイグレーションは Cloud Run backend (= backend:: を持ち traffic:: 無し)
+  // についてだけ算出する (= migrate job を持つ repo。CF Worker は除外)。GitHub
+  // 依存なので fail-soft (computePendingMigrationsForRepos が空 Map を返す)。
+  // Refs #173。
+  const migrationRepos = [...backendRepos].filter((r) => !trafficByRepo.has(r));
+  const migrationsByRepo = await computePendingMigrationsForRepos(
+    env,
+    migrationRepos,
+  );
+
   const compatSection = renderGlobalCompatibilitySection(
     globalCompat,
     buildActiveWaveInfo(waves),
     trafficByRepo,
     unifiedPending.length,
+    migrationsByRepo,
   );
   const pendingReleaseSection = renderPendingReleaseSection(
     unifiedPending,
@@ -674,8 +690,16 @@ export async function handleReleaseWaveDetailPage(
 
   // ---- Compatibility matrix (Refs #157 Phase A) ----
   // 上で算出した compat を再利用。null (未 bind / 失敗) 時は section を出さない。
+  // 未適用マイグレーション (Refs #173) は compat 上の backend repo について算出
+  // (GitHub 依存なので fail-soft)。
+  const migrationsByRepo = compat
+    ? await computePendingMigrationsForRepos(
+        env,
+        compat.backends.map((b) => b.backend_repo),
+      )
+    : new Map<string, RepoPendingMigrations>();
   const compatHtml = compat
-    ? renderCompatibilitySection(compat, w.wave_id)
+    ? renderCompatibilitySection(compat, w.wave_id, migrationsByRepo)
     : "";
 
   const rollbackSafetyHtml = w.rollback.safe
@@ -954,6 +978,7 @@ function renderGlobalCompatibilitySection(
   active?: ActiveWaveInfo,
   trafficByRepo?: Map<string, TrafficRecord>,
   pendingFlipCount = 0,
+  migrationsByRepo?: Map<string, RepoPendingMigrations>,
 ): string {
   if (!compat || compat.backends.length === 0) {
     return `
@@ -972,7 +997,7 @@ function renderGlobalCompatibilitySection(
     : compat.verified
     ? `<span class="ok"><strong>all consumers tested</strong></span>`
     : `<span class="err"><strong>some consumers untested</strong></span>`;
-  const svg = renderCompatibilitySvg(compat, active, trafficByRepo);
+  const svg = renderCompatibilitySvg(compat, active, trafficByRepo, migrationsByRepo);
   const body = svg
     ? svg
     : `<p class="meta">backend record はあるが、まだどの frontend も test 履歴を
@@ -1120,9 +1145,50 @@ function renderActiveWaveOverlay(
  * wave 内 backend の現 image に対する既 deploy frontend の突合 matrix を描画する。
  * 緑 (tested) / 赤 (untested) を highlight する。read-only / 非 block。
  */
+/**
+ * backend ノードの「現 image SHA の release 状態」バッジ (Refs #172)。
+ *   tagged   — その SHA に `v*` release tag が付いている (promote 済)
+ *   untagged — staging dev SHA のみ (まだ `v*` tag 無し)
+ * tag→状態の track 自体は #197 (`backend::*.current_tag`) で済んでおり、ここでは
+ * その有無を明示バッジ化して「もう本番 tag が打たれたか」を一目で分かるようにする。
+ */
+function releaseStateBadge(tag: string | null | undefined): {
+  text: string;
+  cls: string;
+} {
+  return tag
+    ? { text: "tagged", cls: "ok" }
+    : { text: "untagged", cls: "meta" };
+}
+
+/**
+ * backend repo の「未適用マイグレーション」サマリ (Refs #173)。
+ * status="unknown" (baseline tag 無し / 算出不能) は表示対象外 (null)。
+ */
+function migrationSummary(
+  pm: RepoPendingMigrations | undefined,
+): { text: string; cls: string; title: string } | null {
+  if (!pm || pm.status === "unknown") return null;
+  if (pm.status === "pending") {
+    return {
+      text: `pending migrations: ${pm.count} ⚠`,
+      cls: "err",
+      title:
+        `${pm.base_tag} → ${pm.head} で追加されるマイグレーション (${pm.count} 件):\n` +
+        pm.files.map((f) => `  - ${f}`).join("\n"),
+    };
+  }
+  return {
+    text: "pending migrations: 0 ✅ migrate は no-op",
+    cls: "ok",
+    title: `${pm.base_tag} 以降 migrations/ への追加無し (migrate は no-op = 安全)`,
+  };
+}
+
 function renderCompatibilitySection(
   compat: WaveCompatibility,
   wave_id: string,
+  migrationsByRepo?: Map<string, RepoPendingMigrations>,
 ): string {
   if (compat.backends.length === 0) {
     return `
@@ -1189,10 +1255,17 @@ function renderCompatibilitySection(
                 </tr>`;
               })
               .join("");
+      const relBadge = releaseStateBadge(b.current_tag);
+      const mig = migrationSummary(migrationsByRepo?.get(b.backend_repo));
+      const migLine = mig
+        ? `<div class="${mig.cls}" style="margin:2px 0 6px" title="${escapeHtml(mig.title)}">${escapeHtml(mig.text)}</div>`
+        : "";
       return `
       <h3>${escapeHtml(b.backend_repo)}
         <span class="meta">${b.current_tag ? `${escapeHtml(b.current_tag)} · ` : ""}@ ${escapeHtml(b.current_image ?? "—")}</span>
+        <span class="${relBadge.cls}">(${relBadge.text})</span>
       </h3>
+      ${migLine}
       <table>
         <thead>
           <tr>
@@ -1217,7 +1290,7 @@ function renderCompatibilitySection(
         matrix が自動更新される。edge / node に hover すると過去 test 履歴が出る。
         Refs <a href="https://github.com/ippoan/ci-dashboard/issues/157">#157</a>.`,
       )}</h2>
-      ${renderCompatibilitySvg(compat)}
+      ${renderCompatibilitySvg(compat, undefined, undefined, migrationsByRepo)}
       ${retestAllBlock}
       ${blocks}
     </div>`;
@@ -1269,6 +1342,7 @@ function renderCompatibilitySvg(
   compat: WaveCompatibility,
   active?: ActiveWaveInfo,
   trafficByRepo?: Map<string, TrafficRecord>,
+  migrationsByRepo?: Map<string, RepoPendingMigrations>,
 ): string {
   type Edge = {
     backend: string;
@@ -1413,15 +1487,31 @@ function renderCompatibilitySvg(
     .map((repo) => {
       const img = backendImage.get(repo) ?? "—";
       const tag = backendTag.get(repo) ?? null;
-      // line2: git tag があれば "<tag> · @ <sha>"、無ければ従来の "@ <sha>"。Refs #197。
-      const line2 = tag ? `${tag} · @ ${shortSha(img)}` : `@ ${shortSha(img)}`;
+      // line2: tag があれば "<tag> · @<sha>"、無ければ "@<sha> · untagged"。
+      // release 状態 (tagged/untagged) を明示する (Refs #172、track 自体は #197)。
+      const line2 = tag
+        ? `${tag} · @${shortSha(img)}`
+        : `@${shortSha(img)} · untagged`;
+      // line3: 未適用マイグレーション (Refs #173)。算出不能 (unknown) なら出さない。
+      const pm = migrationsByRepo?.get(repo);
+      const mig = migrationSummary(pm);
+      const line3 =
+        pm && pm.status === "pending"
+          ? `migrations: ${pm.count} ⚠`
+          : pm && pm.status === "none"
+          ? "migrations: 0 (no-op)"
+          : undefined;
+      const relState = tag ? `\nrelease: tagged (${tag})` : `\nrelease: untagged`;
+      const migTitle = mig ? `\n${mig.title}` : "";
       return node(
         leftX,
         bY(repo),
         repo,
         line2,
         BLUE,
-        `${repo}\ncurrent image: ${img ?? "—"}${tag ? `\ncurrent tag: ${tag}` : ""}`,
+        `${repo}\ncurrent image: ${img ?? "—"}${relState}${migTitle}`,
+        undefined,
+        line3,
       );
     })
     .join("");

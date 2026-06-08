@@ -1005,6 +1005,50 @@ describe("handleReleaseWaveDetailPage compatibility section", () => {
     expect(html).toContain("No backend deploy records");
   });
 
+  it("shows a 'tagged' release-state badge when backend has current_tag (Refs #172)", async () => {
+    const env = fakeEnv({
+      getReturn: { ok: true, data: makeWave() },
+      compatKv: memKv({
+        "backend::ippoan/rust-alc-api": {
+          schema_version: 2,
+          repo: "ippoan/rust-alc-api",
+          current_image: "3212fa882f95",
+          current_tag: "v1.43.0",
+          deployed_at: "2026-05-27T00:00:00Z",
+          deployed_by: "x",
+          wave_id: null,
+        },
+      }),
+    });
+    const html = await (
+      await handleReleaseWaveDetailPage(env, "w1")
+    ).text();
+    expect(html).toContain("v1.43.0");
+    expect(html).toContain("(tagged)");
+    expect(html).not.toContain("(untagged)");
+  });
+
+  it("shows an 'untagged' badge when backend has no current_tag (Refs #172)", async () => {
+    const env = fakeEnv({
+      getReturn: { ok: true, data: makeWave() },
+      compatKv: memKv({
+        "backend::ippoan/rust-alc-api": {
+          schema_version: 2,
+          repo: "ippoan/rust-alc-api",
+          current_image: "deadbeef0000",
+          current_tag: null,
+          deployed_at: "2026-05-27T00:00:00Z",
+          deployed_by: "x",
+          wave_id: null,
+        },
+      }),
+    });
+    const html = await (
+      await handleReleaseWaveDetailPage(env, "w1")
+    ).text();
+    expect(html).toContain("(untagged)");
+  });
+
   it("renders a red row for an untested frontend", async () => {
     const env = fakeEnv({
       getReturn: { ok: true, data: makeWave() },
