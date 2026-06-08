@@ -881,6 +881,69 @@ describe("GET /releases", () => {
     expect(html).toContain("rollback UI を version 行と統合する");
   });
 
+  // pure-tagless repo (semver tag ゼロ、`dev-*` のみ等: claude-hooks /
+  // mcp-cf-workers) は no-sinceTag synthetic パス (default branch の最近 commit)
+  // を通る。ここでも squash で本文 `Refs #N` が落ちた issue を PR follow-up で
+  // 回収する。Refs ippoan/ci-dashboard#291。
+  it("recovers a pure-tagless issue referenced only in the PR body (no-sinceTag path)", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (req) => {
+      const url = typeof req === "string" ? req : (req as Request).url;
+
+      if (url.includes("/contents/wt-direct-push/config/direct-push-ok.txt")) {
+        return Response.json({ content: btoa(""), encoding: "base64" });
+      }
+
+      // semver tag 無し (`dev-*` のみ) → isSemverTag で全部弾かれ no-sinceTag パス
+      if (url.includes("/repos/ippoan/hooks-repo/tags")) {
+        return Response.json([{ name: "dev-0.0.4", commit: { sha: "dddddddd" } }]);
+      }
+
+      if (url.match(/\/repos\/ippoan\/hooks-repo(\?|$)/)) {
+        return Response.json({ default_branch: "main" });
+      }
+
+      // default branch の最近 commit (cachedCommits): PR 番号だけ、Refs 無し
+      if (url.includes("/repos/ippoan/hooks-repo/commits")) {
+        return Response.json([
+          { sha: "b21f5ee0000000000", commit: { message: "feat: add npm-ippoan-local-fallback hook (#13)" } },
+        ]);
+      }
+
+      // PR follow-up: 本文に `Refs #12`
+      if (url.endsWith("/repos/ippoan/hooks-repo/pulls/13")) {
+        return Response.json({
+          number: 13,
+          head: { ref: "claude/release-wave-e2e-testing-bJ6wU" },
+          body: "## 目的 (Refs #12)\n\n…file: フォールバック hook。\n\nRefs #12\n",
+        });
+      }
+
+      if (url.endsWith("/repos/ippoan/hooks-repo/issues/12")) {
+        return Response.json({
+          number: 12, title: "npm 401 時の local file: フォールバック hook", state: "open",
+          labels: [], assignees: [],
+          html_url: "https://github.com/ippoan/hooks-repo/issues/12",
+          updated_at: "2026-06-04T08:59:01Z",
+        });
+      }
+
+      return new Response(`not stubbed: ${url}`, { status: 500 });
+    });
+
+    const e = testEnv({ tagless: ["ippoan/hooks-repo"] });
+    const req = new Request("http://localhost/releases");
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(req, e, ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(200);
+    const html = await res.text();
+
+    // 無 tag の synthetic block (label は `<branch>@<sha7>`) に issue #12 が出る
+    expect(html).toContain("main@b21f5ee");
+    expect(html).toContain("npm 401 時の local file: フォールバック hook");
+  });
+
   // archived repo は GitHub API で issue close ができない (403 read-only) ため、
   // /releases から一切除外する。Refs ippoan/ci-dashboard#155
   // (ippoan/github-mcp-server-rs が monorepo 化で archive されたが Refs を

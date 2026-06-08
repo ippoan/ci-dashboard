@@ -345,6 +345,14 @@ async function loadRepoView(
 // supported for these tags — `renderTagBlock` skips the link.
 const SYNTHETIC_COMMIT_WINDOW = 100;
 
+// Cap on how many `(#PR)` follow-up fetches the synthetic block does per repo.
+// The PR pass recovers issues whose `Refs #N` only live in the PR body (squash
+// drops them from the merge subject), but a 100-commit window across ~13 tagless
+// repos would otherwise fan out a PR fetch per commit and blow the Worker
+// subrequest budget. We keep the most-recent N (issues merged recently are the
+// ones still likely open / actionable); PRs are cached so warm loads are cheap.
+const MAX_PR_FOLLOWUP = 20;
+
 interface RepoMeta {
   default_branch: string;
   archived?: boolean;
@@ -393,35 +401,45 @@ async function loadSyntheticBlock(
 
   const repoCtx = { owner, name };
   const refs = new Set<number>();
-  const prNumbers = new Set<number>();
   for (const c of commits) {
     for (const n of extractRefIssues(c.commit.message, repoCtx)) refs.add(n);
-    const pr = extractPrNumber(c.commit.message);
-    if (pr !== null) prNumbers.add(pr);
   }
 
-  // PR follow-up pass (Unreleased zone only). A squash-merge subject keeps just
-  // the `(#PR)` suffix and drops the PR body's `Refs #N` trailer — e.g.
-  // ci-dashboard#272 merged as "…統合 (#272)" with `Refs #271` only in the body,
-  // so the commit-message scan above harvests PR #272 (a pull_request, filtered
-  // out) but never issue #271, and the card collapses to "all closed". The
+  // PR follow-up pass. A squash-merge subject keeps only the `(#PR)` suffix and
+  // drops the PR body's `Refs #N` trailer — e.g. ci-dashboard#272 merged as
+  // "…統合 (#272)" with `Refs #271` only in the body, or claude-hooks#13 merged
+  // as "… (#13)" with `Refs #12` only in the body. The commit-message scan above
+  // then harvests the PR number (a pull_request, filtered out) but never the
+  // underlying issue, so the card collapses to "no referenced issues". The
   // tag-compare detail path already recovers these via collectIssueNumbersForRange;
-  // mirror that here so the index's Unreleased block surfaces them too. Scoped to
-  // the `sinceTag` (latest tag → HEAD) range, which is naturally small + behind
-  // the moving-compare cache, so we don't fan out a PR fetch per commit on the
-  // 100-commit pure-tagless path. Refs ippoan/ci-dashboard#290.
-  if (sinceTag) {
-    await Promise.all([...prNumbers].map(async (n) => {
-      try {
-        const pr = await cachedPullRequest(token, kv, owner, name, n);
-        const fromBranch = extractBranchIssue(pr.head.ref);
-        if (fromBranch !== null) refs.add(fromBranch);
-        if (pr.body) {
-          for (const ref of extractRefIssues(pr.body, repoCtx)) refs.add(ref);
-        }
-      } catch { /* ignore per-PR failure — best-effort enrichment */ }
-    }));
+  // mirror it here for BOTH synthetic paths — the Unreleased zone (sinceTag) and
+  // the pure-tagless window (no tags at all, e.g. claude-hooks / mcp-cf-workers,
+  // which only carry `dev-*` tags). Capped to the most-recent MAX_PR_FOLLOWUP so
+  // the 100-commit window doesn't fan out a fetch per commit. Refs #290, #291.
+  //
+  // Ordering: cachedCommits (no sinceTag) is newest-first; cachedCompare
+  // (sinceTag) is oldest-first. Normalize to newest-first so the cap keeps the
+  // freshest PRs (the ones whose issues are most likely still open).
+  const recentFirst = sinceTag ? [...commits].reverse() : commits;
+  const prNumbers: number[] = [];
+  const seenPr = new Set<number>();
+  for (const c of recentFirst) {
+    const pr = extractPrNumber(c.commit.message);
+    if (pr !== null && !seenPr.has(pr)) {
+      seenPr.add(pr);
+      prNumbers.push(pr);
+    }
   }
+  await Promise.all(prNumbers.slice(0, MAX_PR_FOLLOWUP).map(async (n) => {
+    try {
+      const pr = await cachedPullRequest(token, kv, owner, name, n);
+      const fromBranch = extractBranchIssue(pr.head.ref);
+      if (fromBranch !== null) refs.add(fromBranch);
+      if (pr.body) {
+        for (const ref of extractRefIssues(pr.body, repoCtx)) refs.add(ref);
+      }
+    } catch { /* ignore per-PR failure — best-effort enrichment */ }
+  }));
 
   if (refs.size === 0) {
     // No referenced issues in the recent window — nothing to confirm. Skipping
