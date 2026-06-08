@@ -340,18 +340,19 @@ describe("GET /issues", () => {
     expect(main!).toContain("org:ohishi-exp");
     expect(main!).not.toContain("repo:yhonda-ohishi/claude-");
 
-    // yhonda-ohishi call: repo: qualifiers (OR) for the two active claude
-    // tooling repos only — and CRUCIALLY no `org:yhonda-ohishi`. GitHub Search
-    // silently drops `repo:` when combined with `org:` (it widens the result
-    // to the entire org), so fetchOrgIssues must omit `org:` whenever the
-    // caller-supplied query contains a `repo:` qualifier. Regression guard
+    // yhonda-ohishi call: repo: qualifiers (OR) for the active claude tooling
+    // repo only (claude-hooks has migrated to ippoan/claude-hooks and is now
+    // covered by the org:ippoan scan) — and CRUCIALLY no `org:yhonda-ohishi`.
+    // GitHub Search silently drops `repo:` when combined with `org:` (it widens
+    // the result to the entire org), so fetchOrgIssues must omit `org:` whenever
+    // the caller-supplied query contains a `repo:` qualifier. Regression guard
     // for issue #53.
     const yhonda = issueDecoded.find((d) => d.includes("repo:yhonda-ohishi/claude-skills"));
     expect(yhonda).toBeDefined();
     expect(yhonda!).toContain("is:issue");
     expect(yhonda!).toContain("state:open");
     expect(yhonda!).toContain("repo:yhonda-ohishi/claude-skills");
-    expect(yhonda!).toContain("repo:yhonda-ohishi/claude-hooks");
+    expect(yhonda!).not.toContain("repo:yhonda-ohishi/claude-hooks");
     expect(yhonda!).not.toContain("org:yhonda-ohishi");
 
     // Every call must exclude archived repos so old projects (e.g.
@@ -873,9 +874,10 @@ describe("GET /issues — CI fixture rows", () => {
       if (decoded.includes("is:pr")) {
         return Response.json({ total_count: 0, incomplete_results: false, items: [] });
       }
-      // yhonda repo: filter call returns the fixture issue; main org call is
-      // empty. (The repo string here mirrors the real claude-hooks fixture.)
-      if (decoded.includes("repo:yhonda-ohishi/claude-skills")) {
+      // main org:ippoan call returns the fixture issue; the yhonda repo: call is
+      // empty. The CI fixture now lives in ippoan/claude-hooks (migrated from
+      // yhonda-ohishi/claude-hooks), so it surfaces via the org:ippoan scan.
+      if (decoded.includes("org:ippoan")) {
         return Response.json({
           total_count: 1, incomplete_results: false,
           items: [{
@@ -885,8 +887,8 @@ describe("GET /issues — CI fixture rows", () => {
             user: { login: "yhonda-ohishi" },
             labels: [], assignees: [], comments: 0,
             created_at: "2026-05-30T00:00:00Z", updated_at: "2026-05-30T00:00:00Z",
-            html_url: "https://github.com/yhonda-ohishi/claude-hooks/issues/2",
-            repository_url: "https://api.github.com/repos/yhonda-ohishi/claude-hooks",
+            html_url: "https://github.com/ippoan/claude-hooks/issues/2",
+            repository_url: "https://api.github.com/repos/ippoan/claude-hooks",
           }],
         });
       }

@@ -23,7 +23,6 @@ const ALL_REPOS = [
   "ippoan/release-wave-gcp",
   "ippoan/nuxt-notify",
   "ippoan/rust-alc-api",
-  "yhonda-ohishi/claude-hooks",
   "ippoan/claude-md",
   "ippoan/auth-worker",
   "ippoan/ci-dashboard",
