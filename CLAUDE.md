@@ -42,5 +42,5 @@ PR テンプレートは `.github/pull_request_template.md` で `Refs` を強制
 ## 関連
 
 - 規約: yhonda-ohishi/claude-skills の対応 issue (本 PR 後に作成)
-- 実装: yhonda-ohishi/claude-hooks の PreToolUse hook (本 PR 後に作成)
+- 実装: ippoan/claude-hooks の PreToolUse hook (本 PR 後に作成)
 - 詳細: [`docs/branch-issue-linking.md`](docs/branch-issue-linking.md)
