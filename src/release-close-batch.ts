@@ -11,10 +11,19 @@ import { invalidateIssue } from "./release-cache";
 // to attribute each "Closed by release <tag>" comment to the right tag, then
 // closes the issues.
 //
+// Cross-repo rows (an issue that lives in a DIFFERENT repo but was shipped by a
+// PR in this card's repo — e.g. a cdp-relay PR carrying
+// `Refs ippoan/mcp-cf-workers#28`) encode the home repo into the pair as
+// `pair=<tag>:<owner>/<name>#<issue>`, and we close them against that repo
+// instead of the card's repo. Refs ippoan/ci-dashboard#292.
+//
 // Single-tag close still lives at POST /api/release-close (used by the
 // detail page) — that handler's payload shape is the older `tag` + `issue[]`
 // form and we keep it for backward compatibility.
 
+// `<tag>:<owner>/<name>#<issue>` — cross-repo. Checked first (more specific).
+const CROSS_RE = /^(.+):([\w.-]+\/[\w.-]+)#(\d+)$/;
+// `<tag>:<issue>` — same repo as the card.
 const PAIR_RE = /^(.+):(\d+)$/;
 
 export async function handleReleaseCloseBatch(
@@ -35,67 +44,90 @@ export async function handleReleaseCloseBatch(
     return new Response("Missing repo", { status: 400 });
   }
 
-  // Parse `tag:issue` pairs; silently drop anything malformed.
-  const grouped = new Map<string, number[]>();
-  for (const raw of rawPairs) {
-    const m = raw.match(PAIR_RE);
-    if (!m) continue;
-    const tag = m[1]!;
-    const n = Number(m[2]);
-    if (!Number.isInteger(n) || n <= 0) continue;
-    const list = grouped.get(tag);
-    if (list) list.push(n);
-    else grouped.set(tag, [n]);
-  }
+  // Resolve a token once per distinct owner (cross-repo ops may span repos).
+  const tokenByOwner = new Map<string, Promise<string>>();
+  const tokenFor = (owner: string): Promise<string> => {
+    let p = tokenByOwner.get(owner);
+    if (!p) {
+      p = tokenForOrg(env, owner);
+      tokenByOwner.set(owner, p);
+    }
+    return p;
+  };
 
-  // Nothing selected → bounce straight back to /releases without spamming
-  // GitHub. This is the "user submitted an empty form" path.
-  if (grouped.size === 0) {
-    return redirect("/releases");
-  }
-
-  let owner: string, name: string, token: string;
+  // Validate the card repo's org up front: a disallowed / malformed card repo is
+  // a 400 (operator-facing config error), not a silent per-issue failure. Also
+  // primes the token cache for the common same-repo ops. Cross-repo targets are
+  // validated lazily inside the close loop (a single bad cross-repo ref should
+  // only fail that one row, not the whole batch).
   try {
-    ({ owner, repo: name } = parseRepo(repoParam));
-    token = await tokenForOrg(env, owner);
+    const { owner: cardOwner } = parseRepo(repoParam);
+    await tokenFor(cardOwner);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return new Response(`Bad repo: ${msg}`, { status: 400 });
   }
 
-  // Flatten the grouped map into one operation list so failures per issue
-  // can be tracked back to the right number for the flash query.
-  type Operation = { tag: string; issue: number };
+  // Parse pairs into operations. Each op carries its target repo: the card's
+  // repo by default, or the cross-repo target embedded in the pair. Malformed
+  // pairs are silently dropped.
+  type Operation = { repo: string; tag: string; issue: number };
   const ops: Operation[] = [];
-  for (const [tag, issues] of grouped) {
-    for (const issue of issues) ops.push({ tag, issue });
+  for (const raw of rawPairs) {
+    const cm = raw.match(CROSS_RE);
+    if (cm) {
+      const n = Number(cm[3]);
+      if (Number.isInteger(n) && n > 0) ops.push({ repo: cm[2]!, tag: cm[1]!, issue: n });
+      continue;
+    }
+    const m = raw.match(PAIR_RE);
+    if (!m) continue;
+    const n = Number(m[2]);
+    if (Number.isInteger(n) && n > 0) ops.push({ repo: repoParam, tag: m[1]!, issue: n });
   }
 
+  // Nothing selected → bounce straight back to /releases without spamming
+  // GitHub. This is the "user submitted an empty form" path.
+  if (ops.length === 0) {
+    return redirect("/releases");
+  }
+
+  // Close in parallel; per-issue failures (including a bad repo) don't sink the
+  // whole batch — they surface in the `failed` flash.
   const settled = await Promise.allSettled(
-    ops.map(async ({ tag, issue }) => {
+    ops.map(async (op) => {
+      const { owner, repo: name } = parseRepo(op.repo);
+      const token = await tokenFor(owner);
       await githubApi(
         token, "POST",
-        `/repos/${owner}/${name}/issues/${issue}/comments`,
-        { body: `Closed by release ${tag}` },
+        `/repos/${owner}/${name}/issues/${op.issue}/comments`,
+        { body: `Closed by release ${op.tag}` },
       );
       await githubApi(
         token, "PATCH",
-        `/repos/${owner}/${name}/issues/${issue}`,
+        `/repos/${owner}/${name}/issues/${op.issue}`,
         { state: "closed", state_reason: "completed" },
       );
-      return issue;
+      return op;
     }),
   );
 
   const closed: number[] = [];
   const failed: number[] = [];
   const failedReasons: Array<{ n: number; reason: string }> = [];
+  // Track successful closes per repo so cache invalidation + hub recompute hit
+  // the right repo (the card repo AND any cross-repo targets).
+  const closedByRepo = new Map<string, number[]>();
   settled.forEach((r, i) => {
-    if (r.status === "fulfilled") closed.push(r.value);
-    else {
-      const n = ops[i]!.issue;
-      failed.push(n);
-      failedReasons.push({ n, reason: formatCloseFailureReason(r.reason) });
+    const op = ops[i]!;
+    if (r.status === "fulfilled") {
+      closed.push(op.issue);
+      const list = closedByRepo.get(op.repo);
+      if (list) list.push(op.issue);
+      else closedByRepo.set(op.repo, [op.issue]);
+    } else {
+      failed.push(op.issue);
+      failedReasons.push({ n: op.issue, reason: formatCloseFailureReason(r.reason) });
     }
   });
 
@@ -103,20 +135,28 @@ export async function handleReleaseCloseBatch(
   // newly-closed state instead of the 60s-stale "open" row.
   if (env.CI_STATUS) {
     await Promise.all(
-      closed.map((n) => invalidateIssue(env.CI_STATUS, owner, name, n)),
+      [...closedByRepo].flatMap(([repo, nums]) => {
+        try {
+          const { owner, repo: name } = parseRepo(repo);
+          return nums.map((n) => invalidateIssue(env.CI_STATUS, owner, name, n));
+        } catch {
+          return [];
+        }
+      }),
     );
   }
 
-  // Kick Hub to recompute alert state for this repo when at least one close
-  // succeeded. Same waitUntil pattern as release-close.ts so the redirect
-  // stays snappy and the dashboard banner updates asynchronously.
-  if (hub && closed.length > 0) {
-    const recompute = hub.fetch(new Request("http://hub/release-alert-recompute", {
-      method: "POST",
-      body: JSON.stringify({ repo: repoParam }),
-    }));
-    if (ctx) ctx.waitUntil(recompute);
-    else { void recompute; }
+  // Kick Hub to recompute alert state for each repo that had a successful close.
+  // Same waitUntil pattern as release-close.ts so the redirect stays snappy.
+  if (hub && closedByRepo.size > 0) {
+    for (const repo of closedByRepo.keys()) {
+      const recompute = hub.fetch(new Request("http://hub/release-alert-recompute", {
+        method: "POST",
+        body: JSON.stringify({ repo }),
+      }));
+      if (ctx) ctx.waitUntil(recompute);
+      else { void recompute; }
+    }
   }
 
   const params = new URLSearchParams({ repo: repoParam });

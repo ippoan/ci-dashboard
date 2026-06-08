@@ -95,6 +95,36 @@ describe("POST /api/release-close-batch", () => {
     expect(bodies.filter((b) => b === "Closed by release v1.1.0").length).toBe(1);
   });
 
+  it("closes a cross-repo pair against its home repo, not the card repo", async () => {
+    const { calls } = stubCloseFlow();
+    const req = new Request("http://localhost/api/release-close-batch", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: formBody([
+        ["repo", "ippoan/cdp-relay"],
+        // same-repo row (closes against card repo) …
+        ["pair", "main@abc1234:5"],
+        // … cross-repo row: issue lives in ippoan/mcp-cf-workers, shipped by a
+        // cdp-relay PR. Must close against mcp-cf-workers, not cdp-relay.
+        ["pair", "main@abc1234:ippoan/mcp-cf-workers#28"],
+      ]),
+    });
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(req, testEnv(), ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(303);
+    const location = res.headers.get("Location") ?? "";
+    const closedNums = decodeURIComponent(location.match(/closed=([^&]+)/)![1]!).split(",").sort();
+    expect(closedNums).toEqual(["28", "5"]);
+
+    // same-repo close hits cdp-relay
+    expect(calls.some((c) => c.method === "PATCH" && c.url.endsWith("/repos/ippoan/cdp-relay/issues/5"))).toBe(true);
+    // cross-repo close hits mcp-cf-workers (NOT cdp-relay)
+    expect(calls.some((c) => c.method === "PATCH" && c.url.endsWith("/repos/ippoan/mcp-cf-workers/issues/28"))).toBe(true);
+    expect(calls.some((c) => c.url.endsWith("/repos/ippoan/cdp-relay/issues/28"))).toBe(false);
+  });
+
   it("partitions partial failures into closed= and failed=", async () => {
     const { calls } = stubCloseFlow({ failIssue: 5 });
     const req = new Request("http://localhost/api/release-close-batch", {

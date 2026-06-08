@@ -2,6 +2,7 @@ import { parseRepo, tokenForOrg, GitHubApiError } from "./github-api";
 import type { AuthClientWorkerEnv } from "@ippoan/auth-client-worker";
 import {
   extractRefIssues,
+  extractCrossRepoRefs,
   extractPrNumber,
   extractBranchIssue,
   sortSemverDesc,
@@ -245,7 +246,7 @@ async function loadRepoView(
     // return empty as before so we don't accidentally promote a regular
     // auto-merge repo into the synthetic path mid-release.
     if (useSynthetic) {
-      const block = await loadSyntheticBlock(token, owner, name, kv);
+      const block = await loadSyntheticBlock(env, token, owner, name, kv);
       return {
         repo: `${owner}/${name}`,
         tagBlocks: block ? [block] : [],
@@ -319,7 +320,7 @@ async function loadRepoView(
   // Refs ippoan/ci-dashboard#147 (cross-repo Refs 修正) + #145 (TAGLESS 追加)。
   if (useSynthetic) {
     const latestTag = sorted[0]!;
-    const unreleased = await loadSyntheticBlock(token, owner, name, kv, latestTag);
+    const unreleased = await loadSyntheticBlock(env, token, owner, name, kv, latestTag);
     if (unreleased) tagBlocks.unshift(unreleased);
   }
 
@@ -359,6 +360,7 @@ interface RepoMeta {
 }
 
 async function loadSyntheticBlock(
+  env: AuthClientWorkerEnv,
   token: string,
   owner: string,
   name: string,
@@ -401,8 +403,19 @@ async function loadSyntheticBlock(
 
   const repoCtx = { owner, name };
   const refs = new Set<number>();
+  // Cross-repo refs (`Refs <otherOwner>/<otherName>#N`): the issue lives in a
+  // different repo but the work shipped via THIS repo's PR/commit. extractRefIssues
+  // drops them; we collect them separately and surface them on this card, closable
+  // against their home repo. Keyed by `owner/name#n` for dedupe. Refs #292.
+  const crossRefs = new Map<string, { owner: string; name: string; number: number }>();
+  const addCross = (text: string) => {
+    for (const x of extractCrossRepoRefs(text, repoCtx)) {
+      crossRefs.set(`${x.owner.toLowerCase()}/${x.name.toLowerCase()}#${x.number}`, x);
+    }
+  };
   for (const c of commits) {
     for (const n of extractRefIssues(c.commit.message, repoCtx)) refs.add(n);
+    addCross(c.commit.message);
   }
 
   // PR follow-up pass. A squash-merge subject keeps only the `(#PR)` suffix and
@@ -437,22 +450,52 @@ async function loadSyntheticBlock(
       if (fromBranch !== null) refs.add(fromBranch);
       if (pr.body) {
         for (const ref of extractRefIssues(pr.body, repoCtx)) refs.add(ref);
+        // Cross-repo refs most often live in the PR body (squash drops them from
+        // the merge subject) — e.g. cdp-relay PRs carrying
+        // `Refs ippoan/mcp-cf-workers#28`. Collect them here too. Refs #292.
+        addCross(pr.body);
       }
     } catch { /* ignore per-PR failure — best-effort enrichment */ }
   }));
 
-  if (refs.size === 0) {
+  // Hydrate cross-repo issues from their home repo (own token + cache), capped
+  // like the PR pass. Built into rows tagged with `repo` so render + close target
+  // the right repo. Refs #292.
+  const crossRows: IssueRow[] = [];
+  await Promise.all([...crossRefs.values()].slice(0, MAX_PR_FOLLOWUP).map(async (x) => {
+    try {
+      const xToken = await tokenForOrg(env, x.owner);
+      const issue = await cachedIssue(xToken, kv, x.owner, x.name, x.number);
+      if (issue.pull_request) return; // a PR, not an issue
+      const labels = issue.labels.map((l) => l.name);
+      crossRows.push({
+        number: issue.number,
+        title: issue.title,
+        state: issue.state,
+        labels,
+        assignees: issue.assignees.map((a) => a.login),
+        url: issue.html_url,
+        updated_at: issue.updated_at,
+        warnings: computeWarnings({ state: issue.state, labels }),
+        repo: `${x.owner}/${x.name}`,
+      });
+    } catch { /* ignore per-issue failure — best-effort cross-repo enrichment */ }
+  }));
+
+  if (refs.size === 0 && crossRows.length === 0) {
     // No referenced issues in the recent window — nothing to confirm. Skipping
     // the block (vs. returning an empty one) keeps the repo off the landing
     // page entirely, matching the tag path's behavior.
     return null;
   }
 
-  const issues = await fetchIssuesByNumbers(token, owner, name, refs, kv);
+  const issues = refs.size > 0
+    ? await fetchIssuesByNumbers(token, owner, name, refs, kv)
+    : [];
   // Keep both open and closed referenced issues (was open-only): a tag-less /
   // direct-push repo whose refs are all closed should still surface its card
   // with the closed history collapsed into a <details>. Refs #224.
-  const rows: IssueRow[] = issues
+  const sameRepoRows: IssueRow[] = issues
     .filter((i) => !i.pull_request)
     .map((i) => {
       const labels = i.labels.map((l) => l.name);
@@ -468,6 +511,11 @@ async function loadSyntheticBlock(
       };
     })
     .sort((a, b) => a.number - b.number);
+
+  // Same-repo rows first (by number), then cross-repo rows (by repo, then number)
+  // so a card reads "own issues, then issues this release closed elsewhere".
+  crossRows.sort((a, b) => a.repo!.localeCompare(b.repo!) || a.number - b.number);
+  const rows = [...sameRepoRows, ...crossRows];
 
   if (rows.length === 0) return null;
 
@@ -509,6 +557,11 @@ interface IssueRow {
   url: string;
   updated_at: string;
   warnings: string[];
+  // Set only for cross-repo rows: the `owner/name` of the repo the issue lives
+  // in, when it differs from the card's repo (e.g. a cdp-relay PR's
+  // `Refs ippoan/mcp-cf-workers#28` surfaces mcp-cf-workers#28 on cdp-relay's
+  // card). Drives the cross-repo checkbox encoding + close target. Refs #292.
+  repo?: string;
 }
 
 async function loadRelease(
@@ -963,9 +1016,18 @@ function renderTagBlock(repo: string, block: TagBlock): string {
 function renderIndexRow(tag: string, r: IssueRow): string {
   const hasWarn = r.warnings.length > 0;
   const checked = hasWarn ? "" : " checked";
-  const pair = `${tag}:${r.number}`;
+  // Cross-repo rows (r.repo set) encode the home repo into the pair so the batch
+  // close handler closes against it, not the card's repo: `<tag>:<owner>/<name>#<n>`.
+  // Same-repo rows keep the legacy `<tag>:<n>`. Refs #292.
+  const pair = r.repo ? `${tag}:${r.repo}#${r.number}` : `${tag}:${r.number}`;
   const warnIcon = hasWarn
     ? `<span class="warn" title="${escapeHtml(r.warnings.join(", "))}">⚠️</span>`
+    : "";
+  // Prefix the number cell with the foreign repo for cross-repo rows so it's
+  // obvious the issue lives elsewhere (e.g. `ippoan/mcp-cf-workers#28`).
+  const numLabel = r.repo ? `${escapeHtml(r.repo)}#${r.number}` : `#${r.number}`;
+  const crossMarker = r.repo
+    ? ` <span class="cross-repo-marker" title="cross-repo: lives in ${escapeHtml(r.repo)}, shipped by a PR here">cross-repo</span>`
     : "";
   const labelChips = r.labels.length > 0
     ? `<div class="labels">${r.labels
@@ -976,8 +1038,8 @@ function renderIndexRow(tag: string, r: IssueRow): string {
 
   return `<tr>
     <td class="col-check"><input type="checkbox" name="pair" value="${escapeHtml(pair)}"${checked}></td>
-    <td class="num"><a href="${escapeHtml(r.url)}" target="_blank" rel="noopener">#${r.number}</a></td>
-    <td class="title">${warnIcon}<a href="${escapeHtml(r.url)}" target="_blank" rel="noopener">${escapeHtml(r.title)}</a></td>
+    <td class="num"><a href="${escapeHtml(r.url)}" target="_blank" rel="noopener">${numLabel}</a></td>
+    <td class="title">${warnIcon}<a href="${escapeHtml(r.url)}" target="_blank" rel="noopener">${escapeHtml(r.title)}</a>${crossMarker}</td>
     <td>${stateChip}</td>
     <td>${labelChips}</td>
   </tr>`;

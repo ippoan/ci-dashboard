@@ -944,6 +944,69 @@ describe("GET /releases", () => {
     expect(html).toContain("npm 401 時の local file: フォールバック hook");
   });
 
+  // cross-repo ref: 実装は cdp-relay (本 repo) の PR、issue は別 repo
+  // (mcp-cf-workers) に居る。`Refs ippoan/mcp-cf-workers#28` を本 repo の card に
+  // surface し、close は mcp-cf-workers に対して行えるよう pair に repo を埋める。
+  // Refs ippoan/ci-dashboard#292。
+  it("surfaces a cross-repo issue on the shipping repo's card with repo-tagged pair", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (req) => {
+      const url = typeof req === "string" ? req : (req as Request).url;
+
+      if (url.includes("/contents/wt-direct-push/config/direct-push-ok.txt")) {
+        return Response.json({ content: btoa(""), encoding: "base64" });
+      }
+
+      // 本 repo (relay-repo) は tag 無し → no-sinceTag synthetic パス
+      if (url.includes("/repos/ippoan/relay-repo/tags")) {
+        return Response.json([]);
+      }
+      if (url.match(/\/repos\/ippoan\/relay-repo(\?|$)/)) {
+        return Response.json({ default_branch: "main" });
+      }
+      // commit は PR 番号のみ
+      if (url.includes("/repos/ippoan/relay-repo/commits")) {
+        return Response.json([
+          { sha: "c0ffee00000000000", commit: { message: "feat: cdp-relay 初回実装 (#1)" } },
+        ]);
+      }
+      // PR 本文に cross-repo ref
+      if (url.endsWith("/repos/ippoan/relay-repo/pulls/1")) {
+        return Response.json({
+          number: 1,
+          head: { ref: "claude/initial-impl" },
+          body: "初回実装。\n\nRefs ippoan/mcp-cf-workers#28\n",
+        });
+      }
+      // cross-repo issue を home repo から hydrate
+      if (url.endsWith("/repos/ippoan/mcp-cf-workers/issues/28")) {
+        return Response.json({
+          number: 28, title: "[引継ぎ] cdp-relay 設計", state: "open",
+          labels: [], assignees: [],
+          html_url: "https://github.com/ippoan/mcp-cf-workers/issues/28",
+          updated_at: "2026-06-05T00:19:48Z",
+        });
+      }
+
+      return new Response(`not stubbed: ${url}`, { status: 500 });
+    });
+
+    const e = testEnv({ tagless: ["ippoan/relay-repo"] });
+    const req = new Request("http://localhost/releases");
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(req, e, ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(200);
+    const html = await res.text();
+
+    // cross-repo issue が relay-repo の card に出る
+    expect(html).toContain("ippoan/mcp-cf-workers#28");
+    expect(html).toContain("[引継ぎ] cdp-relay 設計");
+    expect(html).toContain("cross-repo");
+    // checkbox の pair が home repo を埋め込んでいる (close が mcp-cf-workers を叩く)
+    expect(html).toContain("main@c0ffee0:ippoan/mcp-cf-workers#28");
+  });
+
   // archived repo は GitHub API で issue close ができない (403 read-only) ため、
   // /releases から一切除外する。Refs ippoan/ci-dashboard#155
   // (ippoan/github-mcp-server-rs が monorepo 化で archive されたが Refs を

@@ -39,6 +39,39 @@ export function extractRefIssues(
   return [...out];
 }
 
+// Cross-repo refs: `Refs <owner>/<name>#N` where `<owner>/<name>` is a DIFFERENT
+// repo than `currentRepo`. extractRefIssues drops these (to avoid mixing another
+// repo's issue numbers into the current card); this returns exactly those dropped
+// refs so the /releases index can surface an issue under the repo whose PR shipped
+// the work even though the issue lives elsewhere (e.g. a cdp-relay PR carrying
+// `Refs ippoan/mcp-cf-workers#28`). Refs ippoan/ci-dashboard#292.
+export function extractCrossRepoRefs(
+  text: string,
+  currentRepo: { owner: string; name: string },
+): Array<{ owner: string; name: string; number: number }> {
+  if (!text) return [];
+  const wantOwner = currentRepo.owner.toLowerCase();
+  const wantName = currentRepo.name.toLowerCase();
+  const seen = new Set<string>();
+  const out: Array<{ owner: string; name: string; number: number }> = [];
+  for (const m of text.matchAll(REF_PATTERN)) {
+    const crossRepo = m[1]; // optional `<owner>/<name>`
+    if (!crossRepo) continue; // bare `#N` = same repo, not a cross-repo ref
+    const slash = crossRepo.indexOf("/");
+    const owner = crossRepo.slice(0, slash);
+    const name = crossRepo.slice(slash + 1);
+    if (owner.toLowerCase() === wantOwner && name.toLowerCase() === wantName) {
+      continue; // owner/name spelled out but it IS the current repo
+    }
+    const number = Number(m[2]);
+    const key = `${owner.toLowerCase()}/${name.toLowerCase()}#${number}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ owner, name, number });
+  }
+  return out;
+}
+
 // Squash-merge commits land on main with their PR number trailing the subject,
 // e.g. "feat(x): do thing (#42)". Pull that out so we can re-fetch the PR for
 // its `head.ref` (branch name) and body, which carry additional Refs and the
