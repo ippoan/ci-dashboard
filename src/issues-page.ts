@@ -374,6 +374,32 @@ function renderHtml(
       transition: opacity 0.15s, background 0.15s;
     }
     .cc-launch:hover { opacity: 1; background: #1f6feb33; }
+    /* CI fixture rows: amber "do-not-touch" affordance. The 🔒 badge + dimmed
+       row + static lock in the launch cell signal that closing/deleting the
+       issue breaks worktree-naming-guard tests (see isFixtureIssue). */
+    .fixture-badge {
+      display: inline-block;
+      font-size: 11px;
+      padding: 1px 8px;
+      border-radius: 10px;
+      background: #d2992222;
+      color: #e3b341;
+      border: 1px solid #d2992288;
+      margin-right: 6px;
+      white-space: nowrap;
+      vertical-align: middle;
+    }
+    tr.fixture { background: #1b1813; }
+    tr.fixture:hover { background: #221d14; }
+    tr.fixture td.title a { color: #8b949e; }
+    .cc-launch-disabled {
+      display: inline-block;
+      font-size: 14px;
+      line-height: 1;
+      padding: 4px 6px;
+      opacity: 0.5;
+      cursor: default;
+    }
     .labels { margin-top: 4px; }
     .label {
       display: inline-block;
@@ -491,10 +517,11 @@ function renderProjectRow(
     ? `<div class="labels">${i.labels.map((l) =>
         `<span class="label">${escapeHtml(l)}</span>`).join("")}</div>`
     : "";
-  return `<tr>
+  const trClass = isFixtureIssue(i) ? ' class="fixture"' : "";
+  return `<tr${trClass}>
     <td class="num"><a href="${escapeHtml(i.url)}" target="_blank" rel="noopener">#${i.number}</a></td>
     <td class="repo"><a href="https://github.com/${escapeHtml(i.repo)}/issues" target="_blank" rel="noopener">${escapeHtml(i.repo)}</a></td>
-    <td class="title"><a href="${escapeHtml(i.url)}" target="_blank" rel="noopener">${escapeHtml(i.title)}</a><div class="labels">${chips}</div>${labelChips}${renderPrChips(i, prMap)}</td>
+    <td class="title">${renderFixtureBadge(i)}<a href="${escapeHtml(i.url)}" target="_blank" rel="noopener">${escapeHtml(i.title)}</a><div class="labels">${chips}</div>${labelChips}${renderPrChips(i, prMap)}</td>
     <td class="author">@${escapeHtml(i.author)}</td>
     <td class="updated">${escapeHtml(i.updated_at.slice(0, 10))}</td>
     ${renderLaunchCell(i)}
@@ -525,9 +552,10 @@ function renderRow(
     ? `<div class="labels">${i.labels.map((l) =>
         `<span class="label">${escapeHtml(l)}</span>`).join("")}</div>`
     : "";
-  return `<tr>
+  const trClass = isFixtureIssue(i) ? ' class="fixture"' : "";
+  return `<tr${trClass}>
     <td class="num"><a href="${escapeHtml(i.url)}" target="_blank" rel="noopener">#${i.number}</a></td>
-    <td class="title"><a href="${escapeHtml(i.url)}" target="_blank" rel="noopener">${escapeHtml(i.title)}</a>${labelChips}${renderPrChips(i, prMap)}</td>
+    <td class="title">${renderFixtureBadge(i)}<a href="${escapeHtml(i.url)}" target="_blank" rel="noopener">${escapeHtml(i.title)}</a>${labelChips}${renderPrChips(i, prMap)}</td>
     <td class="author">@${escapeHtml(i.author)}</td>
     <td class="updated">${escapeHtml(i.updated_at.slice(0, 10))}</td>
     ${renderLaunchCell(i)}
@@ -558,7 +586,30 @@ function renderPrChips(
   return `<div class="pr-chips">${chips}</div>`;
 }
 
+// CI fixture issues (e.g. ippoan/claude-hooks#1, #2) exist only to satisfy
+// worktree-naming-guard test assertions — their body literally says "Do not
+// close. Do not delete." and the test breaks if they're closed/deleted/reopened.
+// They are NOT work items, so the dashboard must make that obvious: flag the
+// row with a 🔒 badge and suppress the 🚀 launch button (launching a Claude
+// session on a fixture risks acting on — i.e. closing — it). Detection is by
+// the `[CI fixture]` title prefix, which both fixtures already carry, so no
+// GitHub-side label change is required. `OrgIssue` doesn't cache the body, so
+// the title prefix is the only marker available at render time anyway.
+export function isFixtureIssue(i: { title: string }): boolean {
+  return /^\s*\[CI fixture\]/i.test(i.title);
+}
+
+function renderFixtureBadge(i: OrgIssue): string {
+  if (!isFixtureIssue(i)) return "";
+  return `<span class="fixture-badge" title="CI fixture — close / delete / reopen しないこと (テストの前提)">🔒 保全</span>`;
+}
+
 function renderLaunchCell(i: OrgIssue): string {
+  // Fixtures aren't actionable — replace the launch button with a static lock
+  // so nobody fires a session that might close the issue.
+  if (isFixtureIssue(i)) {
+    return `<td class="launch"><span class="cc-launch-disabled" title="CI fixture — Claude Code 起動の対象外">🔒</span></td>`;
+  }
   const url = buildClaudeCodeLaunchUrl(i.repo, i.number);
   return `<td class="launch"><a class="cc-launch" href="${escapeHtml(url)}" target="_blank" rel="noopener" title="Claude Code で起動 (${escapeHtml(i.repo)}#${i.number})">🚀</a></td>`;
 }

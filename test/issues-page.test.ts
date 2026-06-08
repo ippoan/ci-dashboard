@@ -2,7 +2,7 @@ import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import worker from "../src/index";
 import type { Env } from "../src/index";
-import { escapeHtml, buildClaudeCodeLaunchUrl, CLAUDE_CODE_LAUNCH_REPOS } from "../src/issues-page";
+import { escapeHtml, buildClaudeCodeLaunchUrl, CLAUDE_CODE_LAUNCH_REPOS, isFixtureIssue } from "../src/issues-page";
 
 function testEnv(): Env {
   return {
@@ -827,6 +827,85 @@ describe("GET /issues — Related-PR chips", () => {
     expect(res.status).toBe(200);
     const html = await res.text();
     expect(html).toContain("Related-PR links unavailable");
+  });
+});
+
+describe("isFixtureIssue()", () => {
+  it("matches the `[CI fixture]` title prefix (case-insensitive, leading space tolerant)", () => {
+    expect(isFixtureIssue({ title: "[CI fixture] Open issue used by tests" })).toBe(true);
+    expect(isFixtureIssue({ title: "  [ci FIXTURE] whatever" })).toBe(true);
+  });
+  it("does not match ordinary issue titles", () => {
+    expect(isFixtureIssue({ title: "Add feature X" })).toBe(false);
+    expect(isFixtureIssue({ title: "fix: [CI fixture] mentioned mid-title" })).toBe(false);
+  });
+});
+
+describe("GET /issues — CI fixture rows", () => {
+  beforeEach(async () => {
+    await env.CI_STATUS.delete("issues-page:project-map");
+    await env.CI_STATUS.delete("issues-page:pr-map:v2");
+    await env.CI_STATUS.delete("issues:watermark");
+    for (const prefix of ["issue:", "project:"]) {
+      let cursor: string | undefined;
+      do {
+        const page = await env.CI_STATUS.list({ prefix, cursor });
+        await Promise.all(page.keys.map((k) => env.CI_STATUS.delete(k.name)));
+        cursor = page.list_complete ? undefined : page.cursor;
+      } while (cursor);
+    }
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it("flags a fixture issue with a 🔒 保全 badge and suppresses its launch button", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (req, init) => {
+      const url = typeof req === "string" ? req : (req as Request).url;
+      const body = (init?.body as string | undefined) ?? "";
+      if (url.includes("/graphql")) {
+        if (body.includes("projectsV2(first:")) {
+          return Response.json({
+            data: { repositoryOwner: { projectsV2: { nodes: [] } } },
+          });
+        }
+        return Response.json({ data: { repositoryOwner: null } });
+      }
+      const decoded = decodeURIComponent(url);
+      if (decoded.includes("is:pr")) {
+        return Response.json({ total_count: 0, incomplete_results: false, items: [] });
+      }
+      // yhonda repo: filter call returns the fixture issue; main org call is
+      // empty. (The repo string here mirrors the real claude-hooks fixture.)
+      if (decoded.includes("repo:yhonda-ohishi/claude-skills")) {
+        return Response.json({
+          total_count: 1, incomplete_results: false,
+          items: [{
+            number: 2,
+            title: "[CI fixture] Open issue used by tests/test-worktree-naming-guard.sh (T1, T5)",
+            state: "open",
+            user: { login: "yhonda-ohishi" },
+            labels: [], assignees: [], comments: 0,
+            created_at: "2026-05-30T00:00:00Z", updated_at: "2026-05-30T00:00:00Z",
+            html_url: "https://github.com/yhonda-ohishi/claude-hooks/issues/2",
+            repository_url: "https://api.github.com/repos/yhonda-ohishi/claude-hooks",
+          }],
+        });
+      }
+      return Response.json({ total_count: 0, incomplete_results: false, items: [] });
+    });
+    const req = new Request("http://localhost/issues");
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(req, testEnv(), ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    // Badge present, row dimmed, and the launch cell is a static lock — not a
+    // clickable cc-launch anchor.
+    expect(html).toContain("🔒 保全");
+    expect(html).toContain('class="fixture-badge"');
+    expect(html).toContain('<tr class="fixture">');
+    expect(html).toContain('class="cc-launch-disabled"');
+    expect(html).not.toContain('<a class="cc-launch"');
   });
 });
 
