@@ -1,12 +1,14 @@
 /**
- * Release Wave 機構の MCP tools (7 個)。
+ * Release Wave 機構の MCP tools (9 個)。
  *
  * 設計の親 issue: ippoan/ci-dashboard#137
  *
  * 注: stage phase 撤去 (Refs ippoan/ci-workflows#96①) に伴い
  * `release_wave_start` / `release_wave_stage` tool は削除した。wave は Pending
  * releases / flip-all 経路で driven され、本 tool 群は status/approve/flip/
- * rollback/abort/fail/contract_applied の 7 個。
+ * rollback/abort/fail/contract_applied の 7 個 +
+ * operator が flip を起動する pending_flip / pending_flip_all の 2 個 (Refs #249)
+ * = 計 9 個。
  * (`release_wave_fail` = stuck wave を terminal failed に落とす force-clear 経路)
  *
  * 各 tool は ReleaseWaveHub DO の RPC を 1:1 で呼び出す薄い wrapper。
