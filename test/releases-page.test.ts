@@ -813,6 +813,74 @@ describe("GET /releases", () => {
     expect(html).toContain("ippoan/mixed-repo");
   });
 
+  // squash-merge の subject は `(#PR)` だけを残し、PR 本文の `Refs #N` trailer を
+  // 落とす (例: ci-dashboard#272 が "…統合 (#272)" として merge され `Refs #271`
+  // は本文のみ)。一覧の Unreleased block は commit message だけ見ていたため、
+  // commit から拾えるのは PR #272 (= pull_request、除外される) のみで issue #271
+  // が永久に出ず、card が "全部 closed" に潰れていた。Unreleased zone でも detail
+  // ページ同様に PR 本文 / branch から ref を回収するようにした回帰ガード。
+  // Refs ippoan/ci-dashboard#290。
+  it("recovers an Unreleased issue referenced only in the PR body (squash dropped Refs)", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (req) => {
+      const url = typeof req === "string" ? req : (req as Request).url;
+
+      if (url.includes("/contents/wt-direct-push/config/direct-push-ok.txt")) {
+        return Response.json({ content: btoa(""), encoding: "base64" });
+      }
+
+      if (url.includes("/repos/ippoan/squash-repo/tags")) {
+        return Response.json([{ name: "v1.0.0", commit: { sha: "tag1aaaa" } }]);
+      }
+
+      if (url.match(/\/repos\/ippoan\/squash-repo(\?|$)/)) {
+        return Response.json({ default_branch: "main" });
+      }
+
+      // Unreleased zone: 唯一の commit は PR 番号だけ (Refs trailer 無し)
+      if (url.includes("/repos/ippoan/squash-repo/compare/v1.0.0...main")) {
+        return Response.json({
+          commits: [
+            { sha: "f7d92dc0000000000", commit: { message: "feat: rollback UI を統合 (#272)" } },
+          ],
+        });
+      }
+
+      // PR follow-up: 本文に `Refs #271`、branch は issue prefix を持たない
+      if (url.endsWith("/repos/ippoan/squash-repo/pulls/272")) {
+        return Response.json({
+          number: 272,
+          head: { ref: "claude/admiring-bell-dar5v" },
+          body: "## 概要\n\n…統合する。\n\nRefs #271\n",
+        });
+      }
+
+      // PR 本文経由で初めて拾われる open issue
+      if (url.endsWith("/repos/ippoan/squash-repo/issues/271")) {
+        return Response.json({
+          number: 271, title: "rollback UI を version 行と統合する", state: "open",
+          labels: [], assignees: [],
+          html_url: "https://github.com/ippoan/squash-repo/issues/271",
+          updated_at: "2026-06-04T09:09:27Z",
+        });
+      }
+
+      return new Response(`not stubbed: ${url}`, { status: 500 });
+    });
+
+    const e = testEnv({ tagless: ["ippoan/squash-repo"] });
+    const req = new Request("http://localhost/releases");
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(req, e, ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(200);
+    const html = await res.text();
+
+    // commit には Refs が無いのに、PR 本文経由で issue #271 が候補に出る
+    expect(html).toContain("Unreleased (main@f7d92dc)");
+    expect(html).toContain("rollback UI を version 行と統合する");
+  });
+
   // archived repo は GitHub API で issue close ができない (403 read-only) ため、
   // /releases から一切除外する。Refs ippoan/ci-dashboard#155
   // (ippoan/github-mcp-server-rs が monorepo 化で archive されたが Refs を
