@@ -274,6 +274,7 @@ frontend CI の `report-frontend-compat` action が staging 現 image を取り�
 |---|---|---|
 | `frontend::<repo>` | 90 日 (KV expirationTtl) | frontend が 90 日 deploy も test も走っていなければ `tested_against` は古い → 自然減衰 |
 | `backend::<repo>`  | なし (upsert)            | 最新のみで運用、deploy 都度上書き |
+| `pm::<repo>::<base_tag>` | 120 秒 (CI_STATUS) | pending migrations 算出の compare cache。head (default branch) が動くので短命。Refs #173 |
 
 `frontend::<repo>` は write の度に TTL がリセットされる (= putable で
 `expirationTtl: 90 * 24 * 3600` を毎回指定する)。
@@ -355,6 +356,36 @@ gate する」は、frontend → backend の依存マップ (consumed_by) が未
 現状は tested_against の履歴から consumer を逆算しているが、frontend 単独 wave では
 「どの backend の現 image と照合すべきか」を一意に決められない。consumed_by を
 `release-wave-targets.yaml` registry として導入する際に対応する。
+
+## compat グラフの表示拡張 (#172 / #173)
+
+compat 俯瞰グラフ / matrix の backend ノードには、突合 SHA に加えて以下を併記する。
+いずれも **read-only な表示拡張**で KV write 経路 (上記 shape) は変えない。
+
+### release 状態バッジ (#172)
+
+backend ノードに「現 image SHA が `v*` release tag 済みか」を明示する:
+
+- **tagged** — `backend::<repo>.current_tag` がある (= promote 済)
+- **untagged** — `current_tag` が null (= staging dev SHA のみ、まだ `v*` tag 無し)
+
+SHA→tag の track 自体は #197 (`current_tag` / `deploy_history[].tag`) で済んでおり、
+本件はその有無をバッジ化して「もう本番 tag が打たれたか」を一目で分かるようにするだけ。
+
+### 未適用マイグレーション (#173)
+
+backend ノード / matrix h3 に「次の `v*` release で適用される未適用マイグレーション」
+件数を併記する (`pending migrations: N`)。**git ベースで都度算出** (案 1、DB 接続不要):
+
+- base = repo の最新 stable `v*` tag (無ければ `unknown` = 非表示)
+- head = default branch (main)
+- 集合 = GitHub compare `base...head` の `files[]` で `status==="added"` かつ
+  `^migrations/<name>.sql` に一致するもの
+
+算出は `src/release-wave/pending-migrations.ts`。GitHub 依存なので **fail-soft**
+(token 解決不能 / API error 時は migration 行を出さずページ描画は続行)。compare
+結果は `pm::<repo>::<base_tag>` で 120 秒 cache (TTL 表参照)。算出対象は Cloud Run
+backend (= `backend::` を持ち `traffic::` を持たない repo = migrate job を持つ側)。
 
 ## 後続実装 issue
 
