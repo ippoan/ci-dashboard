@@ -2,6 +2,8 @@ import { parseRepo, tokenForOrg, GitHubApiError } from "./github-api";
 import type { AuthClientWorkerEnv } from "@ippoan/auth-client-worker";
 import {
   extractRefIssues,
+  extractPrNumber,
+  extractBranchIssue,
   sortSemverDesc,
   isSemverTag,
   previousTag,
@@ -16,6 +18,7 @@ import {
   cachedCompare,
   cachedCommits,
   cachedRepoMeta,
+  cachedPullRequest,
   cachedIssue,
   TTL_MOVING_COMPARE,
 } from "./release-cache";
@@ -388,10 +391,38 @@ async function loadSyntheticBlock(
   }
   if (commits.length === 0) return null;
 
+  const repoCtx = { owner, name };
   const refs = new Set<number>();
+  const prNumbers = new Set<number>();
   for (const c of commits) {
-    for (const n of extractRefIssues(c.commit.message, { owner, name })) refs.add(n);
+    for (const n of extractRefIssues(c.commit.message, repoCtx)) refs.add(n);
+    const pr = extractPrNumber(c.commit.message);
+    if (pr !== null) prNumbers.add(pr);
   }
+
+  // PR follow-up pass (Unreleased zone only). A squash-merge subject keeps just
+  // the `(#PR)` suffix and drops the PR body's `Refs #N` trailer — e.g.
+  // ci-dashboard#272 merged as "…統合 (#272)" with `Refs #271` only in the body,
+  // so the commit-message scan above harvests PR #272 (a pull_request, filtered
+  // out) but never issue #271, and the card collapses to "all closed". The
+  // tag-compare detail path already recovers these via collectIssueNumbersForRange;
+  // mirror that here so the index's Unreleased block surfaces them too. Scoped to
+  // the `sinceTag` (latest tag → HEAD) range, which is naturally small + behind
+  // the moving-compare cache, so we don't fan out a PR fetch per commit on the
+  // 100-commit pure-tagless path. Refs ippoan/ci-dashboard#290.
+  if (sinceTag) {
+    await Promise.all([...prNumbers].map(async (n) => {
+      try {
+        const pr = await cachedPullRequest(token, kv, owner, name, n);
+        const fromBranch = extractBranchIssue(pr.head.ref);
+        if (fromBranch !== null) refs.add(fromBranch);
+        if (pr.body) {
+          for (const ref of extractRefIssues(pr.body, repoCtx)) refs.add(ref);
+        }
+      } catch { /* ignore per-PR failure — best-effort enrichment */ }
+    }));
+  }
+
   if (refs.size === 0) {
     // No referenced issues in the recent window — nothing to confirm. Skipping
     // the block (vs. returning an empty one) keeps the repo off the landing
