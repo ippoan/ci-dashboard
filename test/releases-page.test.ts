@@ -242,6 +242,60 @@ describe("GET /releases", () => {
     expect(html).toContain('<form method="GET" action="/releases"');
   });
 
+  it("recovers a PR-body-only Ref in the latest tag window on the index (squash drops it from the subject)", async () => {
+    // Refs ippoan/ci-dashboard#301: the index's tag-compare path now runs the
+    // detail page's PR follow-up for the MOST RECENT release window, so a
+    // `Refs #N` that lives only in the PR body (squash-merge keeps just the
+    // `(#PR)` subject) still surfaces on the card. Mirrors alc-app#30, which
+    // shipped in v0.0.7 referenced solely by PR #31's body.
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (req) => {
+      const url = typeof req === "string" ? req : (req as Request).url;
+
+      if (url.includes("/repos/ippoan/alc-app/tags")) {
+        return Response.json([
+          { name: "v0.0.7", commit: { sha: "a" } },
+          { name: "v0.0.6", commit: { sha: "b" } },
+        ]);
+      }
+      // Latest window: squash subject carries only `(#31)` — no `Refs` trailer.
+      if (url.includes("/repos/ippoan/alc-app/compare/v0.0.6...v0.0.7")) {
+        return Response.json({
+          commits: [{ sha: "x", commit: { message: "ci: add release-wave-retest.yml (#31)" } }],
+        });
+      }
+      // The Ref lives only in the PR body.
+      if (url.endsWith("/repos/ippoan/alc-app/pulls/31")) {
+        return Response.json({
+          number: 31,
+          head: { ref: "claude/great-dijkstra-vpnk8o" },
+          body: "wires up the retest receiver.\n\nRefs ippoan/alc-app#30",
+        });
+      }
+      if (url.endsWith("/repos/ippoan/alc-app/issues/30")) {
+        return Response.json({
+          number: 30, title: "release-wave retest missing", state: "open",
+          labels: [], assignees: [],
+          html_url: "https://github.com/ippoan/alc-app/issues/30",
+          updated_at: "2026-06-09T00:00:00Z",
+        });
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    const e = testEnv({ watched: ["ippoan/alc-app"] });
+    const req = new Request("http://localhost/releases");
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(req, e, ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    // #30, recovered from PR #31's body, renders on the alc-app card.
+    expect(html).toContain("ippoan/alc-app");
+    expect(html).toContain("release-wave retest missing");
+    expect(html).toMatch(/name="pair" value="v0\.0\.7:30"/);
+  });
+
   it("falls back to the index page when only `repo` is given (no tag, no flash)", async () => {
     // Pre-#45 this rendered a partial lookup form. Now any incomplete shape
     // lands on the index so the operator never sees an empty form on its own.
