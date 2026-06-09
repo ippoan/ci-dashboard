@@ -257,13 +257,32 @@ async function loadRepoView(
   }
 
   // 2. For each inline tag, compare to its immediate predecessor (next in
-  //    sorted-desc) and harvest issue refs from commit messages. We skip the
-  //    PR-fetch heuristic the detail page uses, to keep the index sub-request
-  //    budget bounded (fans out across N repos).
+  //    sorted-desc) and harvest issue refs from commit messages.
+  //
+  //    For the MOST RECENT release window (i === 0) we additionally recover
+  //    refs that live only in the PR body / head branch — squash-merge drops
+  //    the `Refs #N` trailer from the commit subject, keeping just `(#PR)`, so
+  //    a commit-message-only scan misses them (e.g. alc-app#30, referenced
+  //    solely in PR #31's body). This reuses the detail page's
+  //    collectIssueNumbersForRange with a MAX_PR_FOLLOWUP cap so the per-repo
+  //    PR fan-out, multiplied across N repos on the index, stays within the
+  //    Worker subrequest budget. Older inline tags (i >= 1) stay on the cheap
+  //    commit-message-only scan — the latest window is the one operators act
+  //    on for close-confirmation. Refs ippoan/ci-dashboard#301.
   const rawBlocks = await Promise.all(topTags.map(async (tag, i) => {
     const prevTag = sorted[i + 1] ?? null;
     if (!prevTag) {
       return { tag, prevTag: null, refs: [] as number[] };
+    }
+    if (i === 0) {
+      try {
+        const { issueNumbers } = await collectIssueNumbersForRange(
+          token, owner, name, tag, prevTag, kv, MAX_PR_FOLLOWUP,
+        );
+        return { tag, prevTag, refs: [...issueNumbers] };
+      } catch {
+        return { tag, prevTag, refs: [] };
+      }
     }
     try {
       const cmp = await cachedCompare(token, kv, owner, name, prevTag, tag);

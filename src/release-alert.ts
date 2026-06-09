@@ -65,24 +65,38 @@ export async function collectIssueNumbersForRange(
   tag: string,
   prevTag: string | null,
   kv?: KVNamespace,
+  // Cap the PR follow-up fan-out (newest-first). The detail page leaves this
+  // unbounded (single repo). The releases index passes a cap so the per-repo
+  // PR-body recovery, fanned across N repos, stays within the Worker
+  // subrequest budget. Refs ippoan/ci-dashboard#301.
+  maxPrFollowup?: number,
 ): Promise<{ issueNumbers: Set<number>; commitCount: number }> {
   const commits = prevTag
     ? (await cachedCompare(token, kv, owner, name, prevTag, tag)).commits
     : await cachedCommits(token, kv, owner, name, tag, 50);
 
   const issueNumbers = new Set<number>();
-  const prNumbers = new Set<number>();
   const repoCtx = { owner, name };
   for (const c of commits) {
-    const msg = c.commit.message;
-    for (const n of extractRefIssues(msg, repoCtx)) issueNumbers.add(n);
-    const pr = extractPrNumber(msg);
-    if (pr !== null) prNumbers.add(pr);
+    for (const n of extractRefIssues(c.commit.message, repoCtx)) issueNumbers.add(n);
   }
 
   // PR follow-up pass: head.ref (branch name) and body carry refs that the
-  // squash-merge subject line drops.
-  await Promise.all([...prNumbers].map(async (n) => {
+  // squash-merge subject line drops. Collect PR numbers newest-first so a cap
+  // (index path) keeps the freshest PRs. cachedCompare (prevTag set) returns
+  // oldest-first → reverse; cachedCommits (no prevTag) is already newest-first.
+  const recentFirst = prevTag ? [...commits].reverse() : commits;
+  const prNumbers: number[] = [];
+  const seenPr = new Set<number>();
+  for (const c of recentFirst) {
+    const pr = extractPrNumber(c.commit.message);
+    if (pr !== null && !seenPr.has(pr)) {
+      seenPr.add(pr);
+      prNumbers.push(pr);
+    }
+  }
+  const capped = maxPrFollowup != null ? prNumbers.slice(0, maxPrFollowup) : prNumbers;
+  await Promise.all(capped.map(async (n) => {
     try {
       const pr = await cachedPullRequest(token, kv, owner, name, n);
       const fromBranch = extractBranchIssue(pr.head.ref);
