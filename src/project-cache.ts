@@ -7,21 +7,79 @@ import {
   type ProjectItemSummary,
   type ProjectRef,
 } from "./mcp/tools/projects";
+import {
+  getRateLimitBackoff,
+  isRateLimitError,
+  setRateLimitBackoff,
+} from "./github-backoff";
 
-// KV schema (Refs #131):
-//   project:org-list:<org>            -> OrgProject[]
-//   project:items:<org>:<number>      -> ProjectItemSummary[]
+// KV schema (Refs #131, envelope 化は Refs #304):
+//   project:org-list:<org>            -> { storedAt, data: OrgProject[] }
+//   project:items:<org>:<number>      -> { storedAt, data: ProjectItemSummary[] }
 //
 // 設計方針:
-// - TTL 30 分。webhook (projects_v2 / projects_v2_item) が届いたら該当
-//   key を delete → 次の SSR hit で refetch。incremental update ではなく
-//   invalidation-based (`projects_v2_item.content_node_id` を repo#number に
-//   解決するには追加 GraphQL が要るので旨味が薄い)。
+// - 鮮度 30 分 (FRESH) は envelope の storedAt で判定し、KV 上の値自体は
+//   24h (STORE) 残す。旧実装は expirationTtl=30min で値ごと消えるため、
+//   「TTL 切れ + GraphQL quota 枯渇」が重なると stale fallback が存在せず
+//   生エラーがページに出ていた (Refs #304 — issue 一覧 / PR map と同じ
+//   stale-serving に揃える)。
+// - fetch 失敗時は stale を返す (stale flag → info バナー)。rate limit は
+//   共有 backoff marker (github-backoff.ts) を立てて 5 分間 GraphQL を
+//   叩かない。
+// - webhook (projects_v2 / projects_v2_item) が届いたら該当 key を delete
+//   → 次の SSR hit で refetch。incremental update ではなく invalidation-based
+//   (`projects_v2_item.content_node_id` を repo#number に解決するには追加
+//   GraphQL が要るので旨味が薄い)。
 // - watermark 不要 (cache 全 replace でよい)。
 
 const ORG_LIST_PREFIX = "project:org-list:";
 const ITEMS_PREFIX = "project:items:";
 const TTL_SECONDS = 30 * 60;
+const STORE_TTL_SECONDS = 86400;
+
+interface CacheEnvelope<T> {
+  storedAt: number;
+  data: T;
+}
+
+/** KV から envelope を読む。旧形式 (素の配列、expirationTtl 30min の移行期
+ *  データ) は storedAt:0 = 常に stale として包んで返す。 */
+async function readEnvelope<T>(kv: KVNamespace, key: string): Promise<CacheEnvelope<T> | null> {
+  const raw = await kv.get(key, "json");
+  if (raw === null) return null;
+  if (Array.isArray(raw)) return { storedAt: 0, data: raw as T };
+  return raw as CacheEnvelope<T>;
+}
+
+/** fresh → cache 即返し / stale or 無し → fetch、失敗時は stale fallback。
+ *  backoff marker 中は GraphQL を叩かず stale (無ければ cooldown error)。 */
+async function getWithStaleFallback<T>(
+  env: AuthClientWorkerEnv,
+  key: string,
+  fetcher: () => Promise<T>,
+): Promise<{ data: T; stale: boolean }> {
+  const kv = env.CI_STATUS;
+  const envl = await readEnvelope<T>(kv, key);
+  const now = Date.now();
+  if (envl && now - envl.storedAt < TTL_SECONDS * 1000) {
+    return { data: envl.data, stale: false };
+  }
+  if (await getRateLimitBackoff(kv)) {
+    if (envl) return { data: envl.data, stale: true };
+    throw new Error("GitHub rate-limit cooldown — cached project data unavailable");
+  }
+  try {
+    const data = await fetcher();
+    await kv.put(key, JSON.stringify({ storedAt: now, data }), {
+      expirationTtl: STORE_TTL_SECONDS,
+    });
+    return { data, stale: false };
+  } catch (err) {
+    if (isRateLimitError(err)) await setRateLimitBackoff(kv, err);
+    if (envl) return { data: envl.data, stale: true };
+    throw err;
+  }
+}
 
 // `/issues` SSR 側の project map cache key。Phase 1 (#129) で導入済み。
 // `projects_v2_item` event が来た時に併せて invalidate して /issues 側も
@@ -36,44 +94,68 @@ function itemsKey(org: string, number: number): string {
   return `${ITEMS_PREFIX}${org}:${number}`;
 }
 
-/** Cache-first で per-org の Projects v2 list を返す。miss なら GraphQL に
- *  当てて KV に書き込む。orgs 並列で取りに行く。 */
+/** per-org の Projects v2 list を staleness 付きで返す (内部用)。 */
+async function getOrgProjectsWithMeta(
+  env: AuthClientWorkerEnv,
+  orgs: string[],
+): Promise<{ results: OrgProjectsResult[]; stale: boolean }> {
+  let anyStale = false;
+  const results = await Promise.all(orgs.map(async (org) => {
+    const { data, stale } = await getWithStaleFallback<OrgProject[]>(
+      env,
+      orgListKey(org),
+      async () => {
+        const fetched = await fetchOrgProjects(env, { orgs: [org], include_closed: false });
+        return fetched[0]?.projects ?? [];
+      },
+    );
+    if (stale) anyStale = true;
+    return { org, projects: data };
+  }));
+  return { results, stale: anyStale };
+}
+
+/** 1 つの project の items を staleness 付きで返す (内部用)。 */
+async function getProjectItemsWithMeta(
+  env: AuthClientWorkerEnv,
+  org: string,
+  number: number,
+): Promise<{ items: ProjectItemSummary[]; stale: boolean }> {
+  const { data, stale } = await getWithStaleFallback<ProjectItemSummary[]>(
+    env,
+    itemsKey(org, number),
+    () => fetchProjectItems(env, org, number),
+  );
+  return { items: data, stale };
+}
+
+/** Cache-first で per-org の Projects v2 list を返す。fresh window (30min)
+ *  内は API 0 call、stale なら refetch。**fetch 失敗時は stale fallback**
+ *  (旧実装は値ごと expire していたため失敗が即エラーになっていた、Refs #304)。 */
 export async function getOrFetchOrgProjects(
   env: AuthClientWorkerEnv,
   orgs: string[],
 ): Promise<OrgProjectsResult[]> {
-  const kv = env.CI_STATUS;
-  return Promise.all(orgs.map(async (org) => {
-    const cached = await kv.get(orgListKey(org), "json") as OrgProject[] | null;
-    if (cached) return { org, projects: cached };
-    const fetched = await fetchOrgProjects(env, { orgs: [org], include_closed: false });
-    const list = fetched[0]?.projects ?? [];
-    await kv.put(orgListKey(org), JSON.stringify(list), { expirationTtl: TTL_SECONDS });
-    return { org, projects: list };
-  }));
+  return (await getOrgProjectsWithMeta(env, orgs)).results;
 }
 
-/** Cache-first で 1 つの project の items を返す。miss なら fetch + 保存。 */
+/** Cache-first で 1 つの project の items を返す。stale fallback は
+ *  getOrFetchOrgProjects と同じ。 */
 export async function getOrFetchProjectItems(
   env: AuthClientWorkerEnv,
   org: string,
   number: number,
 ): Promise<ProjectItemSummary[]> {
-  const kv = env.CI_STATUS;
-  const cached = await kv.get(itemsKey(org, number), "json") as ProjectItemSummary[] | null;
-  if (cached) return cached;
-  const items = await fetchProjectItems(env, org, number);
-  await kv.put(itemsKey(org, number), JSON.stringify(items), { expirationTtl: TTL_SECONDS });
-  return items;
+  return (await getProjectItemsWithMeta(env, org, number)).items;
 }
 
 // ───── /issues page 向け project map (Refs #135) ─────
 
 export interface ProjectIssueMapResult {
   map: Map<string, ProjectRef[]>;
-  /** True if the result is from cache because fresh fetch failed. 本実装は
-   *  cache 層が個別に TTL 管理するため常に false。元の loadProjectMap API と
-   *  互換性を保つために残してある。 */
+  /** いずれかの層 (org list / project items) が fetch 失敗 or backoff で
+   *  stale cache を返した。/issues は info バナー「from the last successful
+   *  sync」を出す (Refs #304)。 */
   stale: boolean;
   /** いずれかの per-project fetch / org list fetch が失敗した場合の最初の
    *  メッセージ。map は best-effort で部分結果を返す。 */
@@ -89,8 +171,11 @@ export async function getOrFetchProjectIssueMap(
   orgs: string[],
 ): Promise<ProjectIssueMapResult> {
   let perOrg: OrgProjectsResult[];
+  let anyStale = false;
   try {
-    perOrg = await getOrFetchOrgProjects(env, orgs);
+    const meta = await getOrgProjectsWithMeta(env, orgs);
+    perOrg = meta.results;
+    anyStale = meta.stale;
   } catch (err) {
     return {
       map: new Map(),
@@ -106,7 +191,8 @@ export async function getOrFetchProjectIssueMap(
     perOrg.flatMap(({ org, projects }) =>
       projects.map(async (p) => {
         try {
-          const items = await getOrFetchProjectItems(env, org, p.number);
+          const { items, stale } = await getProjectItemsWithMeta(env, org, p.number);
+          if (stale) anyStale = true;
           for (const item of items) {
             if (item.content.type !== "issue") continue;
             const c = item.content;
@@ -127,7 +213,7 @@ export async function getOrFetchProjectIssueMap(
     ),
   );
 
-  return { map, stale: false, error: firstError };
+  return { map, stale: anyStale, error: firstError };
 }
 
 /** 該当 org の board list cache だけ flush。`projects_v2` event 用 (board
@@ -214,6 +300,7 @@ export const __testing = {
   ORG_LIST_PREFIX,
   ITEMS_PREFIX,
   TTL_SECONDS,
+  STORE_TTL_SECONDS,
   ISSUES_PAGE_PROJECT_MAP_KEY,
   orgListKey,
   itemsKey,
