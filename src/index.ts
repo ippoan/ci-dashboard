@@ -119,8 +119,9 @@ function getReleaseWaveHub(env: Env): DurableObjectStub {
 // Dashboard
 app.get("/", () => handleDashboard());
 
-// Open issues (SSR, cross-org)
-app.get("/issues", (c) => handleIssuesPage(c.env));
+// Open issues (SSR, cross-org)。executionCtx は SWR の background
+// reconcile / PR map refresh 用 (Refs #304)。
+app.get("/issues", (c) => handleIssuesPage(c.env, c.executionCtx));
 
 // Projects v2 read-only listing (SSR, cross-org). Refs #72.
 app.get("/projects", (c) => handleProjectsPage(c.env));

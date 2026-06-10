@@ -244,6 +244,11 @@ describe("GET /issues", () => {
     // reconcile が fresh window 判定で skip し、cold-start の fetch が
     // 走らないため stub が当たらず空 cache を返す。
     await env.CI_STATUS.delete("issues:watermark");
+    // Refs #304: backoff / soft-lock marker が漏れると後続テストの reconcile
+    // が silent no-op になり cold-start fixture が当たらない。
+    await env.CI_STATUS.delete("github:rl-backoff");
+    await env.CI_STATUS.delete("issues:reconciling");
+    await env.CI_STATUS.delete("issues-page:pr-map:refreshing");
     // Refs #135: /issues も project-cache の KV (`project:*`) を共有するため
     // テスト間で flush しないと前テストの fixture が漏れる。
     for (const prefix of ["issue:", "project:"]) {
@@ -440,6 +445,11 @@ describe("GET /issues — Project section", () => {
     // reconcile が fresh window 判定で skip し、cold-start の fetch が
     // 走らないため stub が当たらず空 cache を返す。
     await env.CI_STATUS.delete("issues:watermark");
+    // Refs #304: backoff / soft-lock marker が漏れると後続テストの reconcile
+    // が silent no-op になり cold-start fixture が当たらない。
+    await env.CI_STATUS.delete("github:rl-backoff");
+    await env.CI_STATUS.delete("issues:reconciling");
+    await env.CI_STATUS.delete("issues-page:pr-map:refreshing");
     // Refs #135: /issues も project-cache の KV (`project:*`) を共有するため
     // テスト間で flush しないと前テストの fixture が漏れる。
     for (const prefix of ["issue:", "project:"]) {
@@ -616,6 +626,11 @@ describe("GET /issues — Claude Code launch button", () => {
     // reconcile が fresh window 判定で skip し、cold-start の fetch が
     // 走らないため stub が当たらず空 cache を返す。
     await env.CI_STATUS.delete("issues:watermark");
+    // Refs #304: backoff / soft-lock marker が漏れると後続テストの reconcile
+    // が silent no-op になり cold-start fixture が当たらない。
+    await env.CI_STATUS.delete("github:rl-backoff");
+    await env.CI_STATUS.delete("issues:reconciling");
+    await env.CI_STATUS.delete("issues-page:pr-map:refreshing");
     // Refs #135: /issues も project-cache の KV (`project:*`) を共有するため
     // テスト間で flush しないと前テストの fixture が漏れる。
     for (const prefix of ["issue:", "project:"]) {
@@ -677,6 +692,11 @@ describe("GET /issues — Related-PR chips", () => {
     // reconcile が fresh window 判定で skip し、cold-start の fetch が
     // 走らないため stub が当たらず空 cache を返す。
     await env.CI_STATUS.delete("issues:watermark");
+    // Refs #304: backoff / soft-lock marker が漏れると後続テストの reconcile
+    // が silent no-op になり cold-start fixture が当たらない。
+    await env.CI_STATUS.delete("github:rl-backoff");
+    await env.CI_STATUS.delete("issues:reconciling");
+    await env.CI_STATUS.delete("issues-page:pr-map:refreshing");
     // Refs #135: /issues も project-cache の KV (`project:*`) を共有するため
     // テスト間で flush しないと前テストの fixture が漏れる。
     for (const prefix of ["issue:", "project:"]) {
@@ -847,6 +867,11 @@ describe("GET /issues — CI fixture rows", () => {
     await env.CI_STATUS.delete("issues-page:project-map");
     await env.CI_STATUS.delete("issues-page:pr-map:v2");
     await env.CI_STATUS.delete("issues:watermark");
+    // Refs #304: backoff / soft-lock marker が漏れると後続テストの reconcile
+    // が silent no-op になり cold-start fixture が当たらない。
+    await env.CI_STATUS.delete("github:rl-backoff");
+    await env.CI_STATUS.delete("issues:reconciling");
+    await env.CI_STATUS.delete("issues-page:pr-map:refreshing");
     for (const prefix of ["issue:", "project:"]) {
       let cursor: string | undefined;
       do {
@@ -920,5 +945,167 @@ describe("escapeHtml()", () => {
 
   it("is a no-op for plain text", () => {
     expect(escapeHtml("plain text 123")).toBe("plain text 123");
+  });
+});
+
+// ───── SWR (Refs #304) ─────
+//
+// Warm cache (issue:* が KV に居る) 時は GitHub を一切待たずに render し、
+// reconcile / PR map refresh は ctx.waitUntil で裏実行される。
+describe("GET /issues — SWR (Refs #304)", () => {
+  beforeEach(async () => {
+    await env.CI_STATUS.delete("issues-page:project-map");
+    await env.CI_STATUS.delete("issues-page:pr-map:v2");
+    await env.CI_STATUS.delete("issues:watermark");
+    await env.CI_STATUS.delete("github:rl-backoff");
+    await env.CI_STATUS.delete("issues:reconciling");
+    await env.CI_STATUS.delete("issues-page:pr-map:refreshing");
+    for (const prefix of ["issue:", "project:"]) {
+      let cursor: string | undefined;
+      do {
+        const page = await env.CI_STATUS.list({ prefix, cursor });
+        await Promise.all(page.keys.map((k) => env.CI_STATUS.delete(k.name)));
+        cursor = page.list_complete ? undefined : page.cursor;
+      } while (cursor);
+    }
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  async function seedIssue(repo: string, number: number, title: string): Promise<void> {
+    await env.CI_STATUS.put(`issue:${repo}#${number}`, JSON.stringify({
+      repo, number, title, state: "open", author: "y", labels: [], assignees: [],
+      comments: 0, created_at: "2026-06-01T00:00:00Z", updated_at: "2026-06-01T00:00:00Z",
+      url: `https://github.com/${repo}/issues/${number}`,
+    }));
+  }
+
+  async function seedPrMap(storedAt: number): Promise<void> {
+    await env.CI_STATUS.put("issues-page:pr-map:v2", JSON.stringify({ storedAt, data: {} }));
+  }
+
+  function searchCalls(spy: ReturnType<typeof vi.spyOn>): number {
+    return spy.mock.calls.filter((c) => {
+      const u = typeof c[0] === "string" ? c[0] : (c[0] as Request).url;
+      return u.includes("/search/issues");
+    }).length;
+  }
+
+  it("warm + fresh: GitHub Search を 1 回も呼ばない", async () => {
+    const fetchSpy = stubSearchIssues();
+    await seedIssue("ippoan/rust-alc-api", 7, "cached issue");
+    await env.CI_STATUS.put("issues:watermark", new Date(Date.now() - 5_000).toISOString());
+    await seedPrMap(Date.now());
+
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(new Request("http://localhost/issues"), testEnv(), ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain("cached issue");
+    expect(html).not.toContain("Refreshing in background");
+    expect(searchCalls(fetchSpy as never)).toBe(0);
+  });
+
+  it("warm + stale: 旧データを即返しして background で 6 call refresh", async () => {
+    const fetchSpy = stubSearchIssues();
+    await seedIssue("ippoan/rust-alc-api", 7, "old cached title");
+    const oldWm = new Date(Date.now() - 120_000).toISOString();
+    await env.CI_STATUS.put("issues:watermark", oldWm);
+    await seedPrMap(Date.now() - 700_000);
+
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(new Request("http://localhost/issues"), testEnv(), ctx);
+
+    // 即返し: 旧 cache の中身 + 🔄 バナー、生エラー無し
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain("old cached title");
+    expect(html).toContain("Refreshing in background");
+
+    // background 完了後: issues ×2 + PR ×4 = 6 call、watermark が進む
+    await waitOnExecutionContext(ctx);
+    expect(searchCalls(fetchSpy as never)).toBe(6);
+    const wm = await env.CI_STATUS.get("issues:watermark");
+    expect(Date.parse(wm!)).toBeGreaterThan(Date.parse(oldWm));
+    // stub の fresh data が KV に反映されている (#7 の本物 title)
+    const updated = await env.CI_STATUS.get("issue:ippoan/rust-alc-api#7", "json") as { title: string };
+    expect(updated.title).toContain("alert('xss')");
+  });
+
+  it("warm + GitHub 403: 200 で cache 表示、backoff marker が立ち 2 回目は 0 call + cooldown バナー", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (req) => {
+      const url = typeof req === "string" ? req : (req as Request).url;
+      if (url.includes("/graphql")) {
+        return Response.json({ data: { repositoryOwner: { projectsV2: { nodes: [] } } } });
+      }
+      return new Response("API rate limit exceeded", { status: 403 });
+    });
+    await seedIssue("ippoan/rust-alc-api", 7, "survives rate limit");
+    await env.CI_STATUS.put("issues:watermark", new Date(Date.now() - 120_000).toISOString());
+    await seedPrMap(Date.now() - 700_000);
+
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(new Request("http://localhost/issues"), testEnv(), ctx);
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain("survives rate limit");
+    expect(html).not.toContain("Failed to fetch issues");
+
+    // background の 403 で backoff marker が立つ (waitUntil は pre-catch 済み)
+    await waitOnExecutionContext(ctx);
+    expect(await env.CI_STATUS.get("github:rl-backoff")).not.toBeNull();
+
+    // 2 回目: backoff 中 → search 0 call + cooldown バナー
+    // NB: 既に spy 済みの fetch への vi.spyOn は同一 spy を返し 1 回目の履歴が
+    // 累積するため、mockClear してから delta を測る。
+    const fetchSpy2 = vi.spyOn(globalThis, "fetch").mockImplementation(async (req) => {
+      const url = typeof req === "string" ? req : (req as Request).url;
+      if (url.includes("/graphql")) {
+        return Response.json({ data: { repositoryOwner: { projectsV2: { nodes: [] } } } });
+      }
+      return new Response("should not be called", { status: 500 });
+    });
+    fetchSpy2.mockClear();
+    const ctx2 = createExecutionContext();
+    const res2 = await worker.fetch(new Request("http://localhost/issues"), testEnv(), ctx2);
+    await waitOnExecutionContext(ctx2);
+    expect(res2.status).toBe(200);
+    const html2 = await res2.text();
+    expect(html2).toContain("rate-limit cooldown");
+    expect(searchCalls(fetchSpy2 as never)).toBe(0);
+  });
+
+  it("warm + auth error: 302 せず 200 で cache を返す (background では redirect 不可)", async () => {
+    stubSearchIssues();
+    await seedIssue("ippoan/rust-alc-api", 7, "warm survives auth expiry");
+    await env.CI_STATUS.put("issues:watermark", new Date(Date.now() - 120_000).toISOString());
+    await seedPrMap(Date.now());
+    // token cache を落とす → background reconcile が auth error で fail する
+    await env.CI_STATUS.delete("auth-client-worker:gh-token");
+
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(new Request("http://localhost/issues"), testEnv(), ctx);
+    // waitUntil の reject が pre-catch されていれば resolve する
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(200);
+    expect((await res.text())).toContain("warm survives auth expiry");
+  });
+
+  it("cold + backoff: 「issue ゼロ」と誤表示せず 503 cooldown を返す", async () => {
+    const { setRateLimitBackoff } = await import("../src/github-backoff");
+    const { GitHubApiError } = await import("../src/github-api");
+    await setRateLimitBackoff(env.CI_STATUS, new GitHubApiError(403, "rate limit"));
+    const fetchSpy = stubSearchIssues();
+
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(new Request("http://localhost/issues"), testEnv(), ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBeTruthy();
+    expect(await res.text()).toContain("rate-limit cooldown");
+    expect(searchCalls(fetchSpy as never)).toBe(0);
   });
 });

@@ -1,10 +1,18 @@
 import { type OrgIssue } from "./mcp/tools/issues";
 import { type ProjectRef } from "./mcp/tools/projects";
-import { fetchAllOpenPrsByIssue, type IssuePrRef } from "./issue-prs";
+import { type IssuePrRef } from "./issue-prs";
 import type { AuthClientWorkerEnv } from "@ippoan/auth-client-worker";
 import { renderTabs, TAB_STYLES } from "./nav-tabs";
 import { PWA_HEAD_TAGS, PWA_REGISTER_SCRIPT } from "./pwa";
-import { listCachedOpenIssues, reconcileIssues, type ReconcileResult } from "./issue-cache";
+import {
+  listCachedOpenIssues,
+  reconcileIssues,
+  getIssuesWatermark,
+  FRESH_THRESHOLD_MS,
+  type ReconcileResult,
+} from "./issue-cache";
+import { loadPrMap, type PrMapResult } from "./pr-map-cache";
+import { getRateLimitBackoff } from "./github-backoff";
 import {
   getOrFetchProjectIssueMap,
   type ProjectIssueMapResult,
@@ -69,54 +77,9 @@ export function buildClaudeCodeLaunchUrl(repo: string, issueNumber: number): str
 // あれば warm cache を共有して即返、`projects_v2_item` webhook が来ると
 // project-cache.applyProjectsV2ItemEvent が KV を flush する。
 
-// PR map cache mirrors the project-map cache pattern. The freshness window is
-// shorter (2 min) because PR state churns faster than Project board edits — a
-// new PR opened minutes ago should appear without forcing a manual reload —
-// but the 24 h store window keeps a stale copy as fallback when GitHub search
-// rate-limits the worker.
-// v2 suffix invalidates the open-only payload from before merged PRs were
-// included (the shape changed — `IssuePrRef.state` is now required).
-const PR_MAP_CACHE_KEY = "issues-page:pr-map:v2";
-const PR_MAP_FRESH_SECONDS = 120;
-const PR_MAP_STORE_SECONDS = 86400;
-
-interface PrMapCacheEntry {
-  storedAt: number;
-  data: Record<string, IssuePrRef[]>;
-}
-
-interface PrMapResult {
-  map: Map<string, IssuePrRef[]>;
-  stale: boolean;
-  error: string | null;
-}
-
-async function loadPrMap(
-  env: AuthClientWorkerEnv,
-  mainOrgs: string[],
-  yhondaRepos: string[],
-): Promise<PrMapResult> {
-  const kv = env.CI_STATUS;
-  const cached = await kv.get(PR_MAP_CACHE_KEY, "json") as PrMapCacheEntry | null;
-  const now = Date.now();
-  if (cached && now - cached.storedAt < PR_MAP_FRESH_SECONDS * 1000) {
-    return { map: new Map(Object.entries(cached.data)), stale: false, error: null };
-  }
-  try {
-    const fresh = await fetchAllOpenPrsByIssue(env, mainOrgs, yhondaRepos);
-    const entry: PrMapCacheEntry = { storedAt: now, data: Object.fromEntries(fresh) };
-    await kv.put(PR_MAP_CACHE_KEY, JSON.stringify(entry), {
-      expirationTtl: PR_MAP_STORE_SECONDS,
-    });
-    return { map: fresh, stale: false, error: null };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    if (cached) {
-      return { map: new Map(Object.entries(cached.data)), stale: true, error: message };
-    }
-    return { map: new Map(), stale: false, error: message };
-  }
-}
+// PR map cache は src/pr-map-cache.ts に移設 (Refs #304)。webhook.ts の
+// pull_request patch と本 page の SSR read が両方 import するため、page
+// module から独立させて循環 import を避けている。
 
 // `@ippoan/auth-client-worker` SDK が auth-worker delegation 中に投げる error
 // は `Error.message` に常に診断文字列を入れる (introspect.ts / tokens.ts /
@@ -133,26 +96,87 @@ function isAuthError(err: unknown): boolean {
   );
 }
 
-export async function handleIssuesPage(env: AuthClientWorkerEnv): Promise<Response> {
-  // KV cache-first 読み出し (Refs #129)。reconcile は watermark が古い時
-  // だけ走り、それ以外は KV read で完結する (= GitHub API 0 call)。
-  // reconcile 失敗時も cache が空でなければ stale banner 付きで render する。
+// KV には過去設定の repo が残っている可能性があるので allowlist で filter。
+// mainOrgs 配下は全 repo 許可、yhonda-ohishi は YHONDA_REPOS のみ。
+function filterAllowed(cached: OrgIssue[]): OrgIssue[] {
+  const mainOrgSet = new Set(ORGS);
+  const yhondaRepoSet = new Set(YHONDA_REPOS);
+  return cached.filter((i) => {
+    const owner = i.repo.split("/")[0] ?? "";
+    if (mainOrgSet.has(owner)) return true;
+    return yhondaRepoSet.has(i.repo);
+  });
+}
+
+/** バナー描画に使う鮮度情報 (Refs #304)。 */
+interface Freshness {
+  /** 最後に full snapshot が成功してからの秒数。watermark 無しは null。 */
+  reconcileAgeSec: number | null;
+  /** warm path で background reconcile を waitUntil に投げた。 */
+  issuesRefreshing: boolean;
+  /** PR map が stale を即返しして background refresh 中。 */
+  prRefreshing: boolean;
+  /** rate-limit backoff 中。値は再開予定時刻 (epoch ms)。 */
+  backoffUntil: number | null;
+  /** cold start で同期 reconcile が失敗した時のみ生エラーを表示する。 */
+  coldError: string | null;
+}
+
+export async function handleIssuesPage(
+  env: AuthClientWorkerEnv,
+  ctx?: ExecutionContext,
+): Promise<Response> {
+  // SWR (Refs #304): KV を先に読み、warm なら GitHub を一切待たずに render
+  // して reconcile は ctx.waitUntil で裏実行する。rate limit / 一時障害が
+  // ページ表示を壊す経路は cold start (cache 空) だけに限定される。
+  // 鮮度は webhook (issues / issue_comment / pull_request) の即時 patch が
+  // 担保し、reconcile は安全網。
+  const kv = env.CI_STATUS;
   let reconcileError: string | null = null;
   let reconcileResult: ReconcileResult | null = null;
-  try {
-    reconcileResult = await reconcileIssues(env, { mainOrgs: ORGS, yhondaRepos: YHONDA_REPOS });
-  } catch (err) {
-    if (isAuthError(err)) {
-      // 認証失効: GitHub 同意画面 → /oauth/callback → return_to で /issues に戻る
-      return new Response(null, {
-        status: 302,
-        headers: { Location: "/oauth/login?return_to=/issues" },
-      });
-    }
-    reconcileError = err instanceof Error ? err.message : String(err);
-  }
+  let issuesRefreshing = false;
 
-  const cached = await listCachedOpenIssues(env.CI_STATUS);
+  let cached = await listCachedOpenIssues(kv);
+  let filtered = filterAllowed(cached);
+
+  if (filtered.length > 0) {
+    // Warm path: 背景 reconcile (reconcileIssues 自身が fresh window /
+    // backoff / lock で no-op 判定する)。auth error は background では
+    // 302 できないので log のみ — cache が温かい限り表示は継続し、cold
+    // start 時に従来どおり /oauth/login へ誘導される。
+    // 未 catch の reject は waitUntil 経由で例外になる (テストでは
+    // waitOnExecutionContext が fail する) ため必ず pre-catch する。
+    issuesRefreshing = true;
+    const p = reconcileIssues(env, { mainOrgs: ORGS, yhondaRepos: YHONDA_REPOS })
+      .then((r) => {
+        console.log(JSON.stringify({ msg: "issues-page-bg-reconcile", reconcile: r }));
+      })
+      .catch((err) => {
+        console.log(JSON.stringify({
+          msg: "issues-page-bg-reconcile-failed",
+          isAuth: isAuthError(err),
+          error: err instanceof Error ? err.message : String(err),
+        }));
+      });
+    if (ctx) ctx.waitUntil(p);
+    else void p;
+  } else {
+    // Cold path: 従来どおり同期 reconcile。302 / 502 の挙動を保全する。
+    try {
+      reconcileResult = await reconcileIssues(env, { mainOrgs: ORGS, yhondaRepos: YHONDA_REPOS });
+    } catch (err) {
+      if (isAuthError(err)) {
+        // 認証失効: GitHub 同意画面 → /oauth/callback → return_to で /issues に戻る
+        return new Response(null, {
+          status: 302,
+          headers: { Location: "/oauth/login?return_to=/issues" },
+        });
+      }
+      reconcileError = err instanceof Error ? err.message : String(err);
+    }
+    cached = await listCachedOpenIssues(kv);
+    filtered = filterAllowed(cached);
+  }
 
   // observability: reconcile が GitHub を引いたか (fetched) / 何件 upsert・
   // evict したか (patched/removed) と KV cache 件数。/issues の表示が古い時に
@@ -161,17 +185,9 @@ export async function handleIssuesPage(env: AuthClientWorkerEnv): Promise<Respon
     msg: "issues-page",
     reconcile: reconcileResult,
     reconcileError,
+    issuesRefreshing,
     cachedCount: cached.length,
   }));
-  // KV には過去設定の repo が残っている可能性があるので allowlist で
-  // filter。mainOrgs 配下は全 repo 許可、yhonda-ohishi は YHONDA_REPOS のみ。
-  const mainOrgSet = new Set(ORGS);
-  const yhondaRepoSet = new Set(YHONDA_REPOS);
-  const filtered = cached.filter((i) => {
-    const owner = i.repo.split("/")[0] ?? "";
-    if (mainOrgSet.has(owner)) return true;
-    return yhondaRepoSet.has(i.repo);
-  });
 
   // Cache が空かつ reconcile も fail → 完全に表示不能なので 502。
   if (filtered.length === 0 && reconcileError) {
@@ -181,16 +197,51 @@ export async function handleIssuesPage(env: AuthClientWorkerEnv): Promise<Respon
     });
   }
 
+  // Cold start で backoff により fetch できず cache も空 → 「issue ゼロ 🎉」
+  // と誤表示せず cooldown を明示する (Refs #304)。
+  if (filtered.length === 0 && reconcileResult && !reconcileResult.fetched) {
+    const coldBackoff = await getRateLimitBackoff(kv);
+    if (coldBackoff) {
+      const resume = new Date(coldBackoff.until).toISOString().slice(11, 16);
+      return new Response(
+        renderError(`GitHub rate-limit cooldown — auto-refresh resumes by ${resume} UTC`),
+        {
+          status: 503,
+          headers: {
+            "Content-Type": "text/html; charset=utf-8",
+            "Retry-After": String(Math.max(1, Math.ceil((coldBackoff.until - Date.now()) / 1000))),
+          },
+        },
+      );
+    }
+  }
+
   const merged = {
     total_count: filtered.length,
     incomplete: false,
     items: filtered,
   };
 
-  const [project, prs] = await Promise.all([
+  const [project, prs, watermark, backoff] = await Promise.all([
     getOrFetchProjectIssueMap(env, PROJECT_ORGS),
-    loadPrMap(env, ORGS, YHONDA_REPOS),
+    loadPrMap(env, ORGS, YHONDA_REPOS, ctx),
+    getIssuesWatermark(kv),
+    getRateLimitBackoff(kv),
   ]);
+
+  const reconcileAgeSec = watermark
+    ? Math.max(0, Math.round((Date.now() - Date.parse(watermark)) / 1000))
+    : null;
+  const freshness: Freshness = {
+    reconcileAgeSec,
+    // 「裏で更新中」表示は実際に stale だった時だけ (fresh window 内の
+    // no-op reconcile でバナーを出すとノイズになる)。
+    issuesRefreshing: issuesRefreshing &&
+      (reconcileAgeSec === null || reconcileAgeSec * 1000 >= FRESH_THRESHOLD_MS),
+    prRefreshing: prs.refreshing,
+    backoffUntil: backoff?.until ?? null,
+    coldError: reconcileError,
+  };
   const projectMap = project.map;
   const prMap = prs.map;
 
@@ -222,7 +273,7 @@ export async function handleIssuesPage(env: AuthClientWorkerEnv): Promise<Respon
     ] as const);
 
   return new Response(
-    renderHtml(merged.total_count, merged.incomplete, projectTagged, repos, project, prs, reconcileError),
+    renderHtml(merged.total_count, merged.incomplete, projectTagged, repos, project, prs, freshness),
     { headers: { "Content-Type": "text/html; charset=utf-8" } },
   );
 }
@@ -234,7 +285,7 @@ function renderHtml(
   repos: ReadonlyArray<readonly [string, OrgIssue[]]>,
   project: ProjectIssueMapResult,
   prs: PrMapResult,
-  issueStaleError: string | null,
+  freshness: Freshness,
 ): string {
   const repoSections = repos
     .map(([repo, items]) => renderRepoSection(repo, items, prs.map))
@@ -247,10 +298,23 @@ function renderHtml(
   const incompleteBanner = incomplete
     ? `<div class="banner">⚠️ Result was truncated by GitHub search. Showing ${total} issues but more may exist.</div>`
     : "";
-  // KV cache の reconcile が fail した時の stale 注意。cache がある以上
-  // ページは出せるが、最新の close / open は反映されていない可能性がある。
-  const issueStaleBanner = issueStaleError
-    ? `<div class="banner banner-info">📋 Issue list shown is from KV cache — fresh reconcile failed (${escapeHtml(issueStaleError)})</div>`
+  // Rate-limit cooldown 中: 生の GitHub エラーは出さず、cache 表示 + 再開
+  // 予定だけを穏当に伝える (Refs #304)。
+  const backoffBanner = freshness.backoffUntil
+    ? `<div class="banner banner-info">⏳ GitHub rate-limit cooldown — serving cached data; auto-refresh resumes by ${new Date(freshness.backoffUntil).toISOString().slice(11, 16)} UTC</div>`
+    : "";
+  // Cold start で同期 reconcile が fail したが cache はあった時のみ生エラー。
+  const issueStaleBanner = freshness.coldError
+    ? `<div class="banner banner-info">📋 Issue list shown is from KV cache — fresh reconcile failed (${escapeHtml(freshness.coldError)})</div>`
+    : "";
+  // Warm path の SWR 表示。backoff バナーが出ている時は冗長なので省略。
+  const refreshingBanner = !freshness.backoffUntil && !freshness.coldError &&
+    (freshness.issuesRefreshing || freshness.prRefreshing)
+    ? `<div class="banner banner-info">🔄 Refreshing in background${
+        freshness.reconcileAgeSec !== null
+          ? ` (issues last reconciled ${freshness.reconcileAgeSec}s ago)`
+          : ""
+      }</div>`
     : "";
   const projectBanner = project.stale
     ? `<div class="banner banner-info">📋 Project tags shown are from the last successful sync — fresh fetch failed (${escapeHtml(project.error ?? "")})</div>`
@@ -480,6 +544,8 @@ function renderHtml(
     </div>
   </header>
   ${incompleteBanner}
+  ${backoffBanner}
+  ${refreshingBanner}
   ${issueStaleBanner}
   ${projectBanner}
   ${prBanner}

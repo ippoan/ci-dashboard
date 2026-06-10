@@ -19,6 +19,7 @@ import {
   invalidateRepoCommits,
   invalidateRepoCompare,
 } from "./release-cache";
+import { applyPullRequestEvent } from "./pr-map-cache";
 
 interface ReleaseWebhookPayload {
   action: string;
@@ -79,6 +80,14 @@ interface PullRequestPayload {
     merged: boolean;
     merge_commit_sha: string | null;
     base: { ref: string };
+    // pr-map patch (Refs #304) 用。GitHub の実配信には常に載るが、optional
+    // にして最小 payload (テスト fixture) でも落ちないようにする。title が
+    // 無い場合 applyPullRequestEvent は除去のみ行う。
+    title?: string;
+    body?: string | null;
+    draft?: boolean;
+    html_url?: string;
+    updated_at?: string;
   };
   repository: {
     full_name: string;
@@ -204,6 +213,13 @@ export async function handleWebhook(
   if (event === "pull_request") {
     const payload: PullRequestPayload = JSON.parse(body);
     const repo = payload.repository.full_name;
+
+    // /issues の関連 PR chip (pr-map cache) を即時 patch する (Refs #304)。
+    // merge 判定とは独立に全 action で呼ぶ — opened / edited / reopened /
+    // draft flip も chip の表示内容を変えるため。対象外 action や cache
+    // 不在は applyPullRequestEvent 側が no-op にする。
+    await applyPullRequestEvent(env.CI_STATUS, payload);
+
     const isMergeToDefault =
       payload.action === "closed" &&
       payload.pull_request.merged === true &&

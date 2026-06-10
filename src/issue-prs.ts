@@ -174,10 +174,14 @@ export async function fetchAllOpenPrsByIssue(
   // Sort each list: open first (work still in flight), then merged; within
   // each group by recency so the most-recently-updated PR renders first.
   for (const prs of merged.values()) {
-    prs.sort((a, b) => {
-      if (a.state !== b.state) return a.state === "open" ? -1 : 1;
-      return b.updated_at.localeCompare(a.updated_at);
-    });
+    prs.sort(sortPrRefs);
   }
   return merged;
+}
+
+/** open 優先 → 各 state 内は updated_at 降順。fetchAllOpenPrsByIssue と
+ *  pr-map-cache の webhook patch (Refs #304) が同じ順序規約を共有する。 */
+export function sortPrRefs(a: IssuePrRef, b: IssuePrRef): number {
+  if (a.state !== b.state) return a.state === "open" ? -1 : 1;
+  return b.updated_at.localeCompare(a.updated_at);
 }

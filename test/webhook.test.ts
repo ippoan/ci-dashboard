@@ -836,3 +836,119 @@ describe("POST /webhook", () => {
     expect(await env.CI_STATUS.get("rcache:v1:issue:ippoan/foo:42")).toBeNull();
   });
 });
+
+// ───── pull_request → pr-map cache patch (Refs #304) ─────
+//
+// /issues の関連 PR chip 用 KV cache (pr-map-cache.ts) を webhook が即時
+// patch する配線のテスト。patch ロジック自体の matrix は
+// test/pr-map-cache.test.ts でカバーする — ここでは「webhook handler から
+// applyPullRequestEvent が呼ばれ、KV に反映される」ことだけを確認する。
+describe("POST /webhook pull_request — pr-map patch (Refs #304)", () => {
+  const PR_MAP_KEY = "issues-page:pr-map:v2";
+
+  beforeEach(async () => {
+    resetHubCalls();
+    await env.CI_STATUS.delete(PR_MAP_KEY);
+  });
+
+  it("opened + Refs #N で pr-map に chip が追加される (storedAt 不変)", async () => {
+    const storedAt = Date.now() - 1000;
+    await env.CI_STATUS.put(PR_MAP_KEY, JSON.stringify({ storedAt, data: {} }));
+
+    const body = JSON.stringify({
+      action: "opened",
+      pull_request: {
+        number: 12,
+        merged: false,
+        merge_commit_sha: null,
+        base: { ref: "main" },
+        title: "feat: do the thing",
+        body: "Refs #7",
+        draft: false,
+        html_url: "https://github.com/ippoan/rust-alc-api/pull/12",
+        updated_at: "2026-06-10T00:00:00Z",
+      },
+      repository: { full_name: "ippoan/rust-alc-api", default_branch: "main" },
+    });
+    const sig = await sign(body, WEBHOOK_SECRET);
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(
+      new Request("http://localhost/webhook", {
+        method: "POST", body,
+        headers: { "X-Hub-Signature-256": sig, "X-GitHub-Event": "pull_request" },
+      }),
+      testEnv(), ctx,
+    );
+    await waitOnExecutionContext(ctx);
+    expect(res.status).toBe(200);
+
+    const entry = await env.CI_STATUS.get(PR_MAP_KEY, "json") as {
+      storedAt: number;
+      patchedAt?: number;
+      data: Record<string, Array<{ number: number; state: string }>>;
+    };
+    expect(entry.storedAt).toBe(storedAt);
+    expect(entry.patchedAt).toBeGreaterThan(0);
+    expect(entry.data["ippoan/rust-alc-api#7"]).toHaveLength(1);
+    expect(entry.data["ippoan/rust-alc-api#7"]![0]!.number).toBe(12);
+    expect(entry.data["ippoan/rust-alc-api#7"]![0]!.state).toBe("open");
+  });
+
+  it("cache 不在の pull_request event は pr-map を作らない (no-op)", async () => {
+    const body = JSON.stringify({
+      action: "opened",
+      pull_request: {
+        number: 12, merged: false, merge_commit_sha: null, base: { ref: "main" },
+        title: "feat: x", body: "Refs #7",
+        html_url: "https://github.com/ippoan/rust-alc-api/pull/12",
+        updated_at: "2026-06-10T00:00:00Z",
+      },
+      repository: { full_name: "ippoan/rust-alc-api", default_branch: "main" },
+    });
+    const sig = await sign(body, WEBHOOK_SECRET);
+    const ctx = createExecutionContext();
+    await worker.fetch(
+      new Request("http://localhost/webhook", {
+        method: "POST", body,
+        headers: { "X-Hub-Signature-256": sig, "X-GitHub-Event": "pull_request" },
+      }),
+      testEnv(), ctx,
+    );
+    await waitOnExecutionContext(ctx);
+    expect(await env.CI_STATUS.get(PR_MAP_KEY)).toBeNull();
+  });
+
+  it("title 無しの最小 payload (既存 fixture 形) でも 200 (除去のみ動作)", async () => {
+    await env.CI_STATUS.put(PR_MAP_KEY, JSON.stringify({
+      storedAt: Date.now(),
+      data: {
+        "ippoan/secrets-inventory-gcp#3": [{
+          repo: "ippoan/secrets-inventory-gcp", number: 8, title: "old",
+          url: "https://github.com/ippoan/secrets-inventory-gcp/pull/8",
+          draft: false, updated_at: "2026-06-01T00:00:00Z", state: "open",
+        }],
+      },
+    }));
+    const body = JSON.stringify({
+      action: "closed",
+      pull_request: { number: 8, merged: false, merge_commit_sha: null, base: { ref: "main" } },
+      repository: { full_name: "ippoan/secrets-inventory-gcp", default_branch: "main" },
+    });
+    const sig = await sign(body, WEBHOOK_SECRET);
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(
+      new Request("http://localhost/webhook", {
+        method: "POST", body,
+        headers: { "X-Hub-Signature-256": sig, "X-GitHub-Event": "pull_request" },
+      }),
+      testEnv(), ctx,
+    );
+    await waitOnExecutionContext(ctx);
+    expect(res.status).toBe(200);
+    const entry = await env.CI_STATUS.get(PR_MAP_KEY, "json") as {
+      data: Record<string, unknown[]>;
+    };
+    // closed-unmerged → 除去 (key ごと消える)
+    expect(entry.data["ippoan/secrets-inventory-gcp#3"]).toBeUndefined();
+  });
+});

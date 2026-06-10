@@ -29,6 +29,8 @@ function makeIssue(over: Partial<OrgIssue> = {}): OrgIssue {
 }
 
 async function clearCache(): Promise<void> {
+  // backoff marker (Refs #304) も leak すると後続 reconcile が silent no-op になる。
+  await env.CI_STATUS.delete("github:rl-backoff");
   // KV.list でテスト間 leak しないよう全 prefix を flush。
   for (const prefix of [__testing.KEY_PREFIX, "issues:"]) {
     let cursor: string | undefined;
@@ -198,6 +200,44 @@ describe("issue-cache", () => {
       // incomplete なので #99 は誤 evict しない
       const still = await env.CI_STATUS.get(issueKey("ippoan/ci-dashboard", 99));
       expect(still).not.toBeNull();
+    });
+
+    it("rate-limit backoff 中は fetch せず watermark も書かない (Refs #304)", async () => {
+      const { setRateLimitBackoff } = await import("../src/github-backoff");
+      const { GitHubApiError } = await import("../src/github-api");
+      await setRateLimitBackoff(env.CI_STATUS, new GitHubApiError(403, "rate limit"));
+      const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+      const result = await reconcileIssues(env, { mainOrgs: ["ippoan"], yhondaRepos: [] });
+      expect(result.fetched).toBe(false);
+      expect(fetchSpy).not.toHaveBeenCalled();
+      // watermark 未更新 → backoff 解除後の初リクエストで即 refresh できる
+      expect(await env.CI_STATUS.get(__testing.KEY_WATERMARK)).toBeNull();
+    });
+
+    it("fetch が 403 (rate limit) なら backoff marker を立てて throw (Refs #304)", async () => {
+      const { getRateLimitBackoff } = await import("../src/github-backoff");
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : (input as Request).url;
+        if (url.includes("auth-worker") || url.includes("/mcp/token")) {
+          return Response.json({ access_token: "tok" });
+        }
+        return new Response("API rate limit exceeded", { status: 403 });
+      });
+
+      await expect(
+        reconcileIssues(env, { mainOrgs: ["ippoan"], yhondaRepos: [] }),
+      ).rejects.toThrow();
+      expect(await getRateLimitBackoff(env.CI_STATUS)).not.toBeNull();
+    });
+
+    it("reconcile lock 中は fetch しない (SWR の重複排除、Refs #304)", async () => {
+      await env.CI_STATUS.put(__testing.RECONCILE_LOCK_KEY, "1", { expirationTtl: 60 });
+      const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+      const result = await reconcileIssues(env, { mainOrgs: ["ippoan"], yhondaRepos: [] });
+      expect(result.fetched).toBe(false);
+      expect(fetchSpy).not.toHaveBeenCalled();
     });
   });
 
