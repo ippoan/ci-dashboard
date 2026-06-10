@@ -15,6 +15,8 @@ import {
 const { orgListKey, itemsKey, ISSUES_PAGE_PROJECT_MAP_KEY } = __testing;
 
 async function clearCache(): Promise<void> {
+  // backoff marker (Refs #304) の leak は fetch を silent no-op にする。
+  await env.CI_STATUS.delete("github:rl-backoff");
   for (const prefix of ["project:", "issues-page:project-map"]) {
     let cursor: string | undefined;
     do {
@@ -97,6 +99,90 @@ describe("project-cache", () => {
       const graphqlCalls2 = spy.mock.calls.filter((c) =>
         String(c[0]).includes("/graphql")).length;
       expect(graphqlCalls2).toBe(graphqlCalls1);
+    });
+  });
+
+  // ───── stale fallback + rate-limit backoff (Refs #304) ─────
+  describe("stale fallback / backoff", () => {
+    const staleEnvelope = (data: unknown) =>
+      JSON.stringify({ storedAt: Date.now() - (__testing.TTL_SECONDS + 60) * 1000, data });
+    const boardA = [{
+      id: "PVT_1", number: 1, title: "Board A",
+      url: "https://github.com/orgs/ippoan/projects/1",
+      closed: false, shortDescription: null,
+    }];
+
+    function stubGraphQL403() {
+      return vi.spyOn(globalThis, "fetch").mockImplementation(async (req) => {
+        const url = typeof req === "string" ? req : (req as Request).url;
+        if (url.includes("auth-worker") || url.includes("/mcp/token")) {
+          return Response.json({ access_token: "tok" });
+        }
+        return new Response("API rate limit already exceeded for user ID 1", { status: 403 });
+      });
+    }
+
+    it("stale entry + fetch 403: 旧データを返し backoff marker を立てる", async () => {
+      await env.CI_STATUS.put(orgListKey("ippoan"), staleEnvelope(boardA));
+      stubGraphQL403();
+
+      const result = await getOrFetchOrgProjects(env, ["ippoan"]);
+      expect(result[0]!.projects[0]!.title).toBe("Board A");
+      expect(await env.CI_STATUS.get("github:rl-backoff")).not.toBeNull();
+    });
+
+    it("backoff 中 + stale entry: GraphQL を叩かず stale を返す", async () => {
+      const { setRateLimitBackoff } = await import("../src/github-backoff");
+      const { GitHubApiError } = await import("../src/github-api");
+      await setRateLimitBackoff(env.CI_STATUS, new GitHubApiError(403, "rate limit"));
+      await env.CI_STATUS.put(orgListKey("ippoan"), staleEnvelope(boardA));
+      const spy = vi.spyOn(globalThis, "fetch");
+
+      const result = await getOrFetchOrgProjects(env, ["ippoan"]);
+      expect(result[0]!.projects).toHaveLength(1);
+      expect(spy).not.toHaveBeenCalled();
+    });
+
+    it("backoff 中 + cache 無し: API 0 call で cooldown error を投げる", async () => {
+      const { setRateLimitBackoff } = await import("../src/github-backoff");
+      const { GitHubApiError } = await import("../src/github-api");
+      await setRateLimitBackoff(env.CI_STATUS, new GitHubApiError(403, "rate limit"));
+      const spy = vi.spyOn(globalThis, "fetch");
+
+      await expect(getOrFetchOrgProjects(env, ["ippoan"])).rejects.toThrow(/cooldown/);
+      expect(spy).not.toHaveBeenCalled();
+    });
+
+    it("旧形式 (素の配列) は stale 扱い → refetch して envelope に書き直す", async () => {
+      await env.CI_STATUS.put(orgListKey("ippoan"), JSON.stringify(boardA));
+      stubGraphQLOnce();
+
+      const result = await getOrFetchOrgProjects(env, ["ippoan"]);
+      expect(result[0]!.projects[0]!.title).toBe("Board A");
+      const stored = await env.CI_STATUS.get(orgListKey("ippoan"), "json") as { storedAt: number };
+      expect(stored.storedAt).toBeGreaterThan(0);
+    });
+
+    it("旧形式 + fetch 403: 旧データに fallback する (移行期互換)", async () => {
+      await env.CI_STATUS.put(orgListKey("ippoan"), JSON.stringify(boardA));
+      stubGraphQL403();
+
+      const result = await getOrFetchOrgProjects(env, ["ippoan"]);
+      expect(result[0]!.projects[0]!.title).toBe("Board A");
+    });
+
+    it("getOrFetchProjectIssueMap: stale fallback 時は result.stale = true", async () => {
+      await env.CI_STATUS.put(orgListKey("ippoan"), staleEnvelope(boardA));
+      await env.CI_STATUS.put(itemsKey("ippoan", 1), staleEnvelope([{
+        id: "PVTI_1",
+        content: { type: "issue", repo: "ippoan/x", number: 1, title: "t", url: "u", state: "OPEN" },
+        fields: {},
+      }]));
+      stubGraphQL403();
+
+      const result = await getOrFetchProjectIssueMap(env, ["ippoan"]);
+      expect(result.stale).toBe(true);
+      expect(result.map.get("ippoan/x#1")).toBeTruthy();
     });
   });
 
