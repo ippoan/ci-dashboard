@@ -1,6 +1,11 @@
 import type { OrgIssue, FetchOrgIssuesParams } from "./mcp/tools/issues";
 import { fetchOrgIssues } from "./mcp/tools/issues";
 import type { AuthClientWorkerEnv } from "@ippoan/auth-client-worker";
+import {
+  getRateLimitBackoff,
+  isRateLimitError,
+  setRateLimitBackoff,
+} from "./github-backoff";
 
 // KV schema:
 //   issue:<owner>/<name>#<number>  -> OrgIssue JSON   (open issues only;
@@ -20,16 +25,28 @@ const KEY_PREFIX = "issue:";
 
 // SSR 連続リロード時の thundering herd を吸収しつつ「stale すぎる」と
 // 感じさせない値。書き込みは webhook が数秒以内に届くので 60s 内の更新
-// ラグは webhook 側でほぼ埋まる。
-const FRESH_THRESHOLD_MS = 60 * 1000;
+// ラグは webhook 側でほぼ埋まる。issues-page のバナー (「裏で更新中」判定)
+// からも参照するため export (Refs #304)。
+export const FRESH_THRESHOLD_MS = 60 * 1000;
 
 // Watermark は `now - SAFETY_WINDOW_MS` でセット。full snapshot 方式では
 // delta query が無いので overlap の意味は無く、次 reconcile の fresh 判定を
 // 5s ぶん早く解除する保険として残す (= 連続アクセス時の取りこぼし余地を縮める)。
 const SAFETY_WINDOW_MS = 5 * 1000;
 
+// SWR 化 (Refs #304) で background reconcile が並走し得るため、fetch+write
+// 区間を soft lock で重複排除する。KV expirationTtl の最小値 60s に合わせる。
+// best-effort: cross-colo の重複は許容 (= 従来挙動の無駄撃ちに退化するだけ)。
+const RECONCILE_LOCK_KEY = "issues:reconciling";
+const RECONCILE_LOCK_TTL_SECONDS = 60;
+
 export function issueKey(repo: string, number: number): string {
   return `${KEY_PREFIX}${repo}#${number}`;
+}
+
+/** /issues バナー表示用: 最後に full snapshot が成功した時刻 (ISO 文字列)。 */
+export async function getIssuesWatermark(kv: KVNamespace): Promise<string | null> {
+  return kv.get(KEY_WATERMARK);
 }
 
 /** Webhook 経路から呼ぶ単一 issue 反映。open → put / closed → delete。
@@ -98,6 +115,23 @@ export async function reconcileIssues(
     return { patched: 0, fetched: false, removed: 0 };
   }
 
+  // Rate-limit backoff 中は GitHub を叩かない (Refs #304)。watermark を
+  // 書かないので、marker (TTL 300s) が切れた後の最初のリクエストで即
+  // refresh が走る = staleness は複利しない。
+  if (await getRateLimitBackoff(kv)) {
+    return { patched: 0, fetched: false, removed: 0 };
+  }
+
+  // Background reconcile の重複排除 (best-effort soft lock)。watermark は
+  // 成功時にしか進まないため、SWR で並んだ N リクエストが全部 fetch する
+  // のを防ぐ。
+  if (await kv.get(RECONCILE_LOCK_KEY)) {
+    return { patched: 0, fetched: false, removed: 0 };
+  }
+  await kv.put(RECONCILE_LOCK_KEY, "1", {
+    expirationTtl: RECONCILE_LOCK_TTL_SECONDS,
+  });
+
   // 2-query pattern: GitHub search は org: と repo: を混ぜると repo: 側を黙って
   // drop するので、yhonda-ohishi の特定 repo だけ別 query に分離する
   // (mcp/tools/issues.ts 参照)。両方とも state:open の full snapshot。
@@ -113,10 +147,17 @@ export async function reconcileIssues(
     query: params.yhondaRepos.map((r) => `repo:${r}`).join(" "),
   };
 
-  const [main, yhonda] = await Promise.all([
-    fetchOrgIssues(env, mainParams),
-    fetchOrgIssues(env, yhondaParams),
-  ]);
+  let main: Awaited<ReturnType<typeof fetchOrgIssues>>;
+  let yhonda: Awaited<ReturnType<typeof fetchOrgIssues>>;
+  try {
+    [main, yhonda] = await Promise.all([
+      fetchOrgIssues(env, mainParams),
+      fetchOrgIssues(env, yhondaParams),
+    ]);
+  } catch (err) {
+    if (isRateLimitError(err)) await setRateLimitBackoff(kv, err);
+    throw err;
+  }
 
   const fresh = [...main.items, ...yhonda.items];
   const freshKeys = new Set(fresh.map((i) => issueKey(i.repo, i.number)));
@@ -212,4 +253,5 @@ export const __testing = {
   KEY_PREFIX,
   FRESH_THRESHOLD_MS,
   SAFETY_WINDOW_MS,
+  RECONCILE_LOCK_KEY,
 };
