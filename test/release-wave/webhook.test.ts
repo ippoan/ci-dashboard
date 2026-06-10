@@ -1,11 +1,13 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   handleContractAppliedWebhook,
   handleFlipReportWebhook,
   handlePendingReleaseWebhook,
   handleTrafficReportWebhook,
   handleBackendTrafficReportWebhook,
+  handleBackendDeployReportWebhook,
 } from "../../src/release-wave/webhook";
+import { recordFrontendTest } from "../../src/release-wave/compat";
 import { getPendingRelease } from "../../src/release-wave/pending-release";
 import { getTraffic } from "../../src/release-wave/traffic";
 import { getBackendTraffic } from "../../src/release-wave/backend-traffic";
@@ -759,5 +761,126 @@ describe("handleBackendTrafficReportWebhook", () => {
       env,
     );
     expect(resp.status).toBe(401);
+  });
+});
+
+// ============================================================================
+// /webhooks/release-wave/backend-deploy-report — auto-retest fan-out
+//   (backend deploy 完了 → 新 image 未 test の consumer に retest 自動 dispatch)
+// ============================================================================
+
+// dispatchAll は GitHub repository_dispatch を打つ IO。workers test pool では
+// 相対モジュールの vi.mock が SUT の import を差し替えられないため、api.test.ts と
+// 同じく global fetch を stub し、CI_STATUS に fresh な gh-token を seed して
+// tokenForOrg を auth-worker 往復なしで通す。`/dispatches` 宛 fetch の有無で
+// fan-out を検証する。
+const FRESH_TOKEN = {
+  token: "ghs_retest_token",
+  expires_at_ms: Date.now() + 3600_000,
+};
+
+/** auto-retest 用 env: webhook secret + COMPAT_KV + token cache を備える。 */
+function deployEnv(compatKv: KVNamespace): Env {
+  return {
+    RELEASE_WAVE_HUB: { idFromName: () => ({}), get: () => ({}) },
+    RELEASE_WAVE_WEBHOOK_SECRET: { get: async () => "expected-secret" },
+    COMPAT_KV: compatKv,
+    CI_STATUS: memKv({ "auth-client-worker:gh-token": FRESH_TOKEN }),
+    INTERNAL_SHARED_SECRET: { get: async () => "secret" },
+  } as unknown as Env;
+}
+
+const BD_URL =
+  "https://ci-dashboard.ippoan.org/webhooks/release-wave/backend-deploy-report";
+
+function deployReq(body: unknown): Request {
+  return jsonRequest({ url: BD_URL, body, secret: "expected-secret" });
+}
+
+/** consumer (frontend) を 1 件 seed した COMPAT_KV を作る。 */
+async function compatKvWithConsumer(testedImage: string): Promise<KVNamespace> {
+  const kv = memKv();
+  await recordFrontendTest(kv, {
+    repo: "ippoan/auth-worker",
+    prod_version: "v0.5.32",
+    tested: { backend_repo: "ippoan/rust-alc-api", backend_image: testedImage },
+    now: "2026-06-10T00:00:00Z",
+  });
+  return kv;
+}
+
+describe("handleBackendDeployReportWebhook auto-retest", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("does not dispatch when the backend has no consumers", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const resp = await handleBackendDeployReportWebhook(
+      deployReq({
+        repo: "ippoan/rust-alc-api",
+        current_image: "img-new",
+        deployed_by: "release-wave-gcp",
+      }),
+      deployEnv(memKv()),
+    );
+    expect(resp.status).toBe(200);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("fans out wave-independent retest to consumers not on the new image", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    // consumer は rust-alc-api @ img-old を test 済み → 新 img-new は未 test (赤)。
+    const kv = await compatKvWithConsumer("img-old");
+
+    const resp = await handleBackendDeployReportWebhook(
+      deployReq({
+        repo: "ippoan/rust-alc-api",
+        current_image: "img-new",
+        deployed_by: "release-wave-gcp",
+      }),
+      deployEnv(kv),
+    );
+    expect(resp.status).toBe(200);
+
+    const dispatchCall = fetchSpy.mock.calls.find((c) =>
+      String(c[0]).includes("/repos/ippoan/auth-worker/dispatches"),
+    );
+    expect(dispatchCall).toBeDefined();
+    const body = JSON.parse(dispatchCall![1].body) as {
+      event_type: string;
+      client_payload: Record<string, unknown>;
+    };
+    expect(body.event_type).toBe("release-wave-retest");
+    expect(body.client_payload).toMatchObject({
+      backend_repo: "ippoan/rust-alc-api",
+      backend_image: "img-new",
+      prod_version: "v0.5.32",
+    });
+    // wave 非依存 = wave_id を載せない。
+    expect(body.client_payload).not.toHaveProperty("wave_id");
+  });
+
+  it("skips consumers that already tested the new image (idempotent re-report)", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    // consumer は既に img-new を test 済み → 緑なので dispatch されない。
+    const kv = await compatKvWithConsumer("img-new");
+
+    const resp = await handleBackendDeployReportWebhook(
+      deployReq({
+        repo: "ippoan/rust-alc-api",
+        current_image: "img-new",
+        deployed_by: "release-wave-gcp",
+      }),
+      deployEnv(kv),
+    );
+    expect(resp.status).toBe(200);
+    const dispatchCall = fetchSpy.mock.calls.find((c) =>
+      String(c[0]).includes("/dispatches"),
+    );
+    expect(dispatchCall).toBeUndefined();
   });
 });

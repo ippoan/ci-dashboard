@@ -18,7 +18,7 @@
 import type { Env } from "../index";
 import { githubApi, parseRepo, tokenForOrg } from "../github-api";
 import type { WaveState } from "./types";
-import type { WaveCompatibility } from "./compat";
+import type { WaveCompatibility, CompatibilityResult } from "./compat";
 
 // ----------------------------------------------------------------------------
 // Types
@@ -147,6 +147,45 @@ export function decideRetestDispatches(
         },
       });
     }
+  }
+  return out;
+}
+
+// ----------------------------------------------------------------------------
+// Pure: decideBackendDeployRetestDispatches (auto-retest on backend deploy)
+// ----------------------------------------------------------------------------
+
+/**
+ * backend deploy 完了 (`backend-deploy-report` webhook) を起点に、新 image を
+ * 未 test の consumer (frontend) へ `release-wave-retest` を自動 fan-out する
+ * dispatch を作る。`/release-wave` の手動 "Re-test" ボタンと等価だが、operator
+ * 操作を待たず deploy 報告で自動化する (Refs #157)。
+ *
+ * `decideRetestDispatches` の wave 非依存版。compatibility matrix の赤
+ * (`tested_against_target === false` = 新 image を未検証の consumer) だけを
+ * 対象にする。これにより同一 image の再報告 (idempotent deploy / 重複 webhook)
+ * では既に緑の consumer に再 dispatch しない (= idempotency)。
+ *
+ * client_payload は `retest-consumer` endpoint と同 shape。consumer 側の
+ * retest 受け (frontend-ci の `compat_backend_image` 経路) は `wave_id` を
+ * 参照しないため、wave 非依存でも動く。
+ */
+export function decideBackendDeployRetestDispatches(
+  compat: CompatibilityResult,
+): Dispatch[] {
+  const out: Dispatch[] = [];
+  for (const m of compat.matrix) {
+    if (m.tested_against_target) continue; // 新 image を test 済みは skip
+    out.push({
+      repo: m.frontend,
+      event_type: "release-wave-retest",
+      client_payload: {
+        // wave 非依存 (= 単独 deploy 起点)。wave_id は載せない。
+        backend_repo: compat.backend_repo,
+        backend_image: compat.backend_target_image,
+        ...(m.prod_version ? { prod_version: m.prod_version } : {}),
+      },
+    });
   }
   return out;
 }
