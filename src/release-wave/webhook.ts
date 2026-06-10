@@ -20,9 +20,15 @@ import { z } from "zod";
 import type { Env } from "../index";
 import type { ReleaseWaveHub, RpcResult } from "./do";
 import type { WaveState } from "./types";
-import { recordFrontendTest, recordBackendDeploy, getBackendCurrent } from "./compat";
+import {
+  recordFrontendTest,
+  recordBackendDeploy,
+  getBackendCurrent,
+  computeCompatibility,
+} from "./compat";
 import { recordPendingRelease } from "./pending-release";
 import { recordTraffic } from "./traffic";
+import { dispatchAll, decideBackendDeployRetestDispatches } from "./dispatch";
 import {
   recordBackendTraffic,
   type BackendServiceTraffic,
@@ -285,6 +291,23 @@ export async function handleBackendDeployReportWebhook(
     wave_id: v.data.wave_id ?? null,
     now: new Date().toISOString(),
   });
+
+  // 新 image が prod に出たので、その image を未 test の consumer (frontend) に
+  // integration retest を自動 fan-out する (Refs #157)。手動 "Re-test" ボタンと
+  // 等価だが deploy 報告を起点に自動化する。best-effort: dispatch 失敗
+  // (token 取得失敗 / GitHub non-2xx 等) は dispatchAll が per-repo に握り潰し、
+  // report の 200 応答は止めない。COMPAT_KV は validateAndAuth より前段の
+  // recordBackendDeploy が触れている = この時点で bound 確定。
+  const compat = await computeCompatibility(
+    env.COMPAT_KV,
+    v.data.repo,
+    v.data.current_image,
+  );
+  const dispatches = decideBackendDeployRetestDispatches(compat);
+  if (dispatches.length > 0) {
+    await dispatchAll(env, dispatches);
+  }
+
   return jsonResponse(200, { ok: true, record });
 }
 

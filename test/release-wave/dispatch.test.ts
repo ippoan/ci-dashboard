@@ -2,12 +2,14 @@ import { describe, it, expect } from "vitest";
 import {
   decideDispatches,
   decideRetestDispatches,
+  decideBackendDeployRetestDispatches,
 } from "../../src/release-wave/dispatch";
 import { createWave, transition } from "../../src/release-wave/state";
 import type { WaveState } from "../../src/release-wave/types";
 import type {
   WaveCompatibility,
   CompatMatrixEntry,
+  CompatibilityResult,
 } from "../../src/release-wave/compat";
 
 const T0 = "2026-05-28T00:00:00Z";
@@ -342,5 +344,73 @@ describe("decideRetestDispatches", () => {
       "ippoan/rust-alc-api",
       "ippoan/cc-relay",
     ]);
+  });
+});
+
+// ============================================================================
+// decideBackendDeployRetestDispatches (auto-retest on backend deploy, Refs #157)
+// ============================================================================
+
+function compatResult(over: Partial<CompatibilityResult> = {}): CompatibilityResult {
+  return {
+    backend_repo: "ippoan/rust-alc-api",
+    backend_target_image: "img-new",
+    verified: false,
+    matrix: [],
+    ...over,
+  };
+}
+
+describe("decideBackendDeployRetestDispatches", () => {
+  it("returns empty when the backend has no consumers", () => {
+    expect(decideBackendDeployRetestDispatches(compatResult())).toEqual([]);
+  });
+
+  it("returns empty when every consumer already tested the new image", () => {
+    const c = compatResult({
+      matrix: [
+        entry({ frontend: "ippoan/alc-app", tested_against_target: true }),
+        entry({ frontend: "ippoan/auth-worker", tested_against_target: true }),
+      ],
+    });
+    expect(decideBackendDeployRetestDispatches(c)).toEqual([]);
+  });
+
+  it("fans out wave-independent retest to each consumer not yet on the new image", () => {
+    const c = compatResult({
+      backend_target_image: "img-new",
+      matrix: [
+        entry({ frontend: "ippoan/alc-app", prod_version: "v1.2.10" }),
+        entry({ frontend: "ippoan/auth-worker", tested_against_target: true }),
+        entry({ frontend: "ippoan/nuxt-items", prod_version: "v3" }),
+      ],
+    });
+    const ds = decideBackendDeployRetestDispatches(c);
+    expect(ds.map((d) => d.repo)).toEqual([
+      "ippoan/alc-app",
+      "ippoan/nuxt-items",
+    ]);
+    expect(ds[0]).toEqual({
+      repo: "ippoan/alc-app",
+      event_type: "release-wave-retest",
+      client_payload: {
+        backend_repo: "ippoan/rust-alc-api",
+        backend_image: "img-new",
+        prod_version: "v1.2.10",
+      },
+    });
+    // wave 非依存 = client_payload に wave_id を載せない。
+    for (const d of ds) {
+      expect(d.client_payload).not.toHaveProperty("wave_id");
+    }
+  });
+
+  it("omits prod_version from the payload when the consumer has none", () => {
+    const c = compatResult({
+      matrix: [entry({ frontend: "ippoan/alc-app", prod_version: null })],
+    });
+    const ds = decideBackendDeployRetestDispatches(c);
+    expect(ds).toHaveLength(1);
+    expect(ds[0]!.client_payload).not.toHaveProperty("prod_version");
   });
 });
