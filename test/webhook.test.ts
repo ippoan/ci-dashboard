@@ -1274,3 +1274,66 @@ describe("consumeWebhookBatch — event-first (Refs #335)", () => {
     expect(updates.length).toBeLessThanOrEqual(1);
   });
 });
+
+// ───── refresh bail 時の self-reschedule (Refs #337) ─────
+describe("consumeWebhookBatch — refresh self-reschedule (Refs #337)", () => {
+  beforeEach(async () => {
+    resetHubCalls();
+    await env.CI_STATUS.delete("releases:index:v1");
+    await env.CI_STATUS.delete("releases:index:refreshing");
+    await env.CI_STATUS.delete("releases:index:rekick-scheduled");
+    await env.CI_STATUS.delete("github:rl-backoff");
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  function refreshBatch(acked: string[]) {
+    return {
+      messages: [{
+        body: { kind: "releases-index-refresh" },
+        attempts: 1,
+        ack: () => acked.push("r"),
+        retry: () => { throw new Error("should not retry"); },
+      }],
+    } as unknown as MessageBatch<import("../src/webhook").QueueMessage>;
+  }
+
+  it("lock bail 時は 60s 遅延の refresh job を再投函してから ack する", async () => {
+    // deploy に殺された compute の残 lock を再現
+    await env.CI_STATUS.put("releases:index:refreshing", "1", { expirationTtl: 60 });
+    await env.CI_STATUS.put("releases:index:v1", JSON.stringify({ storedAt: 0, views: [] }));
+
+    const sent: Array<{ msg: unknown; opts: unknown }> = [];
+    const queueEnv = {
+      ...testEnv(),
+      WEBHOOK_QUEUE: { send: async (msg: unknown, opts: unknown) => { sent.push({ msg, opts }); } },
+    } as unknown as Env;
+    const acked: string[] = [];
+
+    await consumeWebhookBatch(refreshBatch(acked), queueEnv);
+
+    expect(acked).toEqual(["r"]);
+    expect(sent).toHaveLength(1);
+    expect(sent[0].msg).toEqual({ kind: "releases-index-refresh" });
+    expect(sent[0].opts).toEqual({ delaySeconds: 60 });
+    // 重複防止 marker が立つ → 2 通目の bail では再投函しない
+    const acked2: string[] = [];
+    await consumeWebhookBatch(refreshBatch(acked2), queueEnv);
+    expect(acked2).toEqual(["r"]);
+    expect(sent).toHaveLength(1);
+  });
+
+  it("fresh 時は再投函しない (停止条件)", async () => {
+    await env.CI_STATUS.put("releases:index:v1", JSON.stringify({ storedAt: Date.now(), views: [] }));
+    const sent: unknown[] = [];
+    const queueEnv = {
+      ...testEnv(),
+      WEBHOOK_QUEUE: { send: async (msg: unknown) => { sent.push(msg); } },
+    } as unknown as Env;
+    const acked: string[] = [];
+
+    await consumeWebhookBatch(refreshBatch(acked), queueEnv);
+
+    expect(acked).toEqual(["r"]);
+    expect(sent).toHaveLength(0);
+  });
+});

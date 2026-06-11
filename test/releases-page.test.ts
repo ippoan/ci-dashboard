@@ -1370,11 +1370,11 @@ describe("refreshReleasesIndex guards (Refs #329)", () => {
     await env.CI_STATUS.put("releases:index:v1", seeded);
     const fetchSpy = vi.spyOn(globalThis, "fetch");
 
-    const refreshed = await refreshReleasesIndex(testEnv());
+    const outcome = await refreshReleasesIndex(testEnv());
 
-    expect(refreshed).toBe(false);
+    expect(outcome).toBe("backoff");
     expect(fetchSpy).not.toHaveBeenCalled();
-    // blob は stale のまま温存 (cooldown 明けの kick で追い付く)
+    // blob は stale のまま温存 (cooldown 明けの reschedule で追い付く)
     expect(await env.CI_STATUS.get("releases:index:v1")).toBe(seeded);
   });
 
@@ -1387,9 +1387,34 @@ describe("refreshReleasesIndex guards (Refs #329)", () => {
     await env.CI_STATUS.put("releases:index:v1", seeded);
 
     // watched に repo を入れて compute が空に潰れる状況を作る
-    const refreshed = await refreshReleasesIndex(testEnv({ watched: ["ippoan/x"] }));
+    const outcome = await refreshReleasesIndex(testEnv({ watched: ["ippoan/x"] }));
 
-    expect(refreshed).toBe(false);
+    expect(outcome).toBe("empty-skip");
+    expect(await env.CI_STATUS.get("releases:index:v1")).toBe(seeded);
+    // lock は finally で解放される (Refs #337 — TTL 残存が liveness 穴だった)
+    expect(await env.CI_STATUS.get("releases:index:refreshing")).toBeNull();
+  });
+
+  it("done の後も lock は即解放される (Refs #337)", async () => {
+    const { refreshReleasesIndex } = await import("../src/releases-page");
+    // watched 空 → views [] / recheck 無し → 正常 write の "done" 経路
+    const outcome = await refreshReleasesIndex(testEnv());
+    expect(outcome).toBe("done");
+    expect(await env.CI_STATUS.get("releases:index:v1")).not.toBeNull();
+    expect(await env.CI_STATUS.get("releases:index:refreshing")).toBeNull();
+  });
+
+  it("lock 残存中は 'lock' を返し blob に触らない", async () => {
+    const { refreshReleasesIndex } = await import("../src/releases-page");
+    await env.CI_STATUS.put("releases:index:refreshing", "1", { expirationTtl: 60 });
+    const seeded = JSON.stringify({ storedAt: 0, views: [] });
+    await env.CI_STATUS.put("releases:index:v1", seeded);
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+    const outcome = await refreshReleasesIndex(testEnv());
+
+    expect(outcome).toBe("lock");
+    expect(fetchSpy).not.toHaveBeenCalled();
     expect(await env.CI_STATUS.get("releases:index:v1")).toBe(seeded);
   });
 });
