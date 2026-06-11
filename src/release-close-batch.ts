@@ -2,6 +2,7 @@ import { githubApi, parseRepo, tokenForOrg } from "./github-api";
 import { formatCloseFailureReason } from "./release-close";
 import type { AuthClientWorkerEnv } from "@ippoan/auth-client-worker";
 import { invalidateIssue } from "./release-cache";
+import { markReleasesIndexStale } from "./releases-index-cache";
 
 // POST /api/release-close-batch
 //
@@ -144,6 +145,9 @@ export async function handleReleaseCloseBatch(
         }
       }),
     );
+    // /releases index blob も stale 化 (Refs #325)。redirect 先の表示自体は
+    // flash 整合 (closed= の row を closed 扱いに変換) が担保する。
+    if (closedByRepo.size > 0) await markReleasesIndexStale(env.CI_STATUS);
   }
 
   // Kick Hub to recompute alert state for each repo that had a successful close.

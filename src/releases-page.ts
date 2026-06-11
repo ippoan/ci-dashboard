@@ -25,6 +25,13 @@ import {
 } from "./release-cache";
 import { loadDirectPushAllowlist } from "./direct-push-allowlist";
 import { parseTaglessRepos } from "./tagless-repos";
+import {
+  readReleasesIndexBlob,
+  writeReleasesIndexBlob,
+  RELEASES_INDEX_FRESH_SECONDS,
+  RELEASES_INDEX_REFRESH_LOCK,
+  RELEASES_INDEX_REFRESH_LOCK_TTL,
+} from "./releases-index-cache";
 import { renderTabs, TAB_STYLES } from "./nav-tabs";
 import { PWA_HEAD_TAGS, PWA_REGISTER_SCRIPT } from "./pwa";
 
@@ -44,12 +51,8 @@ import { PWA_HEAD_TAGS, PWA_REGISTER_SCRIPT } from "./pwa";
 
 export async function handleReleasesPage(
   req: Request,
-  env: {
-    INTERNAL_SHARED_SECRET: SecretsStoreSecret;
-    CI_HUB: DurableObjectNamespace;
-    CI_STATUS: KVNamespace;
-    TAGLESS_REPOS?: string;
-  },
+  env: ReleasesIndexEnv,
+  ctx?: ExecutionContext,
 ): Promise<Response> {
   const url = new URL(req.url);
   const repoParam = url.searchParams.get("repo");
@@ -90,7 +93,7 @@ export async function handleReleasesPage(
 
   // Index page; `repoParam` (when set without tag, e.g. from the batch-close
   // redirect) tags along so flash links can point at the right GitHub repo.
-  return await handleIndexPage(env, closedFlash, failedFlash, failedReasons, repoParam, hasFlash);
+  return await handleIndexPage(env, closedFlash, failedFlash, failedReasons, repoParam, hasFlash, ctx);
 }
 
 // Cache-Control policy:
@@ -136,19 +139,110 @@ interface TagBlock {
 // Older tags collapse to a link strip pointing at the detail page.
 const TOP_TAGS_INLINE = 5;
 
+// /releases index 用の env 形 (Refs #325 で WEBHOOK_QUEUE を追加 —
+// 背景 refresh を queue consumer に流すための optional binding)。
+interface ReleasesIndexEnv {
+  INTERNAL_SHARED_SECRET: SecretsStoreSecret;
+  CI_HUB: DurableObjectNamespace;
+  CI_STATUS: KVNamespace;
+  TAGLESS_REPOS?: string;
+  WEBHOOK_QUEUE?: Queue<{ kind: "releases-index-refresh" }>;
+}
+
 async function handleIndexPage(
-  env: {
-    INTERNAL_SHARED_SECRET: SecretsStoreSecret;
-    CI_HUB: DurableObjectNamespace;
-    CI_STATUS: KVNamespace;
-    TAGLESS_REPOS?: string;
-  },
+  env: ReleasesIndexEnv,
   closedFlash: number[],
   failedFlash: number[],
   failedReasons: Map<number, string>,
   flashRepo: string | null,
   hasFlash: boolean,
+  ctx?: ExecutionContext,
 ): Promise<Response> {
+  // SWR (Refs #325): 生成済み views の blob を即 render する。index の同期
+  // 生成は監視 repo (~30) の GitHub fan-out で実測 平均 16s / p90 35s かかる
+  // ため、stale は背景 refresh (queue consumer 経由 — waitUntil の 30s 上限
+  // では fan-out が切られ得る)、cold start (blob 無し = deploy 直後のみ) だけ
+  // 従来どおり同期生成する。
+  const kv = env.CI_STATUS;
+  const blob = await readReleasesIndexBlob<RepoView[]>(kv);
+  let views: RepoView[];
+  let refreshing = false;
+  if (blob) {
+    views = blob.views;
+    const fresh = Date.now() - blob.storedAt < RELEASES_INDEX_FRESH_SECONDS * 1000;
+    if (!fresh) {
+      refreshing = true;
+      await kickReleasesIndexRefresh(env, ctx);
+    }
+  } else {
+    views = await computeIndexViews(env);
+    await writeReleasesIndexBlob(kv, views);
+  }
+
+  // Flash 整合 (Refs #325): close 直後の redirect は blob がまだ古い可能性が
+  // あるので、closed= の issue を view 上 closed 扱いに変換して表示を一致させる
+  // (renderTagBlock の visible filter が拾って closed-details 側に落ちる)。
+  if (flashRepo && closedFlash.length > 0) {
+    for (const v of views) {
+      if (v.repo !== flashRepo) continue;
+      for (const b of v.tagBlocks) {
+        for (const r of b.issues) {
+          if (closedFlash.includes(r.number)) r.state = "closed";
+        }
+      }
+    }
+  }
+
+  return html(
+    renderIndex(views, closedFlash, failedFlash, failedReasons, flashRepo, refreshing),
+    200,
+    cacheControlFor(hasFlash, /* detail */ false),
+  );
+}
+
+/** 背景 refresh を投げる。queue binding があれば consumer (15 分上限) へ、
+ *  無い環境 (wrangler dev / test) は waitUntil fallback。lock は
+ *  refreshReleasesIndex 側で取るので二重投函しても無駄撃ちで済む。 */
+async function kickReleasesIndexRefresh(
+  env: ReleasesIndexEnv,
+  ctx?: ExecutionContext,
+): Promise<void> {
+  if (env.WEBHOOK_QUEUE) {
+    try {
+      await env.WEBHOOK_QUEUE.send({ kind: "releases-index-refresh" });
+      return;
+    } catch (err) {
+      console.log(JSON.stringify({
+        msg: "releases-index-enqueue-failed",
+        error: err instanceof Error ? err.message : String(err),
+      }));
+    }
+  }
+  const p = refreshReleasesIndex(env).catch((err) => {
+    console.log(JSON.stringify({
+      msg: "releases-index-bg-refresh-failed",
+      error: err instanceof Error ? err.message : String(err),
+    }));
+  });
+  if (ctx) ctx.waitUntil(p);
+  else void p;
+}
+
+/** index views を取り直して blob に書く (背景実行前提、queue consumer から
+ *  も呼ばれる)。lock / fresh 再確認で重複 fan-out を排除。 */
+export async function refreshReleasesIndex(env: ReleasesIndexEnv): Promise<void> {
+  const kv = env.CI_STATUS;
+  if (await kv.get(RELEASES_INDEX_REFRESH_LOCK)) return;
+  await kv.put(RELEASES_INDEX_REFRESH_LOCK, "1", {
+    expirationTtl: RELEASES_INDEX_REFRESH_LOCK_TTL,
+  });
+  const recheck = await readReleasesIndexBlob<RepoView[]>(kv);
+  if (recheck && Date.now() - recheck.storedAt < RELEASES_INDEX_FRESH_SECONDS * 1000) return;
+  const views = await computeIndexViews(env);
+  await writeReleasesIndexBlob(kv, views);
+}
+
+async function computeIndexViews(env: ReleasesIndexEnv): Promise<RepoView[]> {
   // 1. Watched repos come from three sources:
   //   (a) Hub status cache — every repo that has ever fired a CI run.
   //   (b) Direct-push-OK allowlist — repos that never auto-merge a PR and
@@ -194,17 +288,7 @@ async function handleIndexPage(
     }
   }));
 
-  return html(
-    renderIndex(
-      views.filter((v): v is RepoView => v !== null),
-      closedFlash,
-      failedFlash,
-      failedReasons,
-      flashRepo,
-    ),
-    200,
-    cacheControlFor(hasFlash, /* detail */ false),
-  );
+  return views.filter((v): v is RepoView => v !== null);
 }
 
 async function loadRepoView(
@@ -906,6 +990,7 @@ function renderIndex(
   failedFlash: number[],
   failedReasons: Map<number, string>,
   flashRepo: string | null,
+  refreshing = false,
 ): string {
   // Show every watched repo as a card — including ones with no referenced
   // issues yet or whose refs are all closed. The operator asked for the full
@@ -921,6 +1006,11 @@ function renderIndex(
   // lands the operator on the list with confirmation of what got closed.
   const flash = renderFlash(closedFlash, failedFlash, failedReasons, flashRepo);
 
+  // SWR で stale blob を即返しした時の控えめな注記 (Refs #325)。
+  const refreshingNote = refreshing
+    ? `<div class="refreshing-note">🔄 background で集計を更新中 — 表示は直近の cache です</div>`
+    : "";
+
   return `<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -932,6 +1022,7 @@ function renderIndex(
   <div class="summary">Tick the issues that this release actually closed; one button per repo closes them all.</div>
 </header>
 ${flash}
+${refreshingNote}
 ${body}
 <h2 class="lookup-header">Look up another release</h2>
 ${renderLookupForm(null, null)}
@@ -1206,6 +1297,10 @@ const STYLES = `
   }
   .repo-card-compact .repo-link:hover { color: #58a6ff; }
   .repo-card-compact .closed-summary { font-size: 12px; color: #8b949e; }
+  .refreshing-note {
+    background: #1c2433; border: 1px solid #1f6feb88; color: #a5d6ff;
+    border-radius: 6px; padding: 8px 14px; font-size: 12px; margin-bottom: 12px;
+  }
   .mode-badge {
     display: inline-block; font-size: 11px; font-weight: 400;
     padding: 1px 8px; border-radius: 10px; margin-left: 8px;

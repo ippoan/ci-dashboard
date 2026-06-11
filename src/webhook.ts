@@ -20,6 +20,8 @@ import {
   invalidateRepoCompare,
 } from "./release-cache";
 import { applyPullRequestEvent } from "./pr-map-cache";
+import { markReleasesIndexStale } from "./releases-index-cache";
+import { refreshReleasesIndex } from "./releases-page";
 
 // Queue 経由で consumer に渡す raw event (Refs #318)。body は署名検証済みの
 // raw JSON 文字列をそのまま積む (consumer 側で event 別に parse する)。
@@ -28,6 +30,15 @@ export interface WebhookQueueMessage {
   body: string;
   delivery: string;
 }
+
+/** 同じ queue に流す内部 job (Refs #325)。/releases index の再集計は GitHub
+ *  fan-out で 35s かかり得るため、waitUntil (30s 上限) ではなく consumer
+ *  (15 分上限) で実行する。 */
+export interface ReleasesIndexRefreshMessage {
+  kind: "releases-index-refresh";
+}
+
+export type QueueMessage = WebhookQueueMessage | ReleasesIndexRefreshMessage;
 
 interface ReleaseWebhookPayload {
   action: string;
@@ -239,12 +250,27 @@ export async function handleWebhook(
 // event の相対順序を概ね保つ (GitHub の配信自体に厳密順序は無い)。失敗 message
 // は retry() で Queues の再配送に任せる (max_retries 超過で drop + log 済み)。
 export async function consumeWebhookBatch(
-  batch: MessageBatch<WebhookQueueMessage>,
+  batch: MessageBatch<QueueMessage>,
   env: Env,
 ): Promise<void> {
   const hub = env.CI_HUB.get(env.CI_HUB.idFromName("singleton"));
   for (const message of batch.messages) {
-    const { event, body, delivery } = message.body;
+    // 内部 job (Refs #325): /releases index の再集計。webhook event ではない。
+    if ("kind" in message.body && message.body.kind === "releases-index-refresh") {
+      try {
+        await refreshReleasesIndex(env);
+        message.ack();
+      } catch (err) {
+        console.log(JSON.stringify({
+          msg: "releases-index-refresh-failed",
+          attempts: message.attempts,
+          error: err instanceof Error ? err.message : String(err),
+        }));
+        message.retry();
+      }
+      continue;
+    }
+    const { event, body, delivery } = message.body as WebhookQueueMessage;
     try {
       await processWebhookEvent(event, body, env, hub);
       message.ack();
@@ -344,6 +370,9 @@ async function processWebhookEvent(
         await invalidateRepoCompare(env.CI_STATUS, owner, name);
         await invalidateRepoCommits(env.CI_STATUS, owner, name);
       }
+      // merge は Unreleased zone / synthetic block の中身を変える → /releases
+      // index blob を stale 化 (Refs #325)。
+      await markReleasesIndexStale(env.CI_STATUS);
       if (parseTaglessRepos(env.TAGLESS_REPOS).has(repo)) {
         await hub.fetch(new Request("http://hub/release-alert-detect-pr", {
           method: "POST",
@@ -374,6 +403,9 @@ async function processWebhookEvent(
     if (owner && name) {
       await invalidateReleaseCacheIssue(env.CI_STATUS, owner, name, payload.issue.number);
     }
+    // /releases index は issue の open/close で close 候補の表示が変わる。
+    // blob を stale 化して次 load で背景 refresh させる (Refs #325)。
+    await markReleasesIndexStale(env.CI_STATUS);
     // /issues page の live reload trigger (Refs #321)。KV upsert 完了後に
     // broadcast するので、reload 時の SSR read は必ず更新後の KV を見る。
     // 通知失敗は page 側の問題に留まる (次の手動 reload で追い付く) ため
@@ -443,12 +475,15 @@ async function processWebhookEvent(
       if (owner && name) {
         if (ref.startsWith("refs/tags/")) {
           await invalidateRepoTags(env.CI_STATUS, owner, name);
+          // 新 tag は index の tag blocks を変える (Refs #325)。
+          await markReleasesIndexStale(env.CI_STATUS);
         } else if (defaultBranch && ref === `refs/heads/${defaultBranch}`) {
           await invalidateRepoCommits(env.CI_STATUS, owner, name);
           // "Unreleased" ゾーンの `<tag>...<defaultBranch>` compare も flush。
           // squash merge は default branch への push として届くので、これで
           // merge 単位の即時反映になる (60s TTL を待たない)。Refs #231。
           await invalidateRepoCompare(env.CI_STATUS, owner, name);
+          await markReleasesIndexStale(env.CI_STATUS);
         }
       }
     }
