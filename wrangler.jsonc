@@ -173,13 +173,15 @@
         "consumers": [
           {
             "queue": "ci-dashboard-webhooks",
-            // 順序を概ね保ちつつ burst を平滑化する設定: 直列 1 consumer、
-            // 小 batch、最大 5 回 retry (超過は drop — webhook-process-failed
-            // log に attempts 付きで残る)。
+            // 重い index 再集計 (12〜35s) を含む batch が webhook event の
+            // batch を塞がないよう並走を許可する (Refs #335)。順序の緩みは
+            // 許容 — GitHub の配信自体に順序保証は無く、handler は
+            // last-write-wins の upsert / invalidation で冪等。retry 最大 5 回
+            // (超過は drop — webhook-process-failed log に attempts 付き)。
             "max_batch_size": 10,
             "max_batch_timeout": 1,
             "max_retries": 5,
-            "max_concurrency": 1
+            "max_concurrency": 3
           }
         ]
       },

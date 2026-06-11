@@ -1222,3 +1222,55 @@ describe("releases index blob (Refs #325)", () => {
     expect(await env.CI_STATUS.get("releases:index:v1")).not.toBeNull();
   });
 });
+
+// ───── event-first batch (Refs #335) ─────
+describe("consumeWebhookBatch — event-first (Refs #335)", () => {
+  beforeEach(async () => {
+    resetHubCalls();
+    await env.CI_STATUS.delete("releases:index:v1");
+    await env.CI_STATUS.delete("releases:index:refreshing");
+    await env.CI_STATUS.delete("issue:ippoan/foo#88");
+    await env.CI_STATUS.delete("github:rl-backoff");
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it("refresh job が同 batch にあっても event は処理され、重複 refresh は 1 回にまとまる", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      new Response("not stubbed", { status: 500 }));
+    const issueBody = JSON.stringify({
+      action: "opened",
+      issue: {
+        number: 88, title: "batched", state: "open", user: { login: "y" },
+        labels: [], assignees: [], comments: 0,
+        created_at: "2026-06-11T00:00:00Z", updated_at: "2026-06-11T00:00:00Z",
+        html_url: "https://github.com/ippoan/foo/issues/88",
+      },
+      repository: { full_name: "ippoan/foo" },
+    });
+    const acked: string[] = [];
+    const make = (id: string, body: unknown) => ({
+      body, attempts: 1,
+      ack: () => acked.push(id),
+      retry: () => { throw new Error("should not retry: " + id); },
+    });
+    const batch = {
+      messages: [
+        make("r1", { kind: "releases-index-refresh" }),
+        make("ev", { event: "issues", body: issueBody, delivery: "d1" }),
+        make("r2", { kind: "releases-index-refresh" }),
+      ],
+    } as unknown as MessageBatch<import("../src/webhook").QueueMessage>;
+
+    await consumeWebhookBatch(batch, testEnv());
+
+    // event は refresh より先に処理される (ack 順で検証)
+    expect(acked[0]).toBe("ev");
+    expect(acked.sort()).toEqual(["ev", "r1", "r2"]);
+    // event の効果 (KV upsert)
+    const stored = await env.CI_STATUS.get("issue:ippoan/foo#88", "json") as { number: number } | null;
+    expect(stored?.number).toBe(88);
+    // refresh は 1 回だけ (= /releases-updated broadcast も最大 1 回)
+    const updates = hubCalls.filter((c) => c.path === "/releases-updated");
+    expect(updates.length).toBeLessThanOrEqual(1);
+  });
+});

@@ -1393,3 +1393,26 @@ describe("refreshReleasesIndex guards (Refs #329)", () => {
     expect(await env.CI_STATUS.get("releases:index:v1")).toBe(seeded);
   });
 });
+
+// ───── GitHub 認証失効 note (Refs #334) ─────
+describe("GET /releases — auth-broken note (Refs #334)", () => {
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await clearReleaseCache(env.CI_STATUS);
+    await env.CI_STATUS.delete("releases:index:v1");
+    await env.CI_STATUS.delete("releases:index:refreshing");
+    await env.CI_STATUS.delete("github:auth-broken");
+  });
+
+  it("marker があれば再ログイン note を出す", async () => {
+    await env.CI_STATUS.put("releases:index:v1", JSON.stringify({ storedAt: Date.now(), views: [] }));
+    await env.CI_STATUS.put("github:auth-broken", JSON.stringify({ at: Date.now(), message: "invalid_grant" }));
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(new Request("http://localhost/releases"), testEnv(), ctx);
+    await waitOnExecutionContext(ctx);
+
+    const html = await res.text();
+    expect(html).toContain("GitHub 認証が失効しています");
+    expect(html).toContain("/oauth/login?return_to=/releases");
+  });
+});

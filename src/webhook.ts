@@ -21,6 +21,7 @@ import {
 } from "./release-cache";
 import { applyPullRequestEvent } from "./pr-map-cache";
 import { markReleasesIndexStale } from "./releases-index-cache";
+import { noteGitHubAuthBroken } from "./github-backoff";
 import { refreshReleasesIndex } from "./releases-page";
 
 // Queue 経由で consumer に渡す raw event (Refs #318)。body は署名検証済みの
@@ -268,30 +269,22 @@ export async function consumeWebhookBatch(
   env: Env,
 ): Promise<void> {
   const hub = env.CI_HUB.get(env.CI_HUB.idFromName("singleton"));
+
+  // Event-first (Refs #335): 重い index 再集計 (12〜35s の GitHub fan-out) が
+  // 同 batch の webhook event (即時 KV write) を塞がないよう、event を先に
+  // 全部処理してから refresh job を最後に 1 回だけ実行する。同 batch に
+  // refresh message が複数あってもまとめて 1 回 (残りはまとめて ack)。
+  const eventMessages: Message<QueueMessage>[] = [];
+  const refreshMessages: Message<QueueMessage>[] = [];
   for (const message of batch.messages) {
-    // 内部 job (Refs #325): /releases index の再集計。webhook event ではない。
     if ("kind" in message.body && message.body.kind === "releases-index-refresh") {
-      try {
-        const refreshed = await refreshReleasesIndex(env);
-        // 集計が実際に走った時だけ /releases の WS reload を発火する (Refs #327)。
-        // lock / fresh recheck で bail した no-op では reload させない。
-        if (refreshed) {
-          await hub.fetch(new Request("http://hub/releases-updated", {
-            method: "POST",
-            body: JSON.stringify({ repo: "*" }),
-          }));
-        }
-        message.ack();
-      } catch (err) {
-        console.log(JSON.stringify({
-          msg: "releases-index-refresh-failed",
-          attempts: message.attempts,
-          error: err instanceof Error ? err.message : String(err),
-        }));
-        message.retry();
-      }
-      continue;
+      refreshMessages.push(message);
+    } else {
+      eventMessages.push(message);
     }
+  }
+
+  for (const message of eventMessages) {
     const { event, body, delivery } = message.body as WebhookQueueMessage;
     try {
       await processWebhookEvent(event, body, env, hub);
@@ -306,6 +299,29 @@ export async function consumeWebhookBatch(
       }));
       message.retry();
     }
+  }
+
+  if (refreshMessages.length === 0) return;
+  try {
+    const refreshed = await refreshReleasesIndex(env);
+    // 集計が実際に走った時だけ /releases の WS reload を発火する (Refs #327)。
+    // lock / fresh recheck で bail した no-op では reload させない。
+    if (refreshed) {
+      await hub.fetch(new Request("http://hub/releases-updated", {
+        method: "POST",
+        body: JSON.stringify({ repo: "*" }),
+      }));
+    }
+    for (const m of refreshMessages) m.ack();
+  } catch (err) {
+    // 認証失効なら marker を立てて page banner で operator に知らせる (Refs #334)。
+    await noteGitHubAuthBroken(env.CI_STATUS, err);
+    console.log(JSON.stringify({
+      msg: "releases-index-refresh-failed",
+      attempts: refreshMessages[0]?.attempts,
+      error: err instanceof Error ? err.message : String(err),
+    }));
+    for (const m of refreshMessages) m.retry();
   }
 }
 

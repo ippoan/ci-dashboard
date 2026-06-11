@@ -112,7 +112,9 @@ export async function loadPrMap(
   // Cold start: 旧実装は同期 fetch (4 search) でページ全体を塞いでいた。
   // SSR をブロックせず背景 refresh + loading flag を返し、page 側が
   // /issues/decorations を poll して部分更新する (Refs #323)。
-  const p = refreshPrMap(env, mainOrgs, yhondaRepos).catch((err) => {
+  const p = refreshPrMap(env, mainOrgs, yhondaRepos).catch(async (err) => {
+    const { noteGitHubAuthBroken } = await import("./github-backoff");
+    await noteGitHubAuthBroken(kv, err);
     console.log(JSON.stringify({
       msg: "pr-map-bg-refresh-failed",
       error: err instanceof Error ? err.message : String(err),
