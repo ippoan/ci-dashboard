@@ -1157,8 +1157,9 @@ describe("releases index blob (Refs #325)", () => {
     expect(updates[0].body).toEqual({ repo: "*" });
   });
 
-  it("issues event で blob が stale 化される (storedAt:0)", async () => {
+  it("index に出ていない issue の event は blob を stale 化しない (Refs #339)", async () => {
     await seedBlob();
+    const before = await blobStoredAt();
     const body = JSON.stringify({
       action: "opened",
       issue: {
@@ -1179,7 +1180,147 @@ describe("releases index blob (Refs #325)", () => {
       testEnv(), ctx,
     );
     await waitOnExecutionContext(ctx);
-    expect(await blobStoredAt()).toBe(0);
+    // 該当行が無い = index 内容に影響なし → 全集計の引き金にしない
+    expect(await blobStoredAt()).toBe(before);
+  });
+
+  it("index に出ている issue の close は blob を直接 patch して broadcast する (Refs #339)", async () => {
+    // blob に open 行を seed (synthetic block)
+    await env.CI_STATUS.put("releases:index:v1", JSON.stringify({
+      storedAt: 12345,
+      views: [{
+        repo: "ippoan/foo", tagless: true, olderTags: [],
+        tagBlocks: [{
+          tag: "main@abc1234", prevTag: null, synthetic: true,
+          issues: [{
+            number: 7, title: "t", state: "open",
+            labels: [], assignees: [], warnings: [],
+            url: "https://github.com/ippoan/foo/issues/7",
+            updated_at: "2026-06-11T00:00:00Z",
+          }],
+        }],
+      }],
+    }));
+    const body = JSON.stringify({
+      action: "closed",
+      issue: {
+        number: 7, title: "t", state: "closed", user: { login: "y" },
+        labels: [], assignees: [], comments: 0,
+        created_at: "2026-06-11T00:00:00Z", updated_at: "2026-06-11T01:00:00Z",
+        html_url: "https://github.com/ippoan/foo/issues/7",
+      },
+      repository: { full_name: "ippoan/foo" },
+    });
+    const sig = await sign(body, WEBHOOK_SECRET);
+    const ctx = createExecutionContext();
+    await worker.fetch(
+      new Request("http://localhost/webhook", {
+        method: "POST", body,
+        headers: { "X-Hub-Signature-256": sig, "X-GitHub-Event": "issues" },
+      }),
+      testEnv(), ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    const blob = await env.CI_STATUS.get("releases:index:v1", "json") as {
+      storedAt: number;
+      views: Array<{ tagBlocks: Array<{ issues: Array<{ state: string; warnings: string[] }> }> }>;
+    };
+    // 行が closed に書き換わり、storedAt (= full snapshot 時刻) は不変
+    expect(blob.views[0].tagBlocks[0].issues[0].state).toBe("closed");
+    expect(blob.storedAt).toBe(12345);
+    // /releases の WS reload が発火する
+    const updates = hubCalls.filter((c) => c.path === "/releases-updated");
+    expect(updates).toHaveLength(1);
+  });
+
+  it("PR merged は Refs #N を /issues KV から組んで synthetic block に挿入する (Refs #339)", async () => {
+    // /issues KV に open issue (行データの供給元)
+    await env.CI_STATUS.put("issue:ippoan/foo#9", JSON.stringify({
+      repo: "ippoan/foo", number: 9, title: "patched in", state: "open",
+      author: "y", labels: ["bug"], assignees: [], comments: 0,
+      created_at: "2026-06-11T00:00:00Z", updated_at: "2026-06-11T00:00:00Z",
+      url: "https://github.com/ippoan/foo/issues/9",
+    }));
+    // blob: 空の synthetic block を持つ tagless card
+    await env.CI_STATUS.put("releases:index:v1", JSON.stringify({
+      storedAt: 12345,
+      views: [{
+        repo: "ippoan/foo", tagless: true, olderTags: [],
+        tagBlocks: [{ tag: "main@abc1234", prevTag: null, synthetic: true, issues: [] }],
+      }],
+    }));
+    const body = JSON.stringify({
+      action: "closed",
+      pull_request: {
+        number: 50, merged: true, merge_commit_sha: "deadbeefcafe1234",
+        base: { ref: "main" }, title: "feat: x", body: "Refs #9",
+        draft: false, html_url: "https://github.com/ippoan/foo/pull/50",
+        updated_at: "2026-06-11T01:00:00Z",
+      },
+      repository: { full_name: "ippoan/foo", default_branch: "main" },
+    });
+    const sig = await sign(body, WEBHOOK_SECRET);
+    const ctx = createExecutionContext();
+    await worker.fetch(
+      new Request("http://localhost/webhook", {
+        method: "POST", body,
+        headers: { "X-Hub-Signature-256": sig, "X-GitHub-Event": "pull_request" },
+      }),
+      testEnv(), ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    const blob = await env.CI_STATUS.get("releases:index:v1", "json") as {
+      storedAt: number;
+      staleRepos?: string[];
+      views: Array<{ tagBlocks: Array<{ tag: string; issues: Array<{ number: number; title: string }> }> }>;
+    };
+    const block = blob.views[0].tagBlocks[0];
+    // 行が /issues KV から挿入され、block の sha が merge_commit_sha に進む
+    expect(block.issues.map((i) => i.number)).toEqual([9]);
+    expect(block.issues[0].title).toBe("patched in");
+    expect(block.tag).toBe("main@deadbee");
+    // 全集計の引き金 (stale 化) は不要
+    expect(blob.storedAt).toBe(12345);
+    expect(blob.staleRepos ?? []).toEqual([]);
+    const updates = hubCalls.filter((c) => c.path === "/releases-updated");
+    expect(updates).toHaveLength(1);
+  });
+
+  it("Refs 先が /issues KV に無い merge は全集計に fallback する (Refs #339)", async () => {
+    await env.CI_STATUS.put("releases:index:v1", JSON.stringify({
+      storedAt: 12345,
+      views: [{
+        repo: "ippoan/foo", tagless: true, olderTags: [],
+        tagBlocks: [{ tag: "main@abc1234", prevTag: null, synthetic: true, issues: [] }],
+      }],
+    }));
+    const body = JSON.stringify({
+      action: "closed",
+      pull_request: {
+        number: 51, merged: true, merge_commit_sha: "abc",
+        base: { ref: "main" }, title: "feat: y", body: "Refs #99",
+        draft: false, html_url: "https://github.com/ippoan/foo/pull/51",
+        updated_at: "2026-06-11T01:00:00Z",
+      },
+      repository: { full_name: "ippoan/foo", default_branch: "main" },
+    });
+    const sig = await sign(body, WEBHOOK_SECRET);
+    const ctx = createExecutionContext();
+    await worker.fetch(
+      new Request("http://localhost/webhook", {
+        method: "POST", body,
+        headers: { "X-Hub-Signature-256": sig, "X-GitHub-Event": "pull_request" },
+      }),
+      testEnv(), ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    const blob = await env.CI_STATUS.get("releases:index:v1", "json") as
+      { storedAt: number; staleRepos?: string[] };
+    expect(blob.storedAt).toBe(0);
+    expect(blob.staleRepos).toContain("ippoan/foo");
   });
 
   it("tag push で blob が stale 化される", async () => {

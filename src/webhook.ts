@@ -21,6 +21,11 @@ import {
 } from "./release-cache";
 import { applyPullRequestEvent } from "./pr-map-cache";
 import { markReleasesIndexStale } from "./releases-index-cache";
+import {
+  applyIssueEventToReleasesIndex,
+  applyRefsPatchToReleasesIndex,
+} from "./releases-index-patch";
+import { extractRefIssues } from "./release-helpers";
 import { noteGitHubAuthBroken } from "./github-backoff";
 import { refreshReleasesIndex } from "./releases-page";
 
@@ -59,6 +64,17 @@ async function scheduleReleasesIndexRekick(env: Env): Promise<void> {
   } catch { /* 次の event / page view の enqueue に任せる */ }
 }
 
+/** /releases の WS reload を発火する (Refs #327/#339)。patch / 集計完了の
+ *  「内容が現になった」時だけ呼ぶ。失敗は fail-open (次の reload で追い付く)。 */
+async function broadcastReleasesUpdated(hub: DurableObjectStub, repo: string): Promise<void> {
+  try {
+    await hub.fetch(new Request("http://hub/releases-updated", {
+      method: "POST",
+      body: JSON.stringify({ repo }),
+    }));
+  } catch { /* fail-open */ }
+}
+
 /** /releases index の stale 化 + refresh job の即時投函 (Refs #327)。
  *  page view を待たずに consumer が再集計を始めるので、WS reload が届く頃には
  *  fresh blob が出来ている。queue binding 無し環境では stale 化のみ (次の
@@ -84,6 +100,10 @@ interface ReleaseWebhookPayload {
 
 interface PushWebhookPayload {
   ref: string;
+  // 直接 patch (Refs #339) 用。GitHub の実配信には常に載るが、最小 payload
+  // (テスト fixture) でも落ちないよう optional。
+  after?: string;
+  commits?: Array<{ message: string }>;
   repository: {
     full_name: string;
     default_branch: string;
@@ -431,9 +451,22 @@ async function processWebhookEvent(
         await invalidateRepoCompare(env.CI_STATUS, owner, name);
         await invalidateRepoCommits(env.CI_STATUS, owner, name);
       }
-      // merge は Unreleased zone / synthetic block の中身を変える → /releases
-      // index の stale 化 + refresh job 投函 (Refs #325 / #327)。
-      await staleAndKickReleasesIndex(env, repo);
+      // merge は Unreleased zone / synthetic block の中身を変える。
+      // webhook payload (PR title+body の Refs #N) で blob を直接 patch し、
+      // 行データは /issues KV から組む — 全集計しない (Refs #339)。
+      // patch 不能時のみ従来の stale 化 + 全集計に fallback。
+      {
+        const [prOwner, prName] = repo.split("/");
+        const refs = extractRefIssues(
+          `${payload.pull_request.title ?? ""}\n${payload.pull_request.body ?? ""}`,
+          prOwner && prName ? { owner: prOwner, name: prName } : undefined,
+        );
+        const outcome = await applyRefsPatchToReleasesIndex(
+          env.CI_STATUS, repo, refs, payload.pull_request.merge_commit_sha,
+        );
+        if (outcome === "patched") await broadcastReleasesUpdated(hub, repo);
+        else if (outcome === "fallback") await staleAndKickReleasesIndex(env, repo);
+      }
       // /issues の merged 紫チップも変わる (pr-map は applyPullRequestEvent で
       // patch 済み) → live reload を発火 (Refs #327)。
       try {
@@ -476,9 +509,13 @@ async function processWebhookEvent(
     if (owner && name) {
       await invalidateReleaseCacheIssue(env.CI_STATUS, owner, name, payload.issue.number);
     }
-    // /releases index は issue の open/close で close 候補の表示が変わる。
-    // stale 化 + refresh job 投函 (Refs #325 / #327)。
-    await staleAndKickReleasesIndex(env, payload.repository.full_name);
+    // /releases index は webhook payload で直接 patch する (Refs #339)。
+    // 該当行が無い (= index に出ていない issue) なら index 内容に影響なし —
+    // stale 化も全集計もしない (1h の安全網が答え合わせする)。
+    const releasesPatched = await applyIssueEventToReleasesIndex(env.CI_STATUS, payload);
+    if (releasesPatched) {
+      await broadcastReleasesUpdated(hub, payload.repository.full_name);
+    }
     // /issues page の live reload trigger (Refs #321)。KV upsert 完了後に
     // broadcast するので、reload 時の SSR read は必ず更新後の KV を見る。
     // 通知失敗は page 側の問題に留まる (次の手動 reload で追い付く) ため
@@ -548,7 +585,7 @@ async function processWebhookEvent(
       if (owner && name) {
         if (ref.startsWith("refs/tags/")) {
           await invalidateRepoTags(env.CI_STATUS, owner, name);
-          // 新 tag は index の tag blocks を変える (Refs #325 / #327)。
+          // 新 tag は compare が要る唯一のケース — 全集計に任せる (Refs #339)。
           await staleAndKickReleasesIndex(env, fullName);
         } else if (defaultBranch && ref === `refs/heads/${defaultBranch}`) {
           await invalidateRepoCommits(env.CI_STATUS, owner, name);
@@ -556,7 +593,18 @@ async function processWebhookEvent(
           // squash merge は default branch への push として届くので、これで
           // merge 単位の即時反映になる (60s TTL を待たない)。Refs #231。
           await invalidateRepoCompare(env.CI_STATUS, owner, name);
-          await staleAndKickReleasesIndex(env, fullName);
+          // commit message の Refs #N で blob を直接 patch (Refs #339)。
+          // squash merge では PR event と二重に届くが dedupe で冪等。
+          // direct-push repo (PR を経ない) もこの経路で即反映される。
+          const refs = new Set<number>();
+          for (const c of payload.commits ?? []) {
+            for (const n of extractRefIssues(c.message, { owner, name })) refs.add(n);
+          }
+          const outcome = await applyRefsPatchToReleasesIndex(
+            env.CI_STATUS, fullName, [...refs], payload.after ?? null,
+          );
+          if (outcome === "patched") await broadcastReleasesUpdated(hub, fullName);
+          else if (outcome === "fallback") await staleAndKickReleasesIndex(env, fullName);
         }
       }
     }
