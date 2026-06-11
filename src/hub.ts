@@ -19,7 +19,11 @@ type WsEnvelope =
   | { type: "release-alerts"; data: ReleaseAlert[] }
   // /issues page の live reload trigger (Refs #321)。webhook の issues event
   // 処理後に webhook.ts が /issues-updated 経由で broadcast する。
-  | { type: "issues-updated"; data: { repo: string; number: number; state: string } };
+  | { type: "issues-updated"; data: { repo: string; number: number; state: string } }
+  // /releases page の live reload trigger (Refs #327)。index blob の refresh
+  // 完了後に webhook.ts (queue consumer) が /releases-updated 経由で broadcast
+  // する — 「集計完了後」なので reload 直後は必ず fresh blob を読む。
+  | { type: "releases-updated"; data: { repo: string } };
 
 const ALERT_KEY_PREFIX = "release-alert:";
 const ALERT_TTL_SECONDS = 7 * 86400;
@@ -254,6 +258,13 @@ export class CIDashboardHub extends DurableObject<Env> {
     if (url.pathname === "/issues-updated") {
       const data = await request.json<{ repo: string; number: number; state: string }>();
       this.broadcastEnvelope({ type: "issues-updated", data });
+      return new Response("OK");
+    }
+
+    // /releases page の live reload trigger (Refs #327)。
+    if (url.pathname === "/releases-updated") {
+      const data = await request.json<{ repo: string }>();
+      this.broadcastEnvelope({ type: "releases-updated", data });
       return new Response("OK");
     }
 

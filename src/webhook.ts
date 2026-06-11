@@ -40,6 +40,20 @@ export interface ReleasesIndexRefreshMessage {
 
 export type QueueMessage = WebhookQueueMessage | ReleasesIndexRefreshMessage;
 
+/** /releases index の stale 化 + refresh job の即時投函 (Refs #327)。
+ *  page view を待たずに consumer が再集計を始めるので、WS reload が届く頃には
+ *  fresh blob が出来ている。queue binding 無し環境では stale 化のみ (次の
+ *  page view の waitUntil fallback が拾う)。enqueue の重複は refresh 側の
+ *  lock / fresh recheck が無駄撃ちに落とす。 */
+async function staleAndKickReleasesIndex(env: Env, repo: string): Promise<void> {
+  await markReleasesIndexStale(env.CI_STATUS, repo);
+  if (env.WEBHOOK_QUEUE) {
+    try {
+      await env.WEBHOOK_QUEUE.send({ kind: "releases-index-refresh" });
+    } catch { /* enqueue 失敗は次の page view の fallback に任せる */ }
+  }
+}
+
 interface ReleaseWebhookPayload {
   action: string;
   release: {
@@ -258,7 +272,15 @@ export async function consumeWebhookBatch(
     // 内部 job (Refs #325): /releases index の再集計。webhook event ではない。
     if ("kind" in message.body && message.body.kind === "releases-index-refresh") {
       try {
-        await refreshReleasesIndex(env);
+        const refreshed = await refreshReleasesIndex(env);
+        // 集計が実際に走った時だけ /releases の WS reload を発火する (Refs #327)。
+        // lock / fresh recheck で bail した no-op では reload させない。
+        if (refreshed) {
+          await hub.fetch(new Request("http://hub/releases-updated", {
+            method: "POST",
+            body: JSON.stringify({ repo: "*" }),
+          }));
+        }
         message.ack();
       } catch (err) {
         console.log(JSON.stringify({
@@ -371,8 +393,20 @@ async function processWebhookEvent(
         await invalidateRepoCommits(env.CI_STATUS, owner, name);
       }
       // merge は Unreleased zone / synthetic block の中身を変える → /releases
-      // index blob を stale 化 (Refs #325)。
-      await markReleasesIndexStale(env.CI_STATUS);
+      // index の stale 化 + refresh job 投函 (Refs #325 / #327)。
+      await staleAndKickReleasesIndex(env, repo);
+      // /issues の merged 紫チップも変わる (pr-map は applyPullRequestEvent で
+      // patch 済み) → live reload を発火 (Refs #327)。
+      try {
+        await hub.fetch(new Request("http://hub/issues-updated", {
+          method: "POST",
+          body: JSON.stringify({
+            repo,
+            number: payload.pull_request.number,
+            state: "merged",
+          }),
+        }));
+      } catch { /* fail-open */ }
       if (parseTaglessRepos(env.TAGLESS_REPOS).has(repo)) {
         await hub.fetch(new Request("http://hub/release-alert-detect-pr", {
           method: "POST",
@@ -404,8 +438,8 @@ async function processWebhookEvent(
       await invalidateReleaseCacheIssue(env.CI_STATUS, owner, name, payload.issue.number);
     }
     // /releases index は issue の open/close で close 候補の表示が変わる。
-    // blob を stale 化して次 load で背景 refresh させる (Refs #325)。
-    await markReleasesIndexStale(env.CI_STATUS);
+    // stale 化 + refresh job 投函 (Refs #325 / #327)。
+    await staleAndKickReleasesIndex(env, payload.repository.full_name);
     // /issues page の live reload trigger (Refs #321)。KV upsert 完了後に
     // broadcast するので、reload 時の SSR read は必ず更新後の KV を見る。
     // 通知失敗は page 側の問題に留まる (次の手動 reload で追い付く) ため
@@ -475,15 +509,15 @@ async function processWebhookEvent(
       if (owner && name) {
         if (ref.startsWith("refs/tags/")) {
           await invalidateRepoTags(env.CI_STATUS, owner, name);
-          // 新 tag は index の tag blocks を変える (Refs #325)。
-          await markReleasesIndexStale(env.CI_STATUS);
+          // 新 tag は index の tag blocks を変える (Refs #325 / #327)。
+          await staleAndKickReleasesIndex(env, fullName);
         } else if (defaultBranch && ref === `refs/heads/${defaultBranch}`) {
           await invalidateRepoCommits(env.CI_STATUS, owner, name);
           // "Unreleased" ゾーンの `<tag>...<defaultBranch>` compare も flush。
           // squash merge は default branch への push として届くので、これで
           // merge 単位の即時反映になる (60s TTL を待たない)。Refs #231。
           await invalidateRepoCompare(env.CI_STATUS, owner, name);
-          await markReleasesIndexStale(env.CI_STATUS);
+          await staleAndKickReleasesIndex(env, fullName);
         }
       }
     }

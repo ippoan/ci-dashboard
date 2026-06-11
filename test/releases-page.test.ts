@@ -1273,3 +1273,64 @@ describe("GET /releases — index SWR blob (Refs #325)", () => {
     expect(await env.CI_STATUS.get("releases:index:v1")).not.toBeNull();
   });
 });
+
+// ───── repo 単位の更新中表示 + WS live reload (Refs #327) ─────
+describe("GET /releases — 更新中バッジ + live reload (Refs #327)", () => {
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await clearReleaseCache(env.CI_STATUS);
+    await env.CI_STATUS.delete("direct-push-allowlist:v1");
+    await env.CI_STATUS.delete("releases:index:v1");
+    await env.CI_STATUS.delete("releases:index:refreshing");
+  });
+
+  const view = (repo: string) => ({
+    repo, tagless: true, olderTags: [],
+    tagBlocks: [{
+      tag: "main@abc1234", prevTag: null, synthetic: true,
+      issues: [{
+        number: 1, title: "t", state: "open",
+        labels: [], assignees: [], warnings: [],
+        url: `https://github.com/${repo}/issues/1`,
+        updated_at: "2026-06-11T00:00:00Z",
+      }],
+    }],
+  });
+
+  it("staleRepos の repo card に 🔄 更新中バッジ + note に repo 列挙", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      new Response("not stubbed", { status: 500 }));
+    await env.CI_STATUS.put("releases:index:v1", JSON.stringify({
+      storedAt: 0,
+      views: [view("ippoan/foo"), view("ippoan/bar")],
+      staleRepos: ["ippoan/foo"],
+    }));
+
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(new Request("http://localhost/releases"), testEnv(), ctx);
+    const html = await res.text();
+    await waitOnExecutionContext(ctx);
+
+    // note に原因 repo が列挙される
+    expect(html).toContain("更新待ち");
+    expect(html).toContain("<code>ippoan/foo</code>");
+    // 該当 card のみバッジ
+    const fooCard = html.split("ippoan/bar")[0];
+    expect(fooCard).toContain("🔄 更新中");
+    const barCard = html.split("ippoan/bar")[1];
+    expect(barCard).not.toContain("🔄 更新中");
+  });
+
+  it("live reload script (releases-updated listener) を埋め込む", async () => {
+    await env.CI_STATUS.put("releases:index:v1", JSON.stringify({
+      storedAt: Date.now(), views: [],
+    }));
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(new Request("http://localhost/releases"), testEnv(), ctx);
+    await waitOnExecutionContext(ctx);
+    const html = await res.text();
+    expect(html).toContain("releases-updated");
+    expect(html).toContain('new WebSocket(proto + "//" + location.host + "/ws")');
+    expect(html).toContain("location.reload()");
+  });
+});

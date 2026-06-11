@@ -115,7 +115,7 @@ export async function handleReleaseClose(
     );
     // /releases index blob も stale 化 (Refs #325)。redirect 先の表示自体は
     // flash 整合 (closed= の row を closed 扱いに変換) が担保する。
-    if (closed.length > 0) await markReleasesIndexStale(env.CI_STATUS);
+    if (closed.length > 0) await markReleasesIndexStale(env.CI_STATUS, repoParam);
   }
 
   // Kick the Hub to recompute the banner alert state for this repo when at
