@@ -1,0 +1,18 @@
+name: skills-check
+
+# ci-dashboard-map skill が構造変化に追従しているかを PR diff で検査する
+# (ci-workflows#118 / claude-skills#59 Wave 2)。enforce=warn (default)。
+# 同時に新規依存 vs knowledge/standards/libs の dependency-check も走る。
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  skills-check:
+    uses: ippoan/ci-workflows/.github/workflows/skills-check.yml@main
+    # with:
+    #   enforce: warn        # warn (default) | fail
