@@ -836,6 +836,12 @@ describe("POST /webhook", () => {
     await waitOnExecutionContext(ctx);
     expect(res.status).toBe(200);
     expect(await env.CI_STATUS.get("rcache:v1:issue:ippoan/foo:42")).toBeNull();
+
+    // /issues live reload trigger (Refs #321): KV upsert 後に Hub へ
+    // /issues-updated が飛び、WS client に broadcast される。
+    const updates = hubCalls.filter((c) => c.path === "/issues-updated");
+    expect(updates).toHaveLength(1);
+    expect(updates[0].body).toEqual({ repo: "ippoan/foo", number: 42, state: "closed" });
   });
 });
 

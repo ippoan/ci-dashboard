@@ -319,6 +319,18 @@ describe("GET /issues", () => {
     expect(alcH2).toContain("mode-needs-tag");
   });
 
+  it("live reload script (issues-updated listener) を埋め込む (Refs #321)", async () => {
+    stubSearchIssues();
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(new Request("http://localhost/issues"), testEnv(), ctx);
+    await waitOnExecutionContext(ctx);
+
+    const html = await res.text();
+    expect(html).toContain('new WebSocket(proto + "//" + location.host + "/ws")');
+    expect(html).toContain("issues-updated");
+    expect(html).toContain("location.reload()");
+  });
+
   it("escapes HTML in issue titles (XSS guard)", async () => {
     stubSearchIssues();
     const req = new Request("http://localhost/issues");

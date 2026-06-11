@@ -16,7 +16,10 @@ import { invalidateIssue } from "./release-cache";
 //   - "release-alerts"  → ReleaseAlert[] (post-tag-release banner)
 type WsEnvelope =
   | { type: "ci-statuses"; data: CIStatus[] }
-  | { type: "release-alerts"; data: ReleaseAlert[] };
+  | { type: "release-alerts"; data: ReleaseAlert[] }
+  // /issues page の live reload trigger (Refs #321)。webhook の issues event
+  // 処理後に webhook.ts が /issues-updated 経由で broadcast する。
+  | { type: "issues-updated"; data: { repo: string; number: number; state: string } };
 
 const ALERT_KEY_PREFIX = "release-alert:";
 const ALERT_TTL_SECONDS = 7 * 86400;
@@ -242,6 +245,15 @@ export class CIDashboardHub extends DurableObject<Env> {
         }
       }
       if (changed) this.broadcastAlerts();
+      return new Response("OK");
+    }
+
+    // /issues page の live reload trigger (Refs #321)。KV upsert 済みの issue
+    // 変更を WS client に通知する。dashboard JS は未知 type を無視するので
+    // 同一 /ws チャネルに相乗りして良い。
+    if (url.pathname === "/issues-updated") {
+      const data = await request.json<{ repo: string; number: number; state: string }>();
+      this.broadcastEnvelope({ type: "issues-updated", data });
       return new Response("OK");
     }
 
