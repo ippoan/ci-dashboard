@@ -3,6 +3,9 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import worker from "../src/index";
 import type { Env } from "../src/index";
 
+// hub.fetch の記録用。テストごとに reset する。
+const hubCalls: Array<{ url: string; body: unknown }> = [];
+
 function testEnv(): Env {
   return {
     CI_STATUS: env.CI_STATUS,
@@ -10,7 +13,14 @@ function testEnv(): Env {
     INTERNAL_SHARED_SECRET: { get: async () => "test-internal" } as unknown as SecretsStoreSecret,
     CI_HUB: {
       idFromName: () => ({}),
-      get: () => ({ fetch: async () => new Response("OK") }),
+      get: () => ({
+        fetch: async (req: Request) => {
+          let body: unknown = null;
+          try { body = await req.clone().json(); } catch { /* no body */ }
+          hubCalls.push({ url: req.url, body });
+          return Response.json({ patched: true });
+        },
+      }),
     } as unknown as DurableObjectNamespace,
     RELEASE_WAVE_HUB: { idFromName: () => ({}), get: () => ({ fetch: async () => new Response("OK") }) } as unknown as DurableObjectNamespace,
     RELEASE_WAVE_WEBHOOK_SECRET: { get: async () => "test-webhook-secret" } as unknown as SecretsStoreSecret,
@@ -52,7 +62,51 @@ function formBody(pairs: Array<[string, string]>): string {
 }
 
 describe("POST /api/release-close-batch", () => {
-  afterEach(() => { vi.restoreAllMocks(); });
+  afterEach(() => { vi.restoreAllMocks(); hubCalls.length = 0; });
+
+  it("synchronously patches the index blob for same-repo + cross-repo closes (Refs #343)", async () => {
+    stubCloseFlow();
+    const req = new Request("http://localhost/api/release-close-batch", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: formBody([
+        ["repo", "ippoan/cdp-relay"],
+        // same-repo (card 上の issue) + cross-repo (別 repo の issue)
+        ["pair", "v1.0.0:12"],
+        ["pair", "main@abc1234:ippoan/mcp-cf-workers#28"],
+      ]),
+    });
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(req, testEnv(), ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(303);
+    const applyClose = hubCalls.find((c) => c.url.includes("/releases-index-apply-close"));
+    expect(applyClose).toBeDefined();
+    const body = applyClose!.body as { repo: string; urls: string[] };
+    expect(body.repo).toBe("ippoan/cdp-relay");
+    // url 突合: card repo の同一 repo 行も、別 repo の cross-repo 行も拾う。
+    expect(body.urls).toContain("https://github.com/ippoan/cdp-relay/issues/12");
+    expect(body.urls).toContain("https://github.com/ippoan/mcp-cf-workers/issues/28");
+  });
+
+  it("does not call the close-patch hub when every issue fails to close", async () => {
+    stubCloseFlow({ failIssue: 12 });
+    const req = new Request("http://localhost/api/release-close-batch", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: formBody([
+        ["repo", "ippoan/cdp-relay"],
+        ["pair", "v1.0.0:12"],
+      ]),
+    });
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(req, testEnv(), ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(303);
+    expect(hubCalls.find((c) => c.url.includes("/releases-index-apply-close"))).toBeUndefined();
+  });
 
   it("groups pairs by tag and posts a tag-attributed comment + PATCH per issue", async () => {
     const { calls } = stubCloseFlow();
