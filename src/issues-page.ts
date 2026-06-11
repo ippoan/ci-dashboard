@@ -12,7 +12,12 @@ import {
   type ReconcileResult,
 } from "./issue-cache";
 import { loadPrMap, type PrMapResult } from "./pr-map-cache";
-import { getRateLimitBackoff } from "./github-backoff";
+import {
+  getRateLimitBackoff,
+  isAuthError,
+  noteGitHubAuthBroken,
+  getGitHubAuthBroken,
+} from "./github-backoff";
 import {
   loadProjectIssueMapSwr,
   readProjectIssueMapBlob,
@@ -90,14 +95,8 @@ export function buildClaudeCodeLaunchUrl(repo: string, issueNumber: number): str
 // 判定して `/oauth/login` にリダイレクトする (= ユーザーは 502 ページではなく
 // GitHub 同意画面に飛ぶ)。それ以外 (GitHub rate limit など) は従来通り 502 を
 // 表示する。
-function isAuthError(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message : String(err);
-  return (
-    /No (DCR client registered|OAuth tokens stored)/.test(msg) ||
-    /auth-worker \/mcp\/(introspect|token).*failed \((401|403)/.test(msg) ||
-    /JWT inactive/.test(msg)
-  );
-}
+// isAuthError は github-backoff.ts に共通化 (Refs #334 — background の auth
+// 失効 marker 判定と同一規約にするため。invalid_grant も拾う)。
 
 // KV には過去設定の repo が残っている可能性があるので allowlist で filter。
 // mainOrgs 配下は全 repo 許可、yhonda-ohishi は YHONDA_REPOS のみ。
@@ -124,6 +123,9 @@ interface Freshness {
   decoLoading: boolean;
   /** rate-limit backoff 中。値は再開予定時刻 (epoch ms)。 */
   backoffUntil: number | null;
+  /** GitHub 認証失効 (auth-worker delegation の invalid_grant 等)。再ログイン
+   *  banner を出す (Refs #334)。 */
+  authBroken: boolean;
   /** cold start で同期 reconcile が失敗した時のみ生エラーを表示する。 */
   coldError: string | null;
 }
@@ -157,7 +159,10 @@ export async function handleIssuesPage(
       .then((r) => {
         console.log(JSON.stringify({ msg: "issues-page-bg-reconcile", reconcile: r }));
       })
-      .catch((err) => {
+      .catch(async (err) => {
+        // 認証失効は background では 302 できないため marker を立てて
+        // banner で operator に知らせる (Refs #334)。
+        await noteGitHubAuthBroken(kv, err);
         console.log(JSON.stringify({
           msg: "issues-page-bg-reconcile-failed",
           isAuth: isAuthError(err),
@@ -228,11 +233,12 @@ export async function handleIssuesPage(
     items: filtered,
   };
 
-  const [project, prs, watermark, backoff] = await Promise.all([
+  const [project, prs, watermark, backoff, authBroken] = await Promise.all([
     loadProjectIssueMapSwr(env, PROJECT_ORGS, ctx),
     loadPrMap(env, ORGS, YHONDA_REPOS, ctx),
     getIssuesWatermark(kv),
     getRateLimitBackoff(kv),
+    getGitHubAuthBroken(kv),
   ]);
 
   const reconcileAgeSec = watermark
@@ -247,6 +253,7 @@ export async function handleIssuesPage(
     prRefreshing: prs.refreshing || project.refreshing,
     decoLoading: project.loading || prs.loading,
     backoffUntil: backoff?.until ?? null,
+    authBroken: authBroken !== null,
     coldError: reconcileError,
   };
   const projectMap = project.map;
@@ -314,6 +321,12 @@ function renderHtml(
     : "";
   // Rate-limit cooldown 中: 生の GitHub エラーは出さず、cache 表示 + 再開
   // 予定だけを穏当に伝える (Refs #304)。
+  // GitHub 認証失効 (Refs #334): background refresh は 302 できないので、
+  // banner で再ログインに誘導する。token 再取得が成功した経路が marker を
+  // 消すので、ログイン後は自動で消える。
+  const authBrokenBanner = freshness.authBroken
+    ? `<div class="banner">🔑 GitHub 認証が失効しています — <a href="/oauth/login?return_to=/issues" style="color:#ffa198;text-decoration:underline">/oauth/login</a> で再ログインすると自動復旧します (それまで background 更新は停止、webhook 反映は継続)</div>`
+    : "";
   // 文言注意 (Refs #329): cooldown で止まるのは「検索ベースの安全網 reconcile」
   // だけ。webhook → KV → WS reload の経路は GitHub API を呼ばないため、issue の
   // 作成/close は cooldown 中も反映され続ける — そう読める文言にする。
@@ -588,6 +601,7 @@ function renderHtml(
     </div>
   </header>
   ${incompleteBanner}
+  ${authBrokenBanner}
   ${backoffBanner}
   ${refreshingBanner}
   ${issueStaleBanner}

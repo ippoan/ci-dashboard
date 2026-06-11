@@ -294,7 +294,9 @@ export async function loadProjectIssueMapSwr(
   const blob = await kv.get(ISSUES_PAGE_PROJECT_MAP_KEY, "json") as ProjectMapBlobEntry | null;
   const now = Date.now();
   const kick = () => {
-    const p = refreshProjectIssueMapBlob(env, orgs).catch((err) => {
+    const p = refreshProjectIssueMapBlob(env, orgs).catch(async (err) => {
+      const { noteGitHubAuthBroken } = await import("./github-backoff");
+      await noteGitHubAuthBroken(env.CI_STATUS, err);
       console.log(JSON.stringify({
         msg: "project-map-bg-refresh-failed",
         error: err instanceof Error ? err.message : String(err),

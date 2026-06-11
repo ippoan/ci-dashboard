@@ -5,6 +5,7 @@ import {
   getRateLimitBackoff,
   isRateLimitError,
   setRateLimitBackoff,
+  clearGitHubAuthBroken,
 } from "./github-backoff";
 
 // KV schema:
@@ -204,6 +205,8 @@ export async function reconcileIssues(
 
   const newWm = new Date(now - SAFETY_WINDOW_MS).toISOString();
   await kv.put(KEY_WATERMARK, newWm);
+  // token 取得が成功した = 認証は生きている。失効 banner を自動回復 (Refs #334)。
+  await clearGitHubAuthBroken(kv);
 
   return { patched: fresh.length, fetched: true, removed };
 }

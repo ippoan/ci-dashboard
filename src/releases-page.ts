@@ -25,7 +25,12 @@ import {
 } from "./release-cache";
 import { loadDirectPushAllowlist } from "./direct-push-allowlist";
 import { parseTaglessRepos } from "./tagless-repos";
-import { getRateLimitBackoff } from "./github-backoff";
+import {
+  getRateLimitBackoff,
+  noteGitHubAuthBroken,
+  getGitHubAuthBroken,
+  clearGitHubAuthBroken,
+} from "./github-backoff";
 import {
   readReleasesIndexBlob,
   writeReleasesIndexBlob,
@@ -165,7 +170,10 @@ async function handleIndexPage(
   // では fan-out が切られ得る)、cold start (blob 無し = deploy 直後のみ) だけ
   // 従来どおり同期生成する。
   const kv = env.CI_STATUS;
-  const blob = await readReleasesIndexBlob<RepoView[]>(kv);
+  const [blob, authBroken] = await Promise.all([
+    readReleasesIndexBlob<RepoView[]>(kv),
+    getGitHubAuthBroken(kv),
+  ]);
   let views: RepoView[];
   let refreshing = false;
   let staleRepos: string[] = [];
@@ -197,7 +205,10 @@ async function handleIndexPage(
   }
 
   return html(
-    renderIndex(views, closedFlash, failedFlash, failedReasons, flashRepo, refreshing, staleRepos),
+    renderIndex(
+      views, closedFlash, failedFlash, failedReasons, flashRepo,
+      refreshing, staleRepos, authBroken !== null,
+    ),
     200,
     cacheControlFor(hasFlash, /* detail */ false),
   );
@@ -221,7 +232,8 @@ async function kickReleasesIndexRefresh(
       }));
     }
   }
-  const p = refreshReleasesIndex(env).catch((err) => {
+  const p = refreshReleasesIndex(env).catch(async (err) => {
+    await noteGitHubAuthBroken(env.CI_STATUS, err);
     console.log(JSON.stringify({
       msg: "releases-index-bg-refresh-failed",
       error: err instanceof Error ? err.message : String(err),
@@ -257,6 +269,8 @@ export async function refreshReleasesIndex(env: ReleasesIndexEnv): Promise<boole
     return false;
   }
   await writeReleasesIndexBlob(kv, views);
+  // token 取得が成功した = 認証は生きている。失効 banner を自動回復 (Refs #334)。
+  await clearGitHubAuthBroken(kv);
   return true;
 }
 
@@ -1010,6 +1024,7 @@ function renderIndex(
   flashRepo: string | null,
   refreshing = false,
   staleRepos: string[] = [],
+  authBroken = false,
 ): string {
   // Show every watched repo as a card — including ones with no referenced
   // issues yet or whose refs are all closed. The operator asked for the full
@@ -1029,6 +1044,10 @@ function renderIndex(
   // SWR で stale blob を即返しした時の注記 (Refs #325 / #327)。stale 化の
   // 原因 repo が分かる時はそれを列挙し、該当 card には 🔄 バッジが付く。
   // 更新完了は WS (releases-updated) が reload で反映する。
+  // GitHub 認証失効 (Refs #334): 「🔄 更新中」のまま無言で詰まる事故の対策。
+  const authBrokenNote = authBroken
+    ? `<div class="auth-broken-note">🔑 GitHub 認証が失効しています — <a href="/oauth/login?return_to=/releases">/oauth/login</a> で再ログインすると自動復旧します (それまで集計の background 更新は停止)</div>`
+    : "";
   const refreshingNote = refreshing
     ? (staleRepos.length > 0
       ? `<div class="refreshing-note">🔄 更新待ち: ${staleRepos.map((r) => `<code>${escapeHtml(r)}</code>`).join(" ")} — background で集計中、完了すると自動で再読込されます</div>`
@@ -1046,6 +1065,7 @@ function renderIndex(
   <div class="summary">Tick the issues that this release actually closed; one button per repo closes them all.</div>
 </header>
 ${flash}
+${authBrokenNote}
 ${refreshingNote}
 ${body}
 <h2 class="lookup-header">Look up another release</h2>
@@ -1378,6 +1398,11 @@ const STYLES = `
     vertical-align: middle; white-space: nowrap;
     background: #1f6feb22; color: #79c0ff; border: 1px solid #1f6feb88;
   }
+  .auth-broken-note {
+    background: #341a1f; border: 1px solid #f85149; color: #ffa198;
+    border-radius: 6px; padding: 10px 14px; font-size: 13px; margin-bottom: 12px;
+  }
+  .auth-broken-note a { color: #ffa198; text-decoration: underline; }
   .refreshing-note {
     background: #1c2433; border: 1px solid #1f6feb88; color: #a5d6ff;
     border-radius: 6px; padding: 8px 14px; font-size: 12px; margin-bottom: 12px;

@@ -1226,3 +1226,36 @@ describe("GET /issues — decorations 部分更新 (Refs #323)", () => {
     expect(html).toContain('class="project-chip"');
   });
 });
+
+// ───── GitHub 認証失効 banner (Refs #334) ─────
+describe("GET /issues — auth-broken banner (Refs #334)", () => {
+  beforeEach(async () => {
+    await env.CI_STATUS.delete("github:auth-broken");
+    await env.CI_STATUS.delete("issues:watermark");
+    await env.CI_STATUS.delete("github:rl-backoff");
+    await env.CI_STATUS.delete("issues:reconciling");
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it("marker があれば再ログイン banner を出す", async () => {
+    stubFetch();
+    await env.CI_STATUS.put("github:auth-broken", JSON.stringify({ at: Date.now(), message: "invalid_grant" }));
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(new Request("http://localhost/issues"), testEnv(), ctx);
+    await waitOnExecutionContext(ctx);
+
+    const html = await res.text();
+    expect(html).toContain("GitHub 認証が失効しています");
+    expect(html).toContain("/oauth/login?return_to=/issues");
+  });
+
+  it("reconcile 成功で marker が消える (自動回復)", async () => {
+    stubFetch();
+    await env.CI_STATUS.put("github:auth-broken", JSON.stringify({ at: Date.now(), message: "invalid_grant" }));
+    const ctx = createExecutionContext();
+    await worker.fetch(new Request("http://localhost/issues"), testEnv(), ctx);
+    await waitOnExecutionContext(ctx);
+    // cold reconcile が完走 → marker クリア
+    expect(await env.CI_STATUS.get("github:auth-broken")).toBeNull();
+  });
+});
