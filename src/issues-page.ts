@@ -588,9 +588,58 @@ function renderHtml(
     ? `<div class="empty">🎉 No open issues. Nice work.</div>`
     : repoSections}
   ${PWA_REGISTER_SCRIPT}
+  ${LIVE_RELOAD_SCRIPT}
 </body>
 </html>`;
 }
+
+// /issues の live 更新 (Refs #321)。Hub DO の /ws に接続し、webhook の issues
+// event 処理後に broadcast される `issues-updated` envelope を受けたら debounce
+// 付きで reload する。SSR + KV read は高速なので DOM patch ではなく reload で
+// 十分。dashboard と同じ ping/pong keepalive + 3s reconnect。タブが非表示の間
+// は reload を保留し、再表示時にまとめて 1 回 reload する (バックグラウンド
+// タブの無駄な再描画防止)。
+const LIVE_RELOAD_SCRIPT = `
+  <script>
+    (() => {
+      let pending = false;
+      let timer = null;
+      const doReload = () => {
+        if (document.visibilityState !== "visible") { pending = true; return; }
+        location.reload();
+      };
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "visible" && pending) { pending = false; doReload(); }
+      });
+      const connect = () => {
+        const proto = location.protocol === "https:" ? "wss:" : "ws:";
+        const ws = new WebSocket(proto + "//" + location.host + "/ws");
+        let ping = null;
+        ws.onopen = () => {
+          ping = setInterval(() => {
+            if (ws.readyState === WebSocket.OPEN) ws.send("ping");
+          }, 30000);
+        };
+        ws.onmessage = (e) => {
+          if (e.data === "pong") return;
+          try {
+            const msg = JSON.parse(e.data);
+            if (msg && msg.type === "issues-updated") {
+              // burst (連続 close 等) を 1 回の reload にまとめる
+              if (timer) clearTimeout(timer);
+              timer = setTimeout(doReload, 1500);
+            }
+          } catch { /* ignore */ }
+        };
+        ws.onclose = () => {
+          if (ping) clearInterval(ping);
+          setTimeout(connect, 3000);
+        };
+        ws.onerror = () => { ws.close(); };
+      };
+      connect();
+    })();
+  </script>`;
 
 function renderProjectSection(
   items: ReadonlyArray<{ issue: OrgIssue; projects: ProjectRef[] }>,

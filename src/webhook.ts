@@ -374,6 +374,20 @@ async function processWebhookEvent(
     if (owner && name) {
       await invalidateReleaseCacheIssue(env.CI_STATUS, owner, name, payload.issue.number);
     }
+    // /issues page の live reload trigger (Refs #321)。KV upsert 完了後に
+    // broadcast するので、reload 時の SSR read は必ず更新後の KV を見る。
+    // 通知失敗は page 側の問題に留まる (次の手動 reload で追い付く) ため
+    // fail-open。
+    try {
+      await hub.fetch(new Request("http://hub/issues-updated", {
+        method: "POST",
+        body: JSON.stringify({
+          repo: payload.repository.full_name,
+          number: payload.issue.number,
+          state: payload.issue.state,
+        }),
+      }));
+    } catch { /* fail-open */ }
     return;
   }
 
