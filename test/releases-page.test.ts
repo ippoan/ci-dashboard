@@ -395,6 +395,20 @@ describe("GET /releases", () => {
     // Issue numbers link to the GitHub repo that came along on the redirect.
     expect(html).toContain("https://github.com/ippoan/nuxt-pwa-carins/issues/23");
     expect(html).toContain("https://github.com/ippoan/nuxt-pwa-carins/issues/24");
+    // Flash param を address bar から除去する script が同伴する (Refs #314)。
+    // リロードしても banner が再表示されない。
+    expect(html).toContain("history.replaceState");
+  });
+
+  it("flash 無しの page には replaceState script を出さない (Refs #314)", async () => {
+    const req = new Request("http://localhost/releases");
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(req, testEnv(), ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).not.toContain("history.replaceState");
   });
 
   it("renders release candidates with merged ref sources", async () => {

@@ -845,6 +845,24 @@ function renderRow(r: IssueRow): string {
   </tr>`;
 }
 
+// Flash param (closed= / failed= / failed_reasons=) を address bar から除去する
+// (Refs #314)。server 側の PRG + 1 回目の banner 表示は従来どおりで、render 後に
+// history.replaceState で URL を clean にする。これでリロードしても flash banner
+// が再表示されず、確認のための再読込が「また close された」ように見えない。
+// `repo` は tag 同伴 (detail page) の時だけ残す — tag 無しの repo= は index に
+// fall through する flash 添付用 param なので一緒に消す。
+const FLASH_CLEANUP_SCRIPT = `<script>
+(() => {
+  try {
+    const u = new URL(location.href);
+    for (const k of ["closed", "failed", "failed_reasons"]) u.searchParams.delete(k);
+    if (!u.searchParams.get("tag")) u.searchParams.delete("repo");
+    const qs = u.searchParams.toString();
+    history.replaceState(null, "", u.pathname + (qs ? "?" + qs : ""));
+  } catch { /* URL/History API 非対応環境では従来挙動のまま */ }
+})();
+</script>`;
+
 function renderFlash(
   closed: number[],
   failed: number[],
@@ -879,7 +897,7 @@ function renderFlash(
       failedList = `<div class="flash err">❌ Failed to close: ${failed.map(issueLink).join(" ")} (try again)</div>`;
     }
   }
-  return closedList + failedList;
+  return closedList + failedList + FLASH_CLEANUP_SCRIPT;
 }
 
 function renderIndex(
