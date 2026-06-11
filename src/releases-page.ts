@@ -245,33 +245,62 @@ async function kickReleasesIndexRefresh(
 
 /** index views を取り直して blob に書く (背景実行前提、queue consumer から
  *  も呼ばれる)。lock / fresh 再確認で重複 fan-out を排除。 */
-/** @returns true = 集計が実際に走って blob を書いた / false = lock or fresh
- *  recheck で bail した no-op (この時は WS reload を発火しない、Refs #327)。 */
-export async function refreshReleasesIndex(env: ReleasesIndexEnv): Promise<boolean> {
+/** refresh attempt の結末 (Refs #337)。"done" = 集計して blob を書いた
+ *  (= WS reload を発火して良い)。"fresh" = blob が既に新しい (停止して良い)。
+ *  それ以外は「blob はまだ stale なのに集計できなかった」= caller (queue
+ *  consumer) が self-reschedule して liveness を保つ。 */
+export type ReleasesIndexRefreshOutcome =
+  | "done" | "fresh" | "backoff" | "lock" | "empty-skip";
+
+export async function refreshReleasesIndex(
+  env: ReleasesIndexEnv,
+): Promise<ReleasesIndexRefreshOutcome> {
+  const started = Date.now();
+  const outcome = await refreshReleasesIndexInner(env);
+  // bail 経路が無 log だと「🔄 更新中」のまま無言で停止した時に観測不能に
+  // なる (2026-06-11 実害、Refs #337)。attempt ごとに必ず 1 行出す。
+  console.log(JSON.stringify({
+    msg: "releases-index-refresh-attempt",
+    outcome,
+    ms: Date.now() - started,
+  }));
+  return outcome;
+}
+
+async function refreshReleasesIndexInner(
+  env: ReleasesIndexEnv,
+): Promise<ReleasesIndexRefreshOutcome> {
   const kv = env.CI_STATUS;
   // Rate-limit cooldown 中は fan-out しない (Refs #329 — reconcile / pr-map /
-  // project-map と同じガード。ここだけ漏れていて cooldown 中も ~100+ call の
-  // 集計を試み、limit を悪化させていた)。stale blob + staleRepos は維持され、
-  // cooldown 明けの次の kick で追い付く。
-  if (await getRateLimitBackoff(kv)) return false;
-  if (await kv.get(RELEASES_INDEX_REFRESH_LOCK)) return false;
+  // project-map と同じガード)。stale blob + staleRepos は維持され、cooldown
+  // 明けの reschedule で追い付く。
+  if (await getRateLimitBackoff(kv)) return "backoff";
+  if (await kv.get(RELEASES_INDEX_REFRESH_LOCK)) return "lock";
   await kv.put(RELEASES_INDEX_REFRESH_LOCK, "1", {
     expirationTtl: RELEASES_INDEX_REFRESH_LOCK_TTL,
   });
-  const recheck = await readReleasesIndexBlob<RepoView[]>(kv);
-  if (recheck && Date.now() - recheck.storedAt < RELEASES_INDEX_FRESH_SECONDS * 1000) return false;
-  const views = await computeIndexViews(env);
-  // 全 repo の loadRepoView が落ちた (rate limit / 障害) 時に正常な blob を
-  // 空で上書きしない invariant (Refs #329)。空 index が正しいのは「監視 repo
-  // が本当にゼロ」の時だけで、その場合 recheck も空のはず。
-  if (views.length === 0 && recheck && (recheck.views?.length ?? 0) > 0) {
-    console.log(JSON.stringify({ msg: "releases-index-refresh-skipped-empty" }));
-    return false;
+  try {
+    const recheck = await readReleasesIndexBlob<RepoView[]>(kv);
+    if (recheck && Date.now() - recheck.storedAt < RELEASES_INDEX_FRESH_SECONDS * 1000) {
+      return "fresh";
+    }
+    const views = await computeIndexViews(env);
+    // 全 repo の loadRepoView が落ちた (rate limit / 障害) 時に正常な blob を
+    // 空で上書きしない invariant (Refs #329)。空 index が正しいのは「監視 repo
+    // が本当にゼロ」の時だけで、その場合 recheck も空のはず。
+    if (views.length === 0 && recheck && (recheck.views?.length ?? 0) > 0) {
+      return "empty-skip";
+    }
+    await writeReleasesIndexBlob(kv, views);
+    // token 取得が成功した = 認証は生きている。失効 banner を自動回復 (Refs #334)。
+    await clearGitHubAuthBroken(kv);
+    return "done";
+  } finally {
+    // Lock は「compute 実行中」だけを守る。TTL 任せにすると完了/bail 後も
+    // 最大 120s 残り、その間の refresh job が全部 bail → ack 捨てされて
+    // 「stale のまま停止」する liveness 穴になっていた (Refs #337)。
+    await kv.delete(RELEASES_INDEX_REFRESH_LOCK);
   }
-  await writeReleasesIndexBlob(kv, views);
-  // token 取得が成功した = 認証は生きている。失効 banner を自動回復 (Refs #334)。
-  await clearGitHubAuthBroken(kv);
-  return true;
 }
 
 async function computeIndexViews(env: ReleasesIndexEnv): Promise<RepoView[]> {

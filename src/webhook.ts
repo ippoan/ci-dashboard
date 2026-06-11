@@ -41,6 +41,24 @@ export interface ReleasesIndexRefreshMessage {
 
 export type QueueMessage = WebhookQueueMessage | ReleasesIndexRefreshMessage;
 
+// Self-reschedule の重複防止 marker (Refs #337)。60s 遅延 job が既に予約済み
+// なら積み増さない。KV expirationTtl の最小値 60s に合わせる。
+const REKICK_MARKER = "releases:index:rekick-scheduled";
+
+/** stale なのに集計できなかった時の自己再投函 (Refs #337)。queue binding が
+ *  無い環境 (dev / test) は no-op — 次の event / page view の enqueue が拾う。 */
+async function scheduleReleasesIndexRekick(env: Env): Promise<void> {
+  if (!env.WEBHOOK_QUEUE) return;
+  if (await env.CI_STATUS.get(REKICK_MARKER)) return;
+  await env.CI_STATUS.put(REKICK_MARKER, "1", { expirationTtl: 60 });
+  try {
+    await env.WEBHOOK_QUEUE.send(
+      { kind: "releases-index-refresh" },
+      { delaySeconds: 60 },
+    );
+  } catch { /* 次の event / page view の enqueue に任せる */ }
+}
+
 /** /releases index の stale 化 + refresh job の即時投函 (Refs #327)。
  *  page view を待たずに consumer が再集計を始めるので、WS reload が届く頃には
  *  fresh blob が出来ている。queue binding 無し環境では stale 化のみ (次の
@@ -303,14 +321,19 @@ export async function consumeWebhookBatch(
 
   if (refreshMessages.length === 0) return;
   try {
-    const refreshed = await refreshReleasesIndex(env);
+    const outcome = await refreshReleasesIndex(env);
     // 集計が実際に走った時だけ /releases の WS reload を発火する (Refs #327)。
-    // lock / fresh recheck で bail した no-op では reload させない。
-    if (refreshed) {
+    if (outcome === "done") {
       await hub.fetch(new Request("http://hub/releases-updated", {
         method: "POST",
         body: JSON.stringify({ repo: "*" }),
       }));
+    } else if (outcome !== "fresh") {
+      // blob はまだ stale なのに集計できなかった (backoff / lock / empty-skip)。
+      // 60s 後の refresh job を自分で再投函して「stale な blob はいつか必ず
+      // 集計される」invariant を保つ (Refs #337 — 旧実装はここで ack 捨てして
+      // おり、deploy に殺された compute の残 lock に当たると停止していた)。
+      await scheduleReleasesIndexRekick(env);
     }
     for (const m of refreshMessages) m.ack();
   } catch (err) {
