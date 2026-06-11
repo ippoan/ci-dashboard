@@ -141,7 +141,8 @@ async function verifySignature(
 export async function handleWebhook(
   request: Request,
   env: Env,
-  hub: DurableObjectStub
+  hub: DurableObjectStub,
+  ctx?: ExecutionContext,
 ): Promise<Response> {
   const signature = request.headers.get("X-Hub-Signature-256");
   if (!signature) {
@@ -181,6 +182,37 @@ export async function handleWebhook(
     delivery: request.headers.get("X-GitHub-Delivery") ?? "",
   }));
 
+  // Ack-then-process (Refs #318)。GitHub の webhook delivery timeout は 10s で、
+  // timeout した delivery は自動再送されない。Hub DO / KV / cache invalidation を
+  // 応答前に await すると CI burst 時に 10s を超えて event が喪失する実害が出た
+  // (2026-06-11 実測: wallTime 17.5s/18.0s + GitHub 側 "timed out" delivery)。
+  // 署名検証済みのこの時点で即 200 を返し、処理本体は waitUntil に流す
+  // (応答後 30s まで実行が保証される)。処理失敗は log のみ — GitHub への 500 は
+  // 再送を引き起こさないため、応答コードで伝える意味がない。
+  const work = processWebhookEvent(event, body, env, hub).catch((err) => {
+    console.log(JSON.stringify({
+      msg: "webhook-process-failed",
+      event,
+      repo: logRepo,
+      error: err instanceof Error ? err.message : String(err),
+    }));
+  });
+  if (ctx) {
+    ctx.waitUntil(work);
+  } else {
+    // test / ctx 非提供の呼び出し元では従来どおり同期処理 (挙動互換)。
+    await work;
+  }
+  return new Response("OK", { status: 200 });
+}
+
+// Event 処理本体。handleWebhook から waitUntil 経由で呼ばれる (Refs #318)。
+async function processWebhookEvent(
+  event: string | null,
+  body: string,
+  env: Env,
+  hub: DurableObjectStub,
+): Promise<void> {
   if (event === "workflow_run") {
     const payload: WorkflowRunPayload = JSON.parse(body);
     // Route through Hub DO for serialized KV access
@@ -215,7 +247,7 @@ export async function handleWebhook(
       }));
     }
 
-    return new Response("OK", { status: 200 });
+    return;
   }
 
   if (event === "workflow_job") {
@@ -224,7 +256,7 @@ export async function handleWebhook(
       method: "POST",
       body: JSON.stringify({ job: payload.workflow_job }),
     }));
-    return new Response("OK", { status: 200 });
+    return;
   }
 
   // Tagless-repo close-detection trigger. For repos that never cut a release
@@ -269,7 +301,7 @@ export async function handleWebhook(
         }));
       }
     }
-    return new Response("OK", { status: 200 });
+    return;
   }
 
   // /issues SSR page の KV cache (issue-cache.ts) 更新経路。Webhook で来た
@@ -287,7 +319,7 @@ export async function handleWebhook(
     if (owner && name) {
       await invalidateReleaseCacheIssue(env.CI_STATUS, owner, name, payload.issue.number);
     }
-    return new Response("OK", { status: 200 });
+    return;
   }
 
   // /issues SSR の comment 数表示用。`created` / `deleted` だけ反映、
@@ -296,7 +328,7 @@ export async function handleWebhook(
   if (event === "issue_comment") {
     const payload: IssueCommentWebhookPayload = JSON.parse(body);
     await applyIssueCommentEvent(env.CI_STATUS, payload);
-    return new Response("OK", { status: 200 });
+    return;
   }
 
   // /projects SSR の KV cache (project-cache.ts) invalidation 経路。
@@ -305,7 +337,7 @@ export async function handleWebhook(
   if (event === "projects_v2") {
     const payload: ProjectsV2WebhookPayload = JSON.parse(body);
     await applyProjectsV2Event(env.CI_STATUS, payload);
-    return new Response("OK", { status: 200 });
+    return;
   }
 
   // `projects_v2_item` event = 個別 card の add/edit/delete/archive/reorder。
@@ -313,7 +345,7 @@ export async function handleWebhook(
   if (event === "projects_v2_item") {
     const payload: ProjectsV2ItemWebhookPayload = JSON.parse(body);
     await applyProjectsV2ItemEvent(env.CI_STATUS, payload);
-    return new Response("OK", { status: 200 });
+    return;
   }
 
   // /releases SSR の release-cache.ts (TTL 300s tags) を webhook で flush。
@@ -325,7 +357,7 @@ export async function handleWebhook(
     if (owner && name) {
       await invalidateRepoTags(env.CI_STATUS, owner, name);
     }
-    return new Response("OK", { status: 200 });
+    return;
   }
 
   // `push` event は tag push (refs/tags/*) なら tags cache、default branch
@@ -351,10 +383,10 @@ export async function handleWebhook(
         }
       }
     }
-    return new Response("OK", { status: 200 });
+    return;
   }
 
-  return new Response("Ignored event: " + event, { status: 200 });
+  // 未知 event は noop (応答は handleWebhook が常に 200 を返す)。
 }
 
 export { verifySignature };
