@@ -1,7 +1,6 @@
 import { GitHubApiError, githubApi, parseRepo, tokenForOrg } from "./github-api";
 import type { AuthClientWorkerEnv } from "@ippoan/auth-client-worker";
 import { invalidateIssue } from "./release-cache";
-import { markReleasesIndexStale } from "./releases-index-cache";
 
 // failure 理由を URL flash param に safely 載せるための整形。
 // GitHubApiError は `GitHub API 403: {"message":"Repository was archived so
@@ -113,9 +112,9 @@ export async function handleReleaseClose(
     await Promise.all(
       closed.map((n) => invalidateIssue(env.CI_STATUS, owner, name, n)),
     );
-    // /releases index blob も stale 化 (Refs #325)。redirect 先の表示自体は
-    // flash 整合 (closed= の row を closed 扱いに変換) が担保する。
-    if (closed.length > 0) await markReleasesIndexStale(env.CI_STATUS, repoParam);
+    // /releases index は close で発火する issues webhook の直接 patch
+    // (Refs #339) が反映する — ここでの stale 化 (= 全集計の引き金) は不要に
+    // なった。redirect 直後の表示は flash 整合が担保する。
   }
 
   // Kick the Hub to recompute the banner alert state for this repo when at

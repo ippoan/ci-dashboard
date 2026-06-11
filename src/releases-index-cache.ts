@@ -26,7 +26,10 @@ export const RELEASES_INDEX_KEY = "releases:index:v1";
 // 「refresh の最短間隔」としてだけ機能する。60s だと CI ラッシュ時に
 // 全集計 (~30 repo × 100+ GitHub call) が時間 30 回走り quota を食い潰した
 // (2026-06-11 実害、Refs #329) ので 180s に緩和。
-export const RELEASES_INDEX_FRESH_SECONDS = 180;
+// Webhook 直接 patch (#339) 導入後は、merge / close は patch が即反映する
+// ため、全集計は「tag push の引き金 + 1h の答え合わせ」だけになる
+// (#332 の webhook-primary と同思想)。
+export const RELEASES_INDEX_FRESH_SECONDS = 3600;
 const RELEASES_INDEX_STORE_SECONDS = 86400;
 
 // refresh の重複排除 lock。fan-out は 35s かかり得るので余裕を持って 120s。
@@ -48,6 +51,18 @@ export async function writeReleasesIndexBlob(
     JSON.stringify({ storedAt: Date.now(), views }),
     { expirationTtl: RELEASES_INDEX_STORE_SECONDS },
   );
+}
+
+/** webhook 直接 patch (Refs #339) 用の書き戻し。storedAt / staleRepos を
+ *  変えない — storedAt は「最後の full snapshot 時刻」の意味を保ち、patch は
+ *  内容を現にするだけなので更新中バッジも出さない。 */
+export async function writePatchedReleasesIndexBlob(
+  kv: KVNamespace,
+  blob: ReleasesIndexBlob,
+): Promise<void> {
+  await kv.put(RELEASES_INDEX_KEY, JSON.stringify(blob), {
+    expirationTtl: RELEASES_INDEX_STORE_SECONDS,
+  });
 }
 
 /** blob を stale 化する (storedAt:0 へ書き換え)。delete にしないのは、close /

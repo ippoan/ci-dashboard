@@ -120,7 +120,7 @@ function cacheControlFor(hasFlash: boolean, detail: boolean): string {
 // "Recent releases" landing page (no params)
 // --------------------------------------------------------------------------
 
-interface RepoView {
+export interface RepoView {
   repo: string;
   tagBlocks: TagBlock[];
   olderTags: string[];   // tags beyond the displayed top N
@@ -130,7 +130,7 @@ interface RepoView {
   tagless: boolean;
 }
 
-interface TagBlock {
+export interface TagBlock {
   tag: string;
   prevTag: string | null;
   issues: IssueRow[];    // already-fetched and warning-annotated
@@ -718,7 +718,7 @@ interface ReleasePayload {
   rows: IssueRow[];
 }
 
-interface IssueRow {
+export interface IssueRow {
   number: number;
   title: string;
   state: string;

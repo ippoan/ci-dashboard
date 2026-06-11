@@ -1225,7 +1225,7 @@ describe("GET /releases — index SWR blob (Refs #325)", () => {
     // ため、blob 更新の検証は空 blob を seed して行う。
     vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
       new Response("not stubbed", { status: 500 }));
-    const oldStoredAt = Date.now() - 300_000;
+    const oldStoredAt = Date.now() - 2 * 60 * 60 * 1000;
     await seedIndexBlob(oldStoredAt, []);
 
     const ctx = createExecutionContext();
@@ -1246,7 +1246,7 @@ describe("GET /releases — index SWR blob (Refs #325)", () => {
   it("stale blob (non-empty) の即返し時も中身が render される", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
       new Response("not stubbed", { status: 500 }));
-    await seedIndexBlob(Date.now() - 300_000, [seededView]);
+    await seedIndexBlob(Date.now() - 2 * 60 * 60 * 1000, [seededView]);
 
     const ctx = createExecutionContext();
     const res = await worker.fetch(new Request("http://localhost/releases"), testEnv(), ctx);
