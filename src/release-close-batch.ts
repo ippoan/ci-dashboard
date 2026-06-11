@@ -144,9 +144,34 @@ export async function handleReleaseCloseBatch(
         }
       }),
     );
-    // /releases index は close で発火する issues webhook の直接 patch
-    // (Refs #339) が反映する — ここでの stale 化 (= 全集計の引き金) は不要に
-    // なった。redirect 直後の表示は flash 整合が担保する。
+  }
+
+  // /releases index blob を close 経路で同期 patch する (Refs #343)。issues
+  // webhook 直接 patch (#339) は close の ~20s 後に届くため、redirect 直後の
+  // blob はまだ open で issue が候補に残り続け、operator が「もう一度更新」を
+  // 強いられていた。close handler は確定した closed[] を握っているので、
+  // redirect 前に hub 経由で該当行を同期 closed 化する (single close と同じ
+  // /releases-index-apply-close、url 突合なので cross-repo 行も拾う)。
+  // webhook patch と二重に走っても Hub DO 直列化 (#342) + last-write-wins で
+  // 冪等。hub 到達不能は fail-open (flash 整合 + webhook + 1h 安全網が拾う)。
+  if (hub && closedByRepo.size > 0) {
+    const closedUrls: string[] = [];
+    for (const [repo, nums] of closedByRepo) {
+      try {
+        const { owner, repo: name } = parseRepo(repo);
+        for (const n of nums) {
+          closedUrls.push(`https://github.com/${owner}/${name}/issues/${n}`);
+        }
+      } catch { /* malformed repo は skip (上の invalidate と同じ扱い) */ }
+    }
+    if (closedUrls.length > 0) {
+      try {
+        await hub.fetch(new Request("http://hub/releases-index-apply-close", {
+          method: "POST",
+          body: JSON.stringify({ repo: repoParam, urls: closedUrls }),
+        }));
+      } catch { /* fail-open: flash 整合 + webhook + 1h 安全網が拾う */ }
+    }
   }
 
   // Kick Hub to recompute alert state for each repo that had a successful close.
