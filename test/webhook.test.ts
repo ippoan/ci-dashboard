@@ -64,6 +64,21 @@ function mockHub(kv: KVNamespace): DurableObjectStub {
         hubCalls.push({ path: url.pathname, body: parsed });
       } catch { /* ignore */ }
 
+      // blob patch の DO 委譲 (Refs #341)。mock でも実 patch 関数を呼び、
+      // 「consumer → hub 委譲 → blob 反映」を integration として検証する。
+      if (url.pathname === "/releases-index-apply-issue") {
+        const { applyIssueEventToReleasesIndex } = await import("../src/releases-index-patch");
+        const payload = JSON.parse(await req.text());
+        const patched = await applyIssueEventToReleasesIndex(kv, payload);
+        return Response.json({ patched });
+      }
+      if (url.pathname === "/releases-index-apply-refs") {
+        const { applyRefsPatchToReleasesIndex } = await import("../src/releases-index-patch");
+        const { repo, refs, headSha } = JSON.parse(await req.text());
+        const outcome = await applyRefsPatchToReleasesIndex(kv, repo, refs, headSha);
+        return Response.json({ outcome });
+      }
+
       if (url.pathname === "/release-alert-detect") {
         // Side-channel for Tag Release completion. The real Hub fans out to
         // GitHub; the mock just acks.
@@ -1229,9 +1244,9 @@ describe("releases index blob (Refs #325)", () => {
     // 行が closed に書き換わり、storedAt (= full snapshot 時刻) は不変
     expect(blob.views[0].tagBlocks[0].issues[0].state).toBe("closed");
     expect(blob.storedAt).toBe(12345);
-    // /releases の WS reload が発火する
-    const updates = hubCalls.filter((c) => c.path === "/releases-updated");
-    expect(updates).toHaveLength(1);
+    // patch は Hub DO へ委譲される (broadcast は DO 内で原子的に行われる)
+    const applies = hubCalls.filter((c) => c.path === "/releases-index-apply-issue");
+    expect(applies).toHaveLength(1);
   });
 
   it("PR merged は Refs #N を /issues KV から組んで synthetic block に挿入する (Refs #339)", async () => {
@@ -1284,8 +1299,8 @@ describe("releases index blob (Refs #325)", () => {
     // 全集計の引き金 (stale 化) は不要
     expect(blob.storedAt).toBe(12345);
     expect(blob.staleRepos ?? []).toEqual([]);
-    const updates = hubCalls.filter((c) => c.path === "/releases-updated");
-    expect(updates).toHaveLength(1);
+    const applies = hubCalls.filter((c) => c.path === "/releases-index-apply-refs");
+    expect(applies).toHaveLength(1);
   });
 
   it("Refs 先が /issues KV に無い merge は全集計に fallback する (Refs #339)", async () => {
