@@ -366,6 +366,8 @@ describe("GET /releases", () => {
     // …but wrapped in a <details> with the right summary copy.
     expect(html).toContain('<details class="closed-details">');
     expect(html).toContain("<summary>1 closed issue</summary>");
+    // Tag-release 運用 badge (要 tag) が card 見出しに付く (Refs #312)。
+    expect(html).toContain('<span class="mode-badge mode-needs-tag"');
     // Open issue stays in the main candidate table outside the <details>;
     // closed issue's checkbox row is below the <details> boundary.
     const [beforeDetails, afterDetails] = html.split('<details class="closed-details">');
@@ -596,6 +598,10 @@ describe("GET /releases", () => {
     // The candidate row + form pair encoding works the same as the tag path.
     expect(html).toContain(`name="pair" value="master@deadbee:2"`);
     expect(html).toContain("worktree-naming-guard hook");
+    // Tagless 運用 badge が card 見出しに付く (Refs #312)。CSS 定義は常に
+    // 含まれるので、badge の実 HTML (span) でアサートする。
+    expect(html).toContain('<span class="mode-badge mode-tagless"');
+    expect(html).not.toContain('<span class="mode-badge mode-needs-tag"');
   });
 
   it("renders an empty card (no synthetic block) when the recent commit window has no Refs", async () => {

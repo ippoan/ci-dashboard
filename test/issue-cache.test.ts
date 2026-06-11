@@ -170,6 +170,38 @@ describe("issue-cache", () => {
       expect(kept).toBeTruthy();
     });
 
+    it("直近更新の entry は snapshot に居なくても evict しない (search index lag、Refs #311)", async () => {
+      // webhook で入った直後の issue は search index 未反映で snapshot から
+      // 漏れることがある。grace window 内なら evict せず残す。
+      const justCreated = new Date(Date.now() - 60 * 1000).toISOString();
+      await upsertIssue(env.CI_STATUS, makeIssue({
+        number: 138,
+        repo: "ippoan/nuxt-trouble",
+        created_at: justCreated,
+        updated_at: justCreated,
+        url: "https://github.com/ippoan/nuxt-trouble/issues/138",
+      }));
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : (input as Request).url;
+        if (url.includes("auth-worker") || url.includes("/mcp/token")) {
+          return Response.json({ access_token: "tok" });
+        }
+        if (url.includes("/search/issues")) {
+          // snapshot は index lag で #138 を含まない (complete 扱い)
+          return mockSearchResponse([makeIssue({ number: 10 })]);
+        }
+        return new Response("ignored", { status: 404 });
+      });
+
+      const result = await reconcileIssues(env, { mainOrgs: ["ippoan"], yhondaRepos: [] });
+      expect(result.fetched).toBe(true);
+      expect(result.removed).toBe(0);
+
+      // grace window 内の #138 は残る
+      const kept = await env.CI_STATUS.get(issueKey("ippoan/nuxt-trouble", 138), "json");
+      expect(kept).toBeTruthy();
+    });
+
     it("incomplete snapshot (search truncated) の時は削除を skip する", async () => {
       await upsertIssue(env.CI_STATUS, makeIssue({ number: 99 }));
       vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
