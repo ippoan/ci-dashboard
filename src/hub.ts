@@ -10,6 +10,7 @@ import {
 import { parseRepo, tokenForOrg } from "./github-api";
 import { invalidateIssue } from "./release-cache";
 import {
+  applyCloseToReleasesIndex,
   applyIssueEventToReleasesIndex,
   applyRefsPatchToReleasesIndex,
 } from "./releases-index-patch";
@@ -293,6 +294,21 @@ export class CIDashboardHub extends DurableObject<Env> {
           type: "releases-updated",
           data: { repo: payload.repository.full_name },
         });
+      }
+      return Response.json({ patched });
+    }
+
+    // ダッシュボード起点 close の index blob 同期反映 (Refs #343)。issues
+    // webhook (apply-issue) が来ない repo でも close を即 blob に焼くため、
+    // handleReleaseClose から closed issue の url 群を委譲される。本 DO 内で
+    // 直列実行 (lost update 防止) + patch 成功時 broadcast を原子的に行う。
+    if (url.pathname === "/releases-index-apply-close") {
+      const { repo, urls } = await request.json<{ repo: string; urls: string[] }>();
+      const patched = await this.serializeReleasesPatch(() =>
+        applyCloseToReleasesIndex(this.env.CI_STATUS, urls),
+      );
+      if (patched) {
+        this.broadcastEnvelope({ type: "releases-updated", data: { repo } });
       }
       return Response.json({ patched });
     }
