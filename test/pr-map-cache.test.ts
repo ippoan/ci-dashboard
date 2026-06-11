@@ -279,3 +279,61 @@ describe("applyPullRequestEvent (pull_request webhook patch)", () => {
     expect(entry!.data["ippoan/x#7"]![0]!.repo).toBe("ippoan/other");
   });
 });
+
+// ───── full refresh が直近 patch を巻き戻さない (Refs #330) ─────
+describe("recentPatches carry-over (Refs #330)", () => {
+  it("merge patch 直後の full refresh で patch が温存される (search index lag)", async () => {
+    // 1. blob seed (古い storedAt = refresh が走る状態)
+    const oldStoredAt = Date.now() - (__testing.PR_MAP_FRESH_SECONDS + 10) * 1000;
+    await seedMap({}, oldStoredAt);
+
+    // 2. merge event を patch (merged 紫チップ + recentPatches 記録)
+    await applyPullRequestEvent(env.CI_STATUS, {
+      action: "closed",
+      pull_request: {
+        number: 328, merged: true,
+        title: "feat: x", body: "Refs #327",
+        draft: false,
+        html_url: "https://github.com/ippoan/ci-dashboard/pull/328",
+        updated_at: "2026-06-11T10:52:00Z",
+      },
+      repository: { full_name: "ippoan/ci-dashboard" },
+    });
+
+    // 3. full refresh — search は index lag で空を返す
+    stubPrSearch();
+    const ctx = createExecutionContext();
+    await loadPrMap(testEnv(), ORGS, YHONDA, ctx);
+    await waitOnExecutionContext(ctx);
+
+    // 4. patch が fresh 結果に再適用されて残っている
+    const entry = await readMap();
+    const refs = entry!.data["ippoan/ci-dashboard#327"];
+    expect(refs).toBeDefined();
+    expect(refs![0].number).toBe(328);
+    expect(refs![0].state).toBe("merged");
+  });
+
+  it("10 分より古い patch は再適用されない (search 結果が正)", async () => {
+    const oldStoredAt = Date.now() - (__testing.PR_MAP_FRESH_SECONDS + 10) * 1000;
+    // recentPatches に 11 分前の patch を直接 seed
+    await env.CI_STATUS.put("issues-page:pr-map:v2", JSON.stringify({
+      storedAt: oldStoredAt,
+      data: { "ippoan/x#1": [prRef({ number: 99, state: "merged" })] },
+      recentPatches: [{
+        key: "ippoan/x#1",
+        ref: prRef({ number: 99, state: "merged" }),
+        at: Date.now() - 11 * 60 * 1000,
+      }],
+    }));
+
+    stubPrSearch();
+    const ctx = createExecutionContext();
+    await loadPrMap(testEnv(), ORGS, YHONDA, ctx);
+    await waitOnExecutionContext(ctx);
+
+    const entry = await readMap();
+    // 期限切れ patch は再適用されず、search 結果 (空) が正
+    expect(entry!.data["ippoan/x#1"]).toBeUndefined();
+  });
+});

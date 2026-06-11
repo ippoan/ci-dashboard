@@ -25,6 +25,7 @@ import {
 } from "./release-cache";
 import { loadDirectPushAllowlist } from "./direct-push-allowlist";
 import { parseTaglessRepos } from "./tagless-repos";
+import { getRateLimitBackoff } from "./github-backoff";
 import {
   readReleasesIndexBlob,
   writeReleasesIndexBlob,
@@ -236,6 +237,11 @@ async function kickReleasesIndexRefresh(
  *  recheck で bail した no-op (この時は WS reload を発火しない、Refs #327)。 */
 export async function refreshReleasesIndex(env: ReleasesIndexEnv): Promise<boolean> {
   const kv = env.CI_STATUS;
+  // Rate-limit cooldown 中は fan-out しない (Refs #329 — reconcile / pr-map /
+  // project-map と同じガード。ここだけ漏れていて cooldown 中も ~100+ call の
+  // 集計を試み、limit を悪化させていた)。stale blob + staleRepos は維持され、
+  // cooldown 明けの次の kick で追い付く。
+  if (await getRateLimitBackoff(kv)) return false;
   if (await kv.get(RELEASES_INDEX_REFRESH_LOCK)) return false;
   await kv.put(RELEASES_INDEX_REFRESH_LOCK, "1", {
     expirationTtl: RELEASES_INDEX_REFRESH_LOCK_TTL,
@@ -243,6 +249,13 @@ export async function refreshReleasesIndex(env: ReleasesIndexEnv): Promise<boole
   const recheck = await readReleasesIndexBlob<RepoView[]>(kv);
   if (recheck && Date.now() - recheck.storedAt < RELEASES_INDEX_FRESH_SECONDS * 1000) return false;
   const views = await computeIndexViews(env);
+  // 全 repo の loadRepoView が落ちた (rate limit / 障害) 時に正常な blob を
+  // 空で上書きしない invariant (Refs #329)。空 index が正しいのは「監視 repo
+  // が本当にゼロ」の時だけで、その場合 recheck も空のはず。
+  if (views.length === 0 && recheck && (recheck.views?.length ?? 0) > 0) {
+    console.log(JSON.stringify({ msg: "releases-index-refresh-skipped-empty" }));
+    return false;
+  }
   await writeReleasesIndexBlob(kv, views);
   return true;
 }
