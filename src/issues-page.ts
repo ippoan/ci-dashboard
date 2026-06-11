@@ -314,8 +314,11 @@ function renderHtml(
     : "";
   // Rate-limit cooldown 中: 生の GitHub エラーは出さず、cache 表示 + 再開
   // 予定だけを穏当に伝える (Refs #304)。
+  // 文言注意 (Refs #329): cooldown で止まるのは「検索ベースの安全網 reconcile」
+  // だけ。webhook → KV → WS reload の経路は GitHub API を呼ばないため、issue の
+  // 作成/close は cooldown 中も反映され続ける — そう読める文言にする。
   const backoffBanner = freshness.backoffUntil
-    ? `<div class="banner banner-info">⏳ GitHub rate-limit cooldown — serving cached data; auto-refresh resumes by ${new Date(freshness.backoffUntil).toISOString().slice(11, 16)} UTC</div>`
+    ? `<div class="banner banner-info">⏳ GitHub rate-limit cooldown — webhook による更新は継続中です (検索ベースの安全網 reconcile のみ ${new Date(freshness.backoffUntil).toISOString().slice(11, 16)} UTC 頃まで休止)</div>`
     : "";
   // Cold start で同期 reconcile が fail したが cache はあった時のみ生エラー。
   const issueStaleBanner = freshness.coldError
@@ -650,8 +653,10 @@ const DECORATIONS_POLL_SCRIPT = `
           const r = await fetch("/issues/decorations");
           if (r.ok) {
             const d = await r.json();
+            // 揃っている分だけ先に注入する (Refs #330 — project map が rate
+            // limit で組めない間も PR チップは出す)。apply は idempotent。
+            apply(d);
             if (d.ready) {
-              apply(d);
               const banner = document.getElementById("deco-loading");
               if (banner) banner.remove();
               return;

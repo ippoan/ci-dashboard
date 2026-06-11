@@ -40,6 +40,25 @@ interface PrMapCacheEntry {
   storedAt: number;
   patchedAt?: number;
   data: Record<string, IssuePrRef[]>;
+  /** webhook patch の直近履歴 (Refs #330)。full refresh は GitHub Search
+   *  ベースで、merge 直後の PR は index 未反映のことがある — 取り直した結果で
+   *  blob を上書きすると patch したばかりのチップが巻き戻る。refreshPrMap は
+   *  fresh 結果を組んだ後にこの履歴 (10 分窓) を再適用する。 */
+  recentPatches?: Array<{ key: string; ref: IssuePrRef; at: number }>;
+}
+
+// recentPatches の保持窓と上限。窓は GitHub Search index lag の実測上限
+// (#311 と同じ 10 分)、上限は CI burst でも entry が肥大しない保険。
+const RECENT_PATCH_WINDOW_MS = 10 * 60 * 1000;
+const RECENT_PATCH_CAP = 50;
+
+function pruneRecentPatches(
+  patches: Array<{ key: string; ref: IssuePrRef; at: number }> | undefined,
+  now: number,
+): Array<{ key: string; ref: IssuePrRef; at: number }> {
+  return (patches ?? [])
+    .filter((p) => now - p.at < RECENT_PATCH_WINDOW_MS)
+    .slice(-RECENT_PATCH_CAP);
 }
 
 export interface PrMapResult {
@@ -126,9 +145,23 @@ export async function refreshPrMap(
   if (recheck && Date.now() - recheck.storedAt < PR_MAP_FRESH_SECONDS * 1000) return;
   try {
     const fresh = await fetchAllOpenPrsByIssue(env, mainOrgs, yhondaRepos);
+    // Search index lag ガード (Refs #330): merge/open 直後の PR は search に
+    // まだ載っていないことがある。直近 10 分の webhook patch を fresh 結果に
+    // 再適用してから書く (= lag 窓内は patch が full refresh に勝つ)。
+    const now = Date.now();
+    const recentPatches = pruneRecentPatches(recheck?.recentPatches, now);
+    for (const p of recentPatches) {
+      const list = (fresh.get(p.key) ?? []).filter(
+        (r) => !(r.repo === p.ref.repo && r.number === p.ref.number),
+      );
+      list.push(p.ref);
+      list.sort(sortPrRefs);
+      fresh.set(p.key, list);
+    }
     const entry: PrMapCacheEntry = {
-      storedAt: Date.now(),
+      storedAt: now,
       data: Object.fromEntries(fresh),
+      recentPatches,
     };
     await kv.put(PR_MAP_CACHE_KEY, JSON.stringify(entry), {
       expirationTtl: PR_MAP_STORE_SECONDS,
@@ -204,6 +237,8 @@ export async function applyPullRequestEvent(
   // ので除去のみ (実配信では title は常に載る)。
   const removeOnly =
     (payload.action === "closed" && !pr.merged) || pr.title === undefined;
+  let patchedRef: IssuePrRef | null = null;
+  const patchedKeys: string[] = [];
   if (!removeOnly) {
     const state: IssuePrRef["state"] =
       payload.action === "closed" && pr.merged ? "merged" : "open";
@@ -216,19 +251,32 @@ export async function applyPullRequestEvent(
       updated_at: pr.updated_at ?? new Date().toISOString(),
       state,
     };
+    patchedRef = ref;
     const refs = extractIssueRefs(repo, `${pr.title}\n${pr.body ?? ""}`);
     for (const key of refs) {
       const list = data[key] ?? [];
       list.push(ref);
       list.sort(sortPrRefs);
       data[key] = list;
+      patchedKeys.push(key);
+    }
+  }
+
+  // 直近 patch を記録 (Refs #330)。removeOnly (closed-unmerged) は記録しない —
+  // search lag で復活しても最大 10 分チップが残るだけで実害が小さい。
+  const now = Date.now();
+  const recentPatches = pruneRecentPatches(cached.recentPatches, now);
+  if (!removeOnly) {
+    for (const key of patchedKeys) {
+      recentPatches.push({ key, ref: patchedRef!, at: now });
     }
   }
 
   const entry: PrMapCacheEntry = {
     storedAt: cached.storedAt,
-    patchedAt: Date.now(),
+    patchedAt: now,
     data,
+    recentPatches: recentPatches.slice(-RECENT_PATCH_CAP),
   };
   await kv.put(PR_MAP_CACHE_KEY, JSON.stringify(entry), {
     expirationTtl: PR_MAP_STORE_SECONDS,

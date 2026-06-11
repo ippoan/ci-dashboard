@@ -22,7 +22,11 @@ export interface ReleasesIndexBlob<T = unknown> {
 const STALE_REPOS_CAP = 20;
 
 export const RELEASES_INDEX_KEY = "releases:index:v1";
-export const RELEASES_INDEX_FRESH_SECONDS = 60;
+// 鮮度は WS event 起点の refresh (#327) が担保するため、この window は
+// 「refresh の最短間隔」としてだけ機能する。60s だと CI ラッシュ時に
+// 全集計 (~30 repo × 100+ GitHub call) が時間 30 回走り quota を食い潰した
+// (2026-06-11 実害、Refs #329) ので 180s に緩和。
+export const RELEASES_INDEX_FRESH_SECONDS = 180;
 const RELEASES_INDEX_STORE_SECONDS = 86400;
 
 // refresh の重複排除 lock。fan-out は 35s かかり得るので余裕を持って 120s。

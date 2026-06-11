@@ -1220,26 +1220,42 @@ describe("GET /releases — index SWR blob (Refs #325)", () => {
   });
 
   it("stale blob は即返し + refreshing note + 背景 refresh (waitUntil fallback)", async () => {
-    // 背景 refresh の compute は空 fixture (watched なし) で即完走させる
+    // 背景 refresh の compute は空 fixture (watched なし) で即完走させる。
+    // Refs #329: 空 views で non-empty blob を上書きしない invariant が入った
+    // ため、blob 更新の検証は空 blob を seed して行う。
     vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
       new Response("not stubbed", { status: 500 }));
-    const oldStoredAt = Date.now() - 120_000;
-    await seedIndexBlob(oldStoredAt, [seededView]);
+    const oldStoredAt = Date.now() - 300_000;
+    await seedIndexBlob(oldStoredAt, []);
 
     const ctx = createExecutionContext();
     const res = await worker.fetch(new Request("http://localhost/releases"), testEnv(), ctx);
 
     expect(res.status).toBe(200);
     const html = await res.text();
-    // 旧 blob の中身を即返し + 更新中 note
-    expect(html).toContain("blob から出た issue");
+    // stale 即返し中の note
     expect(html).toContain('<div class="refreshing-note">');
 
-    // waitUntil の背景 refresh が blob を書き直す (watched 空 → views [])
+    // waitUntil の背景 refresh が blob を書き直す (空 → 空なので invariant 非該当)
     await waitOnExecutionContext(ctx);
     const blob = await env.CI_STATUS.get("releases:index:v1", "json") as
       { storedAt: number; views: unknown[] };
     expect(blob.storedAt).toBeGreaterThan(oldStoredAt);
+  });
+
+  it("stale blob (non-empty) の即返し時も中身が render される", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      new Response("not stubbed", { status: 500 }));
+    await seedIndexBlob(Date.now() - 300_000, [seededView]);
+
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(new Request("http://localhost/releases"), testEnv(), ctx);
+    const html = await res.text();
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(200);
+    expect(html).toContain("blob から出た issue");
+    expect(html).toContain('<div class="refreshing-note">');
   });
 
   it("flash 整合: closed= の issue は stale blob でも candidate から消える", async () => {
@@ -1332,5 +1348,48 @@ describe("GET /releases — 更新中バッジ + live reload (Refs #327)", () =>
     expect(html).toContain("releases-updated");
     expect(html).toContain('new WebSocket(proto + "//" + location.host + "/ws")');
     expect(html).toContain("location.reload()");
+  });
+});
+
+// ───── refresh の rate-limit / 空上書きガード (Refs #329) ─────
+describe("refreshReleasesIndex guards (Refs #329)", () => {
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await clearReleaseCache(env.CI_STATUS);
+    await env.CI_STATUS.delete("releases:index:v1");
+    await env.CI_STATUS.delete("releases:index:refreshing");
+    await env.CI_STATUS.delete("github:rl-backoff");
+  });
+
+  it("rate-limit backoff 中は fan-out せず blob を温存する", async () => {
+    const { setRateLimitBackoff } = await import("../src/github-backoff");
+    const { GitHubApiError } = await import("../src/github-api");
+    const { refreshReleasesIndex } = await import("../src/releases-page");
+    await setRateLimitBackoff(env.CI_STATUS, new GitHubApiError(403, "rate limit"));
+    const seeded = JSON.stringify({ storedAt: 0, views: [{ repo: "ippoan/x", tagless: true, olderTags: [], tagBlocks: [] }], staleRepos: ["ippoan/x"] });
+    await env.CI_STATUS.put("releases:index:v1", seeded);
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+    const refreshed = await refreshReleasesIndex(testEnv());
+
+    expect(refreshed).toBe(false);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    // blob は stale のまま温存 (cooldown 明けの kick で追い付く)
+    expect(await env.CI_STATUS.get("releases:index:v1")).toBe(seeded);
+  });
+
+  it("compute が全滅して views 空でも non-empty blob を上書きしない", async () => {
+    const { refreshReleasesIndex } = await import("../src/releases-page");
+    // 全 GitHub 呼び出しを fail させる → loadRepoView は全 repo null → views []
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      new Response("boom", { status: 500 }));
+    const seeded = JSON.stringify({ storedAt: 0, views: [{ repo: "ippoan/x", tagless: true, olderTags: [], tagBlocks: [] }] });
+    await env.CI_STATUS.put("releases:index:v1", seeded);
+
+    // watched に repo を入れて compute が空に潰れる状況を作る
+    const refreshed = await refreshReleasesIndex(testEnv({ watched: ["ippoan/x"] }));
+
+    expect(refreshed).toBe(false);
+    expect(await env.CI_STATUS.get("releases:index:v1")).toBe(seeded);
   });
 });
