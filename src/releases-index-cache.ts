@@ -13,7 +13,13 @@
 export interface ReleasesIndexBlob<T = unknown> {
   storedAt: number;
   views: T;
+  /** stale 化の原因 repo (Refs #327)。/releases が「🔄 更新中」バッジを
+   *  repo card 単位で出すのに使う。refresh 完了 (blob 再生成) でリセット。 */
+  staleRepos?: string[];
 }
+
+// staleRepos の肥大防止 (CI burst で merge が連発しても note が溢れない)。
+const STALE_REPOS_CAP = 20;
 
 export const RELEASES_INDEX_KEY = "releases:index:v1";
 export const RELEASES_INDEX_FRESH_SECONDS = 60;
@@ -42,13 +48,24 @@ export async function writeReleasesIndexBlob(
 
 /** blob を stale 化する (storedAt:0 へ書き換え)。delete にしないのは、close /
  *  merge の度に index が cold start (同期 16s 生成) へ戻るのを避けるため —
- *  古い表示を即出しして背景 refresh で追い付く。blob 不在は no-op。 */
-export async function markReleasesIndexStale(kv: KVNamespace): Promise<void> {
+ *  古い表示を即出しして背景 refresh で追い付く。blob 不在は no-op。
+ *  `repo` を渡すと staleRepos に記録され、/releases が該当 card に
+ *  「🔄 更新中」バッジを出す (Refs #327)。 */
+export async function markReleasesIndexStale(
+  kv: KVNamespace,
+  repo?: string,
+): Promise<void> {
   const blob = await kv.get(RELEASES_INDEX_KEY, "json") as ReleasesIndexBlob | null;
   if (!blob) return;
+  const staleRepos = new Set(blob.staleRepos ?? []);
+  if (repo) staleRepos.add(repo);
   await kv.put(
     RELEASES_INDEX_KEY,
-    JSON.stringify({ ...blob, storedAt: 0 }),
+    JSON.stringify({
+      ...blob,
+      storedAt: 0,
+      staleRepos: [...staleRepos].slice(0, STALE_REPOS_CAP),
+    }),
     { expirationTtl: RELEASES_INDEX_STORE_SECONDS },
   );
 }

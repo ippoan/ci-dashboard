@@ -167,11 +167,13 @@ async function handleIndexPage(
   const blob = await readReleasesIndexBlob<RepoView[]>(kv);
   let views: RepoView[];
   let refreshing = false;
+  let staleRepos: string[] = [];
   if (blob) {
     views = blob.views;
     const fresh = Date.now() - blob.storedAt < RELEASES_INDEX_FRESH_SECONDS * 1000;
     if (!fresh) {
       refreshing = true;
+      staleRepos = blob.staleRepos ?? [];
       await kickReleasesIndexRefresh(env, ctx);
     }
   } else {
@@ -194,7 +196,7 @@ async function handleIndexPage(
   }
 
   return html(
-    renderIndex(views, closedFlash, failedFlash, failedReasons, flashRepo, refreshing),
+    renderIndex(views, closedFlash, failedFlash, failedReasons, flashRepo, refreshing, staleRepos),
     200,
     cacheControlFor(hasFlash, /* detail */ false),
   );
@@ -230,16 +232,19 @@ async function kickReleasesIndexRefresh(
 
 /** index views を取り直して blob に書く (背景実行前提、queue consumer から
  *  も呼ばれる)。lock / fresh 再確認で重複 fan-out を排除。 */
-export async function refreshReleasesIndex(env: ReleasesIndexEnv): Promise<void> {
+/** @returns true = 集計が実際に走って blob を書いた / false = lock or fresh
+ *  recheck で bail した no-op (この時は WS reload を発火しない、Refs #327)。 */
+export async function refreshReleasesIndex(env: ReleasesIndexEnv): Promise<boolean> {
   const kv = env.CI_STATUS;
-  if (await kv.get(RELEASES_INDEX_REFRESH_LOCK)) return;
+  if (await kv.get(RELEASES_INDEX_REFRESH_LOCK)) return false;
   await kv.put(RELEASES_INDEX_REFRESH_LOCK, "1", {
     expirationTtl: RELEASES_INDEX_REFRESH_LOCK_TTL,
   });
   const recheck = await readReleasesIndexBlob<RepoView[]>(kv);
-  if (recheck && Date.now() - recheck.storedAt < RELEASES_INDEX_FRESH_SECONDS * 1000) return;
+  if (recheck && Date.now() - recheck.storedAt < RELEASES_INDEX_FRESH_SECONDS * 1000) return false;
   const views = await computeIndexViews(env);
   await writeReleasesIndexBlob(kv, views);
+  return true;
 }
 
 async function computeIndexViews(env: ReleasesIndexEnv): Promise<RepoView[]> {
@@ -991,6 +996,7 @@ function renderIndex(
   failedReasons: Map<number, string>,
   flashRepo: string | null,
   refreshing = false,
+  staleRepos: string[] = [],
 ): string {
   // Show every watched repo as a card — including ones with no referenced
   // issues yet or whose refs are all closed. The operator asked for the full
@@ -998,17 +1004,22 @@ function renderIndex(
   // with a "no referenced issues" note (see renderIndexRepo) instead of being
   // dropped as noise. The bottom empty-state copy only kicks in when nothing
   // is watched at all (views is empty), so a fresh env still reads cleanly.
+  const staleSet = new Set(staleRepos);
   const body = views.length === 0
     ? `<div class="empty">🤷 No releases with referenced issues in the recent window. Look one up below.</div>`
-    : views.map(renderIndexRepo).join("\n");
+    : views.map((v) => renderIndexRepo(v, staleSet.has(v.repo))).join("\n");
 
   // Banner sits above the cards so a successful batch close redirect always
   // lands the operator on the list with confirmation of what got closed.
   const flash = renderFlash(closedFlash, failedFlash, failedReasons, flashRepo);
 
-  // SWR で stale blob を即返しした時の控えめな注記 (Refs #325)。
+  // SWR で stale blob を即返しした時の注記 (Refs #325 / #327)。stale 化の
+  // 原因 repo が分かる時はそれを列挙し、該当 card には 🔄 バッジが付く。
+  // 更新完了は WS (releases-updated) が reload で反映する。
   const refreshingNote = refreshing
-    ? `<div class="refreshing-note">🔄 background で集計を更新中 — 表示は直近の cache です</div>`
+    ? (staleRepos.length > 0
+      ? `<div class="refreshing-note">🔄 更新待ち: ${staleRepos.map((r) => `<code>${escapeHtml(r)}</code>`).join(" ")} — background で集計中、完了すると自動で再読込されます</div>`
+      : `<div class="refreshing-note">🔄 background で集計を更新中 — 表示は直近の cache です (完了すると自動で再読込)</div>`)
     : "";
 
   return `<!DOCTYPE html>
@@ -1027,8 +1038,54 @@ ${body}
 <h2 class="lookup-header">Look up another release</h2>
 ${renderLookupForm(null, null)}
 ${PWA_REGISTER_SCRIPT}
+${RELEASES_LIVE_RELOAD_SCRIPT}
 </body></html>`;
 }
+
+// /releases の live 更新 (Refs #327)。index blob の refresh 完了時に Hub が
+// broadcast する releases-updated を受けて debounce reload する。「集計完了後」
+// の通知なので reload 直後は必ず fresh blob を読む。issues-updated でも
+// close 候補の状態が変わるので併せて reload する。非表示タブは保留。
+const RELEASES_LIVE_RELOAD_SCRIPT = `
+  <script>
+    (() => {
+      let pending = false;
+      let timer = null;
+      const doReload = () => {
+        if (document.visibilityState !== "visible") { pending = true; return; }
+        location.reload();
+      };
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "visible" && pending) { pending = false; doReload(); }
+      });
+      const connect = () => {
+        const proto = location.protocol === "https:" ? "wss:" : "ws:";
+        const ws = new WebSocket(proto + "//" + location.host + "/ws");
+        let ping = null;
+        ws.onopen = () => {
+          ping = setInterval(() => {
+            if (ws.readyState === WebSocket.OPEN) ws.send("ping");
+          }, 30000);
+        };
+        ws.onmessage = (e) => {
+          if (e.data === "pong") return;
+          try {
+            const msg = JSON.parse(e.data);
+            if (msg && (msg.type === "releases-updated" || msg.type === "issues-updated")) {
+              if (timer) clearTimeout(timer);
+              timer = setTimeout(doReload, 1500);
+            }
+          } catch { /* ignore */ }
+        };
+        ws.onclose = () => {
+          if (ping) clearInterval(ping);
+          setTimeout(connect, 3000);
+        };
+        ws.onerror = () => { ws.close(); };
+      };
+      connect();
+    })();
+  </script>`;
 
 // repo の release 運用 badge (Refs #312)。close するのに tag を打つ必要が
 // あるか (要 tag) / merge がそのまま release か (tagless) を card 見出しで
@@ -1040,7 +1097,12 @@ function renderModeBadge(tagless: boolean): string {
     : `<span class="mode-badge mode-needs-tag" title="tag-release 運用 — close 候補を出すには release tag を打つ (/tag-release)">🏷️ 要 tag</span>`;
 }
 
-function renderIndexRepo(view: RepoView): string {
+function renderIndexRepo(view: RepoView, updating = false): string {
+  // stale 化の原因 repo に出す「更新中」バッジ (Refs #327)。refresh 完了で
+  // blob が再生成され staleRepos が消える → WS reload 後は出ない。
+  const updatingBadge = updating
+    ? `<span class="updating-badge">🔄 更新中</span>`
+    : "";
   // Only tag blocks with at least one OPEN (actionable) issue get the full
   // table+form treatment. Closed-only blocks are pure noise on the landing
   // page — the operator already released them. Refs #226.
@@ -1063,7 +1125,7 @@ function renderIndexRepo(view: RepoView): string {
       : `<span class="no-refs">No referenced issues in the recent release window.</span>`;
     return `<section class="repo-card repo-card-compact">
       <a class="repo-link" href="https://github.com/${escapeHtml(view.repo)}/releases" target="_blank" rel="noopener">${escapeHtml(view.repo)}</a>
-      ${renderModeBadge(view.tagless)}
+      ${renderModeBadge(view.tagless)}${updatingBadge}
       ${summary}
     </section>`;
   }
@@ -1091,7 +1153,7 @@ function renderIndexRepo(view: RepoView): string {
   // close them in one shot; the POST handler groups by tag for comment
   // attribution.
   return `<section class="repo-card">
-    <h2><a href="https://github.com/${escapeHtml(view.repo)}/releases" target="_blank" rel="noopener">${escapeHtml(view.repo)}</a>${renderModeBadge(view.tagless)}</h2>
+    <h2><a href="https://github.com/${escapeHtml(view.repo)}/releases" target="_blank" rel="noopener">${escapeHtml(view.repo)}</a>${renderModeBadge(view.tagless)}${updatingBadge}</h2>
     <form method="POST" action="/api/release-close-batch" class="batch-close-form">
       <input type="hidden" name="repo" value="${escapeHtml(view.repo)}">
       ${tagSections}
@@ -1297,6 +1359,12 @@ const STYLES = `
   }
   .repo-card-compact .repo-link:hover { color: #58a6ff; }
   .repo-card-compact .closed-summary { font-size: 12px; color: #8b949e; }
+  .updating-badge {
+    display: inline-block; font-size: 11px; font-weight: 400;
+    padding: 1px 8px; border-radius: 10px; margin-left: 8px;
+    vertical-align: middle; white-space: nowrap;
+    background: #1f6feb22; color: #79c0ff; border: 1px solid #1f6feb88;
+  }
   .refreshing-note {
     background: #1c2433; border: 1px solid #1f6feb88; color: #a5d6ff;
     border-radius: 6px; padding: 8px 14px; font-size: 12px; margin-bottom: 12px;

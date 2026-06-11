@@ -1103,6 +1103,60 @@ describe("releases index blob (Refs #325)", () => {
     return blob ? blob.storedAt : null;
   }
 
+  it("PR merged で issues-updated broadcast + staleRepos に repo が積まれる (Refs #327)", async () => {
+    await seedBlob();
+    const body = JSON.stringify({
+      action: "closed",
+      pull_request: {
+        number: 9, merged: true, merge_commit_sha: "abc",
+        base: { ref: "main" }, title: "feat", body: "Refs #1",
+        draft: false, html_url: "https://github.com/ippoan/foo/pull/9",
+        updated_at: "2026-06-11T00:00:00Z",
+      },
+      repository: { full_name: "ippoan/foo", default_branch: "main" },
+    });
+    const sig = await sign(body, WEBHOOK_SECRET);
+    const ctx = createExecutionContext();
+    await worker.fetch(
+      new Request("http://localhost/webhook", {
+        method: "POST", body,
+        headers: { "X-Hub-Signature-256": sig, "X-GitHub-Event": "pull_request" },
+      }),
+      testEnv(), ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    const blob = await env.CI_STATUS.get("releases:index:v1", "json") as
+      { storedAt: number; staleRepos?: string[] };
+    expect(blob.storedAt).toBe(0);
+    expect(blob.staleRepos).toContain("ippoan/foo");
+    // merged 紫チップ反映用の /issues live reload も発火する
+    const updates = hubCalls.filter((c) => c.path === "/issues-updated");
+    expect(updates).toHaveLength(1);
+    expect(updates[0].body).toEqual({ repo: "ippoan/foo", number: 9, state: "merged" });
+  });
+
+  it("refresh job 完了で releases-updated が broadcast される (Refs #327)", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      new Response("not stubbed", { status: 500 }));
+    const acked: string[] = [];
+    const batch = {
+      messages: [{
+        body: { kind: "releases-index-refresh" },
+        attempts: 1,
+        ack: () => acked.push("refresh"),
+        retry: () => { throw new Error("should not retry"); },
+      }],
+    } as unknown as MessageBatch<import("../src/webhook").QueueMessage>;
+
+    await consumeWebhookBatch(batch, testEnv());
+
+    expect(acked).toEqual(["refresh"]);
+    const updates = hubCalls.filter((c) => c.path === "/releases-updated");
+    expect(updates).toHaveLength(1);
+    expect(updates[0].body).toEqual({ repo: "*" });
+  });
+
   it("issues event で blob が stale 化される (storedAt:0)", async () => {
     await seedBlob();
     const body = JSON.stringify({
