@@ -296,6 +296,29 @@ describe("GET /issues", () => {
     expect(html).toContain('href="/"');
   });
 
+  it("repo section に release 運用 badge を表示 (TAGLESS_REPOS 判定、Refs #312)", async () => {
+    stubSearchIssues();
+    const req = new Request("http://localhost/issues");
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(
+      req,
+      { ...testEnv(), TAGLESS_REPOS: "ohishi-exp/daiun-salary" },
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    const html = await res.text();
+    // tagless 指定 repo の section は tagless badge、それ以外は 要 tag badge
+    expect(html).toContain("mode-tagless");
+    expect(html).toContain("mode-needs-tag");
+    // section 単位の対応を確認: daiun-salary の h2 には tagless、
+    // rust-alc-api の h2 には 要 tag が付く。
+    const daiunH2 = html.split("\n").find((l) => l.includes("ohishi-exp/daiun-salary</a><span"));
+    expect(daiunH2).toContain("mode-tagless");
+    const alcH2 = html.split("\n").find((l) => l.includes("ippoan/rust-alc-api</a><span"));
+    expect(alcH2).toContain("mode-needs-tag");
+  });
+
   it("escapes HTML in issue titles (XSS guard)", async () => {
     stubSearchIssues();
     const req = new Request("http://localhost/issues");

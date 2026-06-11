@@ -40,6 +40,16 @@ const SAFETY_WINDOW_MS = 5 * 1000;
 const RECONCILE_LOCK_KEY = "issues:reconciling";
 const RECONCILE_LOCK_TTL_SECONDS = 60;
 
+// Evict の search-index-lag ガード (Refs #311)。reconcile の full snapshot は
+// GitHub Search ベースで、作成・更新直後の issue は index 未反映のことがある
+// (`incomplete_results` は timeout 指標で index lag では立たない)。webhook が
+// KV に upsert した直後の entry を「snapshot に居ない」だけで evict すると、
+// open issue が /issues から一時的に消える (2026-06-11 nuxt-trouble#138 で実害)。
+// 直近 EVICT_GRACE_MS 以内に更新された entry は evict 対象から除外する。
+// closed への遷移は webhook の delete が即時反映するので、この猶予で stale が
+// 残るのは「close webhook も配信ミスした」場合の最大 10 分のみ。
+export const EVICT_GRACE_MS = 10 * 60 * 1000;
+
 export function issueKey(repo: string, number: number): string {
   return `${KEY_PREFIX}${repo}#${number}`;
 }
@@ -173,6 +183,13 @@ export async function reconcileIssues(
     const existing = await listCachedOpenIssues(kv);
     for (const e of existing) {
       if (!freshKeys.has(issueKey(e.repo, e.number))) {
+        // Search index lag ガード (Refs #311): 直近に作成/更新された entry は
+        // index がまだ追い付いていないだけの可能性があるので残す。updated_at
+        // が parse 不能 (NaN) な entry は従来どおり evict する。
+        const updatedMs = Date.parse(e.updated_at);
+        if (Number.isFinite(updatedMs) && now - updatedMs < EVICT_GRACE_MS) {
+          continue;
+        }
         await kv.delete(issueKey(e.repo, e.number));
         removed++;
       }
