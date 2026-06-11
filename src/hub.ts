@@ -9,6 +9,11 @@ import {
 } from "./release-alert";
 import { parseRepo, tokenForOrg } from "./github-api";
 import { invalidateIssue } from "./release-cache";
+import {
+  applyIssueEventToReleasesIndex,
+  applyRefsPatchToReleasesIndex,
+} from "./releases-index-patch";
+import type { IssueWebhookPayload } from "./issue-cache";
 
 // WebSocket message envelope. All broadcasts now share `{ type, data }` so
 // the dashboard JS can dispatch by type. Two channels currently:
@@ -49,6 +54,20 @@ export class CIDashboardHub extends DurableObject<Env> {
   // the tag alert in place when a fresh tag release fires.
   private alerts = new Map<string, ReleaseAlert>();
   private alertsLoaded = false;
+
+  // /releases index blob への mutation を直列化する instance 内 mutex
+  // (Refs #341)。queue consumer は並走 3 (#336) のため、batch close の
+  // issues event が同じ blob を同時 read-modify-write すると後勝ちで他の
+  // patch が消える (lost update)。本 DO は singleton なので promise chain で
+  // 確実に直列になる。
+  private releasesPatchChain: Promise<unknown> = Promise.resolve();
+
+  private serializeReleasesPatch<T>(work: () => Promise<T>): Promise<T> {
+    const run = this.releasesPatchChain.then(work);
+    // 後続は成功/失敗に関わらず続行 (失敗は caller に伝播)。
+    this.releasesPatchChain = run.then(() => undefined, () => undefined);
+    return run;
+  }
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -259,6 +278,38 @@ export class CIDashboardHub extends DurableObject<Env> {
       const data = await request.json<{ repo: string; number: number; state: string }>();
       this.broadcastEnvelope({ type: "issues-updated", data });
       return new Response("OK");
+    }
+
+    // /releases index blob への webhook 直接 patch (Refs #339/#341)。
+    // consumer から委譲され、本 DO 内で直列実行する (lost update 防止)。
+    // patch 成功時の WS broadcast もここで行う = patch → broadcast が原子的。
+    if (url.pathname === "/releases-index-apply-issue") {
+      const payload = await request.json<IssueWebhookPayload>();
+      const patched = await this.serializeReleasesPatch(() =>
+        applyIssueEventToReleasesIndex(this.env.CI_STATUS, payload),
+      );
+      if (patched) {
+        this.broadcastEnvelope({
+          type: "releases-updated",
+          data: { repo: payload.repository.full_name },
+        });
+      }
+      return Response.json({ patched });
+    }
+
+    if (url.pathname === "/releases-index-apply-refs") {
+      const { repo, refs, headSha } = await request.json<{
+        repo: string;
+        refs: number[];
+        headSha: string | null;
+      }>();
+      const outcome = await this.serializeReleasesPatch(() =>
+        applyRefsPatchToReleasesIndex(this.env.CI_STATUS, repo, refs, headSha),
+      );
+      if (outcome === "patched") {
+        this.broadcastEnvelope({ type: "releases-updated", data: { repo } });
+      }
+      return Response.json({ outcome });
     }
 
     // /releases page の live reload trigger (Refs #327)。

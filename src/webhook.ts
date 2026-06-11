@@ -21,11 +21,8 @@ import {
 } from "./release-cache";
 import { applyPullRequestEvent } from "./pr-map-cache";
 import { markReleasesIndexStale } from "./releases-index-cache";
-import {
-  applyIssueEventToReleasesIndex,
-  applyRefsPatchToReleasesIndex,
-} from "./releases-index-patch";
 import { extractRefIssues } from "./release-helpers";
+import type { RefsPatchOutcome } from "./releases-index-patch";
 import { noteGitHubAuthBroken } from "./github-backoff";
 import { refreshReleasesIndex } from "./releases-page";
 
@@ -73,6 +70,27 @@ async function broadcastReleasesUpdated(hub: DurableObjectStub, repo: string): P
       body: JSON.stringify({ repo }),
     }));
   } catch { /* fail-open */ }
+}
+
+/** refs patch を Hub DO に委譲する (Refs #341 — blob RMW の直列化)。
+ *  hub 到達不能・応答異常は "fallback" 扱いで stale 化 + 全集計に倒す。 */
+async function applyRefsPatchViaHub(
+  hub: DurableObjectStub,
+  repo: string,
+  refs: number[],
+  headSha: string | null,
+): Promise<RefsPatchOutcome> {
+  try {
+    const res = await hub.fetch(new Request("http://hub/releases-index-apply-refs", {
+      method: "POST",
+      body: JSON.stringify({ repo, refs, headSha }),
+    }));
+    if (!res.ok) return "fallback";
+    const { outcome } = await res.json<{ outcome: RefsPatchOutcome }>();
+    return outcome ?? "fallback";
+  } catch {
+    return "fallback";
+  }
 }
 
 /** /releases index の stale 化 + refresh job の即時投函 (Refs #327)。
@@ -461,11 +479,10 @@ async function processWebhookEvent(
           `${payload.pull_request.title ?? ""}\n${payload.pull_request.body ?? ""}`,
           prOwner && prName ? { owner: prOwner, name: prName } : undefined,
         );
-        const outcome = await applyRefsPatchToReleasesIndex(
-          env.CI_STATUS, repo, refs, payload.pull_request.merge_commit_sha,
+        const outcome = await applyRefsPatchViaHub(
+          hub, repo, refs, payload.pull_request.merge_commit_sha,
         );
-        if (outcome === "patched") await broadcastReleasesUpdated(hub, repo);
-        else if (outcome === "fallback") await staleAndKickReleasesIndex(env, repo);
+        if (outcome === "fallback") await staleAndKickReleasesIndex(env, repo);
       }
       // /issues の merged 紫チップも変わる (pr-map は applyPullRequestEvent で
       // patch 済み) → live reload を発火 (Refs #327)。
@@ -510,12 +527,17 @@ async function processWebhookEvent(
       await invalidateReleaseCacheIssue(env.CI_STATUS, owner, name, payload.issue.number);
     }
     // /releases index は webhook payload で直接 patch する (Refs #339)。
+    // blob の read-modify-write は Hub DO で直列化する (Refs #341 — 並走
+    // consumer の lost update 防止)。broadcast も DO 内で原子的に行われる。
     // 該当行が無い (= index に出ていない issue) なら index 内容に影響なし —
-    // stale 化も全集計もしない (1h の安全網が答え合わせする)。
-    const releasesPatched = await applyIssueEventToReleasesIndex(env.CI_STATUS, payload);
-    if (releasesPatched) {
-      await broadcastReleasesUpdated(hub, payload.repository.full_name);
-    }
+    // stale 化も全集計もしない (1h の安全網が答え合わせする)。hub 到達不能は
+    // fail-open (安全網が拾う)。
+    try {
+      await hub.fetch(new Request("http://hub/releases-index-apply-issue", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      }));
+    } catch { /* fail-open */ }
     // /issues page の live reload trigger (Refs #321)。KV upsert 完了後に
     // broadcast するので、reload 時の SSR read は必ず更新後の KV を見る。
     // 通知失敗は page 側の問題に留まる (次の手動 reload で追い付く) ため
@@ -600,11 +622,10 @@ async function processWebhookEvent(
           for (const c of payload.commits ?? []) {
             for (const n of extractRefIssues(c.message, { owner, name })) refs.add(n);
           }
-          const outcome = await applyRefsPatchToReleasesIndex(
-            env.CI_STATUS, fullName, [...refs], payload.after ?? null,
+          const outcome = await applyRefsPatchViaHub(
+            hub, fullName, [...refs], payload.after ?? null,
           );
-          if (outcome === "patched") await broadcastReleasesUpdated(hub, fullName);
-          else if (outcome === "fallback") await staleAndKickReleasesIndex(env, fullName);
+          if (outcome === "fallback") await staleAndKickReleasesIndex(env, fullName);
         }
       }
     }
