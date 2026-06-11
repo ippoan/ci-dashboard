@@ -114,6 +114,9 @@ describe("GET /releases", () => {
     vi.restoreAllMocks();
     await clearReleaseCache(env.CI_STATUS);
     await env.CI_STATUS.delete("direct-push-allowlist:v1");
+    // /releases index の SWR blob (Refs #325) もテスト間で leak しないよう flush。
+    await env.CI_STATUS.delete("releases:index:v1");
+    await env.CI_STATUS.delete("releases:index:refreshing");
   });
 
   it("renders the empty-state landing page when nothing is watched yet", async () => {
@@ -1163,5 +1166,110 @@ describe("GET /releases", () => {
     // enforced by the throw in the stub above).
     expect(html).not.toContain("direct push");
     expect(html).not.toMatch(/name="pair"/);
+  });
+});
+
+// ───── /releases index SWR blob (Refs #325) ─────
+describe("GET /releases — index SWR blob (Refs #325)", () => {
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await clearReleaseCache(env.CI_STATUS);
+    await env.CI_STATUS.delete("direct-push-allowlist:v1");
+    await env.CI_STATUS.delete("releases:index:v1");
+    await env.CI_STATUS.delete("releases:index:refreshing");
+  });
+
+  function seedIndexBlob(storedAt: number, views: unknown[]): Promise<void> {
+    return env.CI_STATUS.put(
+      "releases:index:v1",
+      JSON.stringify({ storedAt, views }),
+    );
+  }
+
+  const seededView = {
+    repo: "ippoan/ci-dashboard",
+    tagless: true,
+    olderTags: [],
+    tagBlocks: [{
+      tag: "main@abc1234",
+      prevTag: null,
+      synthetic: true,
+      issues: [{
+        number: 7, title: "blob から出た issue", state: "open",
+        labels: [], assignees: [], warnings: [],
+        url: "https://github.com/ippoan/ci-dashboard/issues/7",
+        updated_at: "2026-06-11T00:00:00Z",
+      }],
+    }],
+  };
+
+  it("fresh blob は GitHub を 1 回も叩かず即 render する", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    await seedIndexBlob(Date.now(), [seededView]);
+
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(new Request("http://localhost/releases"), testEnv(), ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain("blob から出た issue");
+    // CSS 定義は常に含まれるので note の実 HTML でアサートする
+    expect(html).not.toContain('<div class="refreshing-note">');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("stale blob は即返し + refreshing note + 背景 refresh (waitUntil fallback)", async () => {
+    // 背景 refresh の compute は空 fixture (watched なし) で即完走させる
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      new Response("not stubbed", { status: 500 }));
+    const oldStoredAt = Date.now() - 120_000;
+    await seedIndexBlob(oldStoredAt, [seededView]);
+
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(new Request("http://localhost/releases"), testEnv(), ctx);
+
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    // 旧 blob の中身を即返し + 更新中 note
+    expect(html).toContain("blob から出た issue");
+    expect(html).toContain('<div class="refreshing-note">');
+
+    // waitUntil の背景 refresh が blob を書き直す (watched 空 → views [])
+    await waitOnExecutionContext(ctx);
+    const blob = await env.CI_STATUS.get("releases:index:v1", "json") as
+      { storedAt: number; views: unknown[] };
+    expect(blob.storedAt).toBeGreaterThan(oldStoredAt);
+  });
+
+  it("flash 整合: closed= の issue は stale blob でも candidate から消える", async () => {
+    await seedIndexBlob(Date.now(), [seededView]);
+
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(
+      new Request("http://localhost/releases?repo=ippoan%2Fci-dashboard&closed=7"),
+      testEnv(),
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    // flash banner には ✅ Closed: #7
+    expect(html).toContain("✅ Closed");
+    // candidate checkbox (visible table) には出ない — closed 扱いに変換され
+    // closed-details 側へ落ちる
+    const beforeDetails = html.split('<details class="closed-details">')[0];
+    expect(beforeDetails).not.toMatch(/name="pair" value="main@abc1234:7"/);
+  });
+
+  it("cold start (blob 無し) は従来どおり同期生成して blob を書く", async () => {
+    // watched 空 → 空 index。生成後に blob が存在する。
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(new Request("http://localhost/releases"), testEnv(), ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(200);
+    expect(await env.CI_STATUS.get("releases:index:v1")).not.toBeNull();
   });
 });

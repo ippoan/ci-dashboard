@@ -1080,3 +1080,91 @@ describe("webhook queue ingest (Refs #318)", () => {
     expect(acked).toEqual(["good"]);
   });
 });
+
+// ───── /releases index blob の stale 化 + queue refresh job (Refs #325) ─────
+describe("releases index blob (Refs #325)", () => {
+  beforeEach(async () => {
+    resetHubCalls();
+    await env.CI_STATUS.delete("releases:index:v1");
+    await env.CI_STATUS.delete("releases:index:refreshing");
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  async function seedBlob(): Promise<void> {
+    await env.CI_STATUS.put(
+      "releases:index:v1",
+      JSON.stringify({ storedAt: Date.now(), views: [] }),
+    );
+  }
+
+  async function blobStoredAt(): Promise<number | null> {
+    const blob = await env.CI_STATUS.get("releases:index:v1", "json") as
+      { storedAt: number } | null;
+    return blob ? blob.storedAt : null;
+  }
+
+  it("issues event で blob が stale 化される (storedAt:0)", async () => {
+    await seedBlob();
+    const body = JSON.stringify({
+      action: "opened",
+      issue: {
+        number: 5, title: "t", state: "open", user: { login: "y" },
+        labels: [], assignees: [], comments: 0,
+        created_at: "2026-06-11T00:00:00Z", updated_at: "2026-06-11T00:00:00Z",
+        html_url: "https://github.com/ippoan/foo/issues/5",
+      },
+      repository: { full_name: "ippoan/foo" },
+    });
+    const sig = await sign(body, WEBHOOK_SECRET);
+    const ctx = createExecutionContext();
+    await worker.fetch(
+      new Request("http://localhost/webhook", {
+        method: "POST", body,
+        headers: { "X-Hub-Signature-256": sig, "X-GitHub-Event": "issues" },
+      }),
+      testEnv(), ctx,
+    );
+    await waitOnExecutionContext(ctx);
+    expect(await blobStoredAt()).toBe(0);
+  });
+
+  it("tag push で blob が stale 化される", async () => {
+    await seedBlob();
+    const body = JSON.stringify({
+      ref: "refs/tags/v1.0.0",
+      repository: { full_name: "ippoan/foo", default_branch: "main" },
+    });
+    const sig = await sign(body, WEBHOOK_SECRET);
+    const ctx = createExecutionContext();
+    await worker.fetch(
+      new Request("http://localhost/webhook", {
+        method: "POST", body,
+        headers: { "X-Hub-Signature-256": sig, "X-GitHub-Event": "push" },
+      }),
+      testEnv(), ctx,
+    );
+    await waitOnExecutionContext(ctx);
+    expect(await blobStoredAt()).toBe(0);
+  });
+
+  it("queue の releases-index-refresh job で blob が再生成される", async () => {
+    // compute は watched 空 fixture (mockHub の /statuses は非 JSON → catch で
+    // 空扱い、allowlist fetch も 500 → catch) で即完走する。
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      new Response("not stubbed", { status: 500 }));
+    const acked: string[] = [];
+    const batch = {
+      messages: [{
+        body: { kind: "releases-index-refresh" },
+        attempts: 1,
+        ack: () => acked.push("refresh"),
+        retry: () => { throw new Error("should not retry"); },
+      }],
+    } as unknown as MessageBatch<import("../src/webhook").QueueMessage>;
+
+    await consumeWebhookBatch(batch, testEnv());
+
+    expect(acked).toEqual(["refresh"]);
+    expect(await env.CI_STATUS.get("releases:index:v1")).not.toBeNull();
+  });
+});

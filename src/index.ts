@@ -6,7 +6,7 @@ import {
   type AuthClientWorkerEnv,
 } from "@ippoan/auth-client-worker";
 import { AUTH_WORKER_ORIGIN } from "./github-api";
-import { handleWebhook, consumeWebhookBatch, type WebhookQueueMessage } from "./webhook";
+import { handleWebhook, consumeWebhookBatch, type QueueMessage } from "./webhook";
 import { handleDashboard } from "./dashboard";
 import { handleIssuesPage, handleIssuesDecorations } from "./issues-page";
 import { handleProjectsPage } from "./projects-page";
@@ -93,7 +93,7 @@ export interface Env extends AuthClientWorkerEnv {
    * 200 のみ行い、処理は本 worker の queue consumer が担う。binding 未設定の
    * 環境 (wrangler dev / test) は waitUntil fallback で inline 処理される。
    */
-  WEBHOOK_QUEUE?: Queue<WebhookQueueMessage>;
+  WEBHOOK_QUEUE?: Queue<QueueMessage>;
 }
 
 // OAuth flow config — shared between /oauth/login, /oauth/callback, and the
@@ -148,7 +148,7 @@ app.get("/cc", (c) => handleLaunch(c.req.raw));
 
 // Release confirmation view (SSR + POST close action)
 // See issue #35 + CLAUDE.md `release / close フロー`.
-app.get("/releases", (c) => handleReleasesPage(c.req.raw, c.env));
+app.get("/releases", (c) => handleReleasesPage(c.req.raw, c.env, c.executionCtx));
 // Pass hub + executionCtx so the close handlers can fire-and-forget a
 // `/release-alert-recompute` to refresh the dashboard banner.
 app.post("/api/release-close",
@@ -379,6 +379,6 @@ app.post("/api/release-wave/backend-rollback", (c) =>
 // `fetch` は従来どおり app に委譲 (tests の worker.fetch も互換)。
 export default {
   fetch: app.fetch,
-  queue: (batch: MessageBatch<WebhookQueueMessage>, env: Env) =>
+  queue: (batch: MessageBatch<QueueMessage>, env: Env) =>
     consumeWebhookBatch(batch, env),
 };
