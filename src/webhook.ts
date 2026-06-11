@@ -158,6 +158,29 @@ export async function handleWebhook(
 
   const event = request.headers.get("X-GitHub-Event");
 
+  // 受信 event の観測 log (Refs #316)。request log には X-GitHub-Event が
+  // 乗らないため、「issues event がどの repo から届いているか」を observability
+  // で集計できるようここで 1 行出す。webhook は per-repo 設定なので、Issues
+  // event 未購読の repo (= /issues の反映が reconcile 頼みで遅い repo) の特定に
+  // 使う。payload の parse 失敗時は repo/action 空のまま log だけ出して続行。
+  let logRepo = "";
+  let logAction = "";
+  try {
+    const p = JSON.parse(body) as {
+      action?: string;
+      repository?: { full_name?: string };
+    };
+    logRepo = p.repository?.full_name ?? "";
+    logAction = p.action ?? "";
+  } catch { /* 観測用なので落とさない */ }
+  console.log(JSON.stringify({
+    msg: "webhook-received",
+    event,
+    action: logAction,
+    repo: logRepo,
+    delivery: request.headers.get("X-GitHub-Delivery") ?? "",
+  }));
+
   if (event === "workflow_run") {
     const payload: WorkflowRunPayload = JSON.parse(body);
     // Route through Hub DO for serialized KV access
