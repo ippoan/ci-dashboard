@@ -14,9 +14,11 @@ import {
 import { loadPrMap, type PrMapResult } from "./pr-map-cache";
 import { getRateLimitBackoff } from "./github-backoff";
 import {
-  getOrFetchProjectIssueMap,
-  type ProjectIssueMapResult,
+  loadProjectIssueMapSwr,
+  readProjectIssueMapBlob,
+  type ProjectIssueMapSwrResult,
 } from "./project-cache";
+import { readPrMapCache } from "./pr-map-cache";
 import { parseTaglessRepos } from "./tagless-repos";
 
 // Orgs fetched in full. Same allowlist as github-api.ts (not imported because
@@ -115,8 +117,11 @@ interface Freshness {
   reconcileAgeSec: number | null;
   /** warm path で background reconcile を waitUntil に投げた。 */
   issuesRefreshing: boolean;
-  /** PR map が stale を即返しして background refresh 中。 */
+  /** PR map / project map が stale を即返しして background refresh 中。 */
   prRefreshing: boolean;
+  /** decorations (Project/PR チップ) の cache が無く背景 fetch 中 (cold
+   *  start)。loading バナー + /issues/decorations poll で部分更新 (Refs #323)。 */
+  decoLoading: boolean;
   /** rate-limit backoff 中。値は再開予定時刻 (epoch ms)。 */
   backoffUntil: number | null;
   /** cold start で同期 reconcile が失敗した時のみ生エラーを表示する。 */
@@ -224,7 +229,7 @@ export async function handleIssuesPage(
   };
 
   const [project, prs, watermark, backoff] = await Promise.all([
-    getOrFetchProjectIssueMap(env, PROJECT_ORGS),
+    loadProjectIssueMapSwr(env, PROJECT_ORGS, ctx),
     loadPrMap(env, ORGS, YHONDA_REPOS, ctx),
     getIssuesWatermark(kv),
     getRateLimitBackoff(kv),
@@ -239,7 +244,8 @@ export async function handleIssuesPage(
     // no-op reconcile でバナーを出すとノイズになる)。
     issuesRefreshing: issuesRefreshing &&
       (reconcileAgeSec === null || reconcileAgeSec * 1000 >= FRESH_THRESHOLD_MS),
-    prRefreshing: prs.refreshing,
+    prRefreshing: prs.refreshing || project.refreshing,
+    decoLoading: project.loading || prs.loading,
     backoffUntil: backoff?.until ?? null,
     coldError: reconcileError,
   };
@@ -290,7 +296,7 @@ function renderHtml(
   incomplete: boolean,
   projectTagged: ReadonlyArray<{ issue: OrgIssue; projects: ProjectRef[] }>,
   repos: ReadonlyArray<readonly [string, OrgIssue[]]>,
-  project: ProjectIssueMapResult,
+  project: ProjectIssueMapSwrResult,
   prs: PrMapResult,
   freshness: Freshness,
   taglessSet: ReadonlySet<string>,
@@ -324,10 +330,11 @@ function renderHtml(
           : ""
       }</div>`
     : "";
-  const projectBanner = project.stale
-    ? `<div class="banner banner-info">📋 Project tags shown are from the last successful sync — fresh fetch failed (${escapeHtml(project.error ?? "")})</div>`
-    : project.error
-    ? `<div class="banner">⚠️ Project tags unavailable: ${escapeHtml(project.error)}</div>`
+  // decorations (Project/PR チップ) cold start: loading バナー + poll script で
+  // 部分更新する (Refs #323)。project map の stale/error は SWR blob 化に伴い
+  // refreshing 表示に集約 (層別 cache の stale fallback は blob 生成側が吸収)。
+  const decoLoadingBanner = freshness.decoLoading
+    ? `<div class="banner banner-info" id="deco-loading">🔄 Project / PR チップを読み込み中… (一覧は表示済み、チップは取得でき次第この場で反映されます)</div>`
     : "";
   const prBanner = prs.stale
     ? `<div class="banner banner-info">🔗 Related-PR links shown are from the last successful sync — fresh fetch failed (${escapeHtml(prs.error ?? "")})</div>`
@@ -581,7 +588,7 @@ function renderHtml(
   ${backoffBanner}
   ${refreshingBanner}
   ${issueStaleBanner}
-  ${projectBanner}
+  ${decoLoadingBanner}
   ${prBanner}
   ${projectSection}
   ${repos.length === 0 && projectTagged.length === 0
@@ -589,8 +596,96 @@ function renderHtml(
     : repoSections}
   ${PWA_REGISTER_SCRIPT}
   ${LIVE_RELOAD_SCRIPT}
+  ${freshness.decoLoading ? DECORATIONS_POLL_SCRIPT : ""}
 </body>
 </html>`;
+}
+
+// decorations (Project/PR チップ) の部分更新 (Refs #323)。cold start で SSR が
+// チップ無しで返った時だけ埋め込まれる。/issues/decorations (KV read のみ) を
+// poll し、両 cache が揃ったら data-ik 行の title cell にチップを DOM 注入する。
+// XSS 安全のため innerHTML は使わず createElement + textContent のみ。
+const DECORATIONS_POLL_SCRIPT = `
+  <script>
+    (() => {
+      const apply = (data) => {
+        document.querySelectorAll("tr[data-ik]").forEach((tr) => {
+          const ik = tr.getAttribute("data-ik");
+          const td = tr.querySelector("td.title");
+          if (!td) return;
+          const projects = data.projects[ik] || [];
+          if (projects.length > 0 && !td.querySelector(".project-chip")) {
+            const div = document.createElement("div");
+            div.className = "labels";
+            for (const p of projects) {
+              const a = document.createElement("a");
+              a.className = "project-chip";
+              a.href = p.url; a.target = "_blank"; a.rel = "noopener";
+              a.textContent = p.title;
+              div.appendChild(a);
+            }
+            td.appendChild(div);
+          }
+          const prs = data.prs[ik] || [];
+          if (prs.length > 0 && !td.querySelector(".pr-chips")) {
+            const div = document.createElement("div");
+            div.className = "pr-chips";
+            for (const p of prs) {
+              const a = document.createElement("a");
+              a.className = "pr-chip" + (p.state === "merged" ? " merged" : p.draft ? " draft" : "");
+              a.href = p.url; a.target = "_blank"; a.rel = "noopener";
+              a.title = "#" + p.number + ": " + p.title;
+              a.textContent = (p.state === "merged" ? "\u2705 " : "\ud83d\udd17 ") + "#" + p.number +
+                (p.state === "merged" ? " (merged)" : p.draft ? " (draft)" : "");
+              div.appendChild(a);
+            }
+            td.appendChild(div);
+          }
+        });
+      };
+      let tries = 0;
+      const poll = async () => {
+        tries++;
+        try {
+          const r = await fetch("/issues/decorations");
+          if (r.ok) {
+            const d = await r.json();
+            if (d.ready) {
+              apply(d);
+              const banner = document.getElementById("deco-loading");
+              if (banner) banner.remove();
+              return;
+            }
+          }
+        } catch { /* transient — retry */ }
+        if (tries < 16) setTimeout(poll, 2500);
+        else {
+          const banner = document.getElementById("deco-loading");
+          if (banner) banner.textContent = "\u26a0\ufe0f チップの取得に時間がかかっています — 後でリロードしてください";
+        }
+      };
+      setTimeout(poll, 2000);
+    })();
+  </script>`;
+
+/** GET /issues/decorations — 部分更新用の軽量 JSON (KV read 2 回のみ、GitHub
+ *  fetch なし)。両 cache (project map blob + pr map) が揃ったら ready:true。 */
+export async function handleIssuesDecorations(
+  env: AuthClientWorkerEnv,
+): Promise<Response> {
+  const kv = env.CI_STATUS;
+  const [projects, prs] = await Promise.all([
+    readProjectIssueMapBlob(kv),
+    readPrMapCache(kv),
+  ]);
+  return Response.json(
+    {
+      ready: projects !== null && prs !== null,
+      projects: projects ?? {},
+      prs: prs ?? {},
+    },
+    { headers: { "Cache-Control": "private, no-store" } },
+  );
 }
 
 // /issues の live 更新 (Refs #321)。Hub DO の /ws に接続し、webhook の issues
@@ -671,7 +766,7 @@ function renderProjectRow(
         `<span class="label">${escapeHtml(l)}</span>`).join("")}</div>`
     : "";
   const trClass = isFixtureIssue(i) ? ' class="fixture"' : "";
-  return `<tr${trClass}>
+  return `<tr${trClass} data-ik="${escapeHtml(`${i.repo}#${i.number}`)}">
     <td class="num"><a href="${escapeHtml(i.url)}" target="_blank" rel="noopener">#${i.number}</a></td>
     <td class="repo"><a href="https://github.com/${escapeHtml(i.repo)}/issues" target="_blank" rel="noopener">${escapeHtml(i.repo)}</a>${renderReleaseModeBadge(i.repo, taglessSet)}</td>
     <td class="title">${renderFixtureBadge(i)}<a href="${escapeHtml(i.url)}" target="_blank" rel="noopener">${escapeHtml(i.title)}</a><div class="labels">${chips}</div>${labelChips}${renderPrChips(i, prMap)}</td>
@@ -707,7 +802,7 @@ function renderRow(
         `<span class="label">${escapeHtml(l)}</span>`).join("")}</div>`
     : "";
   const trClass = isFixtureIssue(i) ? ' class="fixture"' : "";
-  return `<tr${trClass}>
+  return `<tr${trClass} data-ik="${escapeHtml(`${i.repo}#${i.number}`)}">
     <td class="num"><a href="${escapeHtml(i.url)}" target="_blank" rel="noopener">#${i.number}</a></td>
     <td class="title">${renderFixtureBadge(i)}<a href="${escapeHtml(i.url)}" target="_blank" rel="noopener">${escapeHtml(i.title)}</a>${labelChips}${renderPrChips(i, prMap)}</td>
     <td class="author">@${escapeHtml(i.author)}</td>

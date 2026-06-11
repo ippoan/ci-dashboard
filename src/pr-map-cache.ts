@@ -48,6 +48,9 @@ export interface PrMapResult {
   stale: boolean;
   /** cache を即返しして refresh を waitUntil に投げた (mild banner)。 */
   refreshing: boolean;
+  /** cache が無く背景 fetch 中 (= cold start)。page は loading 表示 +
+   *  /issues/decorations poll で部分更新する (Refs #323)。 */
+  loading: boolean;
   error: string | null;
 }
 
@@ -80,22 +83,30 @@ export async function loadPrMap(
       map: new Map(Object.entries(cached.data)),
       stale: false,
       refreshing: !fresh,
+      loading: false,
       error: null,
     };
   }
-  // Cold start: 同期 fetch。失敗は従来どおり error として返し hard banner。
-  try {
-    const fresh = await fetchAllOpenPrsByIssue(env, mainOrgs, yhondaRepos);
-    const entry: PrMapCacheEntry = { storedAt: now, data: Object.fromEntries(fresh) };
-    await kv.put(PR_MAP_CACHE_KEY, JSON.stringify(entry), {
-      expirationTtl: PR_MAP_STORE_SECONDS,
-    });
-    return { map: fresh, stale: false, refreshing: false, error: null };
-  } catch (err) {
-    if (isRateLimitError(err)) await setRateLimitBackoff(kv, err);
-    const message = err instanceof Error ? err.message : String(err);
-    return { map: new Map(), stale: false, refreshing: false, error: message };
-  }
+  // Cold start: 旧実装は同期 fetch (4 search) でページ全体を塞いでいた。
+  // SSR をブロックせず背景 refresh + loading flag を返し、page 側が
+  // /issues/decorations を poll して部分更新する (Refs #323)。
+  const p = refreshPrMap(env, mainOrgs, yhondaRepos).catch((err) => {
+    console.log(JSON.stringify({
+      msg: "pr-map-bg-refresh-failed",
+      error: err instanceof Error ? err.message : String(err),
+    }));
+  });
+  if (ctx) ctx.waitUntil(p);
+  else void p;
+  return { map: new Map(), stale: false, refreshing: true, loading: true, error: null };
+}
+
+/** /issues/decorations 用: cache を KV read だけで返す (GitHub fetch なし)。 */
+export async function readPrMapCache(
+  kv: KVNamespace,
+): Promise<Record<string, IssuePrRef[]> | null> {
+  const cached = await kv.get(PR_MAP_CACHE_KEY, "json") as PrMapCacheEntry | null;
+  return cached ? cached.data : null;
 }
 
 /** full 4-call Search fetch で cache を取り直す (background 実行前提)。

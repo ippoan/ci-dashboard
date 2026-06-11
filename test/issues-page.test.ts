@@ -15,6 +15,19 @@ function testEnv(): Env {
   };
 }
 
+// decorations (PR/Project チップ) は cold start で背景 fetch される (Refs #323)
+// ため、チップを SSR でアサートするテストは 1 回目の load で cache を温めて
+// から 2 回目の response を検証する。
+async function fetchIssuesWarmed(): Promise<Response> {
+  const ctx1 = createExecutionContext();
+  await worker.fetch(new Request("http://localhost/issues"), testEnv(), ctx1);
+  await waitOnExecutionContext(ctx1);
+  const ctx2 = createExecutionContext();
+  const res = await worker.fetch(new Request("http://localhost/issues"), testEnv(), ctx2);
+  await waitOnExecutionContext(ctx2);
+  return res;
+}
+
 // Stub /search/issues + /graphql. The page fires parallel calls:
 //   - /search/issues `is:issue` × 2 (main orgs + yhonda repo: filter)
 //   - /search/issues `is:pr`    × 4 (main orgs × {open, merged}
@@ -249,6 +262,7 @@ describe("GET /issues", () => {
     await env.CI_STATUS.delete("github:rl-backoff");
     await env.CI_STATUS.delete("issues:reconciling");
     await env.CI_STATUS.delete("issues-page:pr-map:refreshing");
+    await env.CI_STATUS.delete("issues-page:project-map:refreshing");
     // Refs #135: /issues も project-cache の KV (`project:*`) を共有するため
     // テスト間で flush しないと前テストの fixture が漏れる。
     for (const prefix of ["issue:", "project:"]) {
@@ -485,6 +499,7 @@ describe("GET /issues — Project section", () => {
     await env.CI_STATUS.delete("github:rl-backoff");
     await env.CI_STATUS.delete("issues:reconciling");
     await env.CI_STATUS.delete("issues-page:pr-map:refreshing");
+    await env.CI_STATUS.delete("issues-page:project-map:refreshing");
     // Refs #135: /issues も project-cache の KV (`project:*`) を共有するため
     // テスト間で flush しないと前テストの fixture が漏れる。
     for (const prefix of ["issue:", "project:"]) {
@@ -500,10 +515,7 @@ describe("GET /issues — Project section", () => {
 
   it("renders a 'Project 付き' section with project chips and excludes those issues from their repo section", async () => {
     stubFetch({ withProjects: true });
-    const req = new Request("http://localhost/issues");
-    const ctx = createExecutionContext();
-    const res = await worker.fetch(req, testEnv(), ctx);
-    await waitOnExecutionContext(ctx);
+    const res = await fetchIssuesWarmed();
 
     expect(res.status).toBe(200);
     const html = await res.text();
@@ -605,10 +617,7 @@ describe("GET /issues — Project section", () => {
       });
     });
 
-    const req = new Request("http://localhost/issues");
-    const ctx = createExecutionContext();
-    const res = await worker.fetch(req, testEnv(), ctx);
-    await waitOnExecutionContext(ctx);
+    const res = await fetchIssuesWarmed();
 
     const html = await res.text();
     // Both chips appear in the project row for #7.
@@ -666,6 +675,7 @@ describe("GET /issues — Claude Code launch button", () => {
     await env.CI_STATUS.delete("github:rl-backoff");
     await env.CI_STATUS.delete("issues:reconciling");
     await env.CI_STATUS.delete("issues-page:pr-map:refreshing");
+    await env.CI_STATUS.delete("issues-page:project-map:refreshing");
     // Refs #135: /issues も project-cache の KV (`project:*`) を共有するため
     // テスト間で flush しないと前テストの fixture が漏れる。
     for (const prefix of ["issue:", "project:"]) {
@@ -702,10 +712,7 @@ describe("GET /issues — Claude Code launch button", () => {
 
   it("renders a launch link in the Project section too", async () => {
     stubFetch({ withProjects: true });
-    const req = new Request("http://localhost/issues");
-    const ctx = createExecutionContext();
-    const res = await worker.fetch(req, testEnv(), ctx);
-    await waitOnExecutionContext(ctx);
+    const res = await fetchIssuesWarmed();
 
     const html = await res.text();
     const projectSection = html.match(
@@ -732,6 +739,7 @@ describe("GET /issues — Related-PR chips", () => {
     await env.CI_STATUS.delete("github:rl-backoff");
     await env.CI_STATUS.delete("issues:reconciling");
     await env.CI_STATUS.delete("issues-page:pr-map:refreshing");
+    await env.CI_STATUS.delete("issues-page:project-map:refreshing");
     // Refs #135: /issues も project-cache の KV (`project:*`) を共有するため
     // テスト間で flush しないと前テストの fixture が漏れる。
     for (const prefix of ["issue:", "project:"]) {
@@ -747,10 +755,7 @@ describe("GET /issues — Related-PR chips", () => {
 
   it("renders a pr-chip on issues that have an open PR referencing them via Refs #N", async () => {
     stubFetch({ withPrs: true });
-    const req = new Request("http://localhost/issues");
-    const ctx = createExecutionContext();
-    const res = await worker.fetch(req, testEnv(), ctx);
-    await waitOnExecutionContext(ctx);
+    const res = await fetchIssuesWarmed();
 
     const html = await res.text();
     // The seeded PR is rust-alc-api#42 referencing #7. We expect a pr-chip
@@ -765,10 +770,7 @@ describe("GET /issues — Related-PR chips", () => {
 
   it("renders a purple .merged pr-chip when only a merged PR references the issue", async () => {
     stubFetch({ withMergedPrs: true });
-    const req = new Request("http://localhost/issues");
-    const ctx = createExecutionContext();
-    const res = await worker.fetch(req, testEnv(), ctx);
-    await waitOnExecutionContext(ctx);
+    const res = await fetchIssuesWarmed();
 
     const html = await res.text();
     // Seeded merged PR is rust-alc-api#50 referencing #7.
@@ -779,10 +781,7 @@ describe("GET /issues — Related-PR chips", () => {
 
   it("renders both open and merged chips when both exist for the same issue", async () => {
     stubFetch({ withPrs: true, withMergedPrs: true });
-    const req = new Request("http://localhost/issues");
-    const ctx = createExecutionContext();
-    const res = await worker.fetch(req, testEnv(), ctx);
-    await waitOnExecutionContext(ctx);
+    const res = await fetchIssuesWarmed();
 
     const html = await res.text();
     // Open chip ordered before merged chip in the rendered HTML.
@@ -844,10 +843,7 @@ describe("GET /issues — Related-PR chips", () => {
         }],
       });
     });
-    const req = new Request("http://localhost/issues");
-    const ctx = createExecutionContext();
-    const res = await worker.fetch(req, testEnv(), ctx);
-    await waitOnExecutionContext(ctx);
+    const res = await fetchIssuesWarmed();
 
     const html = await res.text();
     expect(html).toContain('class="pr-chip draft"');
@@ -875,14 +871,16 @@ describe("GET /issues — Related-PR chips", () => {
       }
       return Response.json({ total_count: 0, incomplete_results: false, items: [] });
     });
-    const req = new Request("http://localhost/issues");
     const ctx = createExecutionContext();
-    const res = await worker.fetch(req, testEnv(), ctx);
+    const res = await worker.fetch(new Request("http://localhost/issues"), testEnv(), ctx);
     await waitOnExecutionContext(ctx);
 
+    // Refs #323: cold start は同期 fetch しないので 403 でも page は塞がれず、
+    // loading 状態のまま 200 で render される (チップは poll script が後追い、
+    // 失敗時は client 側 message に落ちる)。
     expect(res.status).toBe(200);
     const html = await res.text();
-    expect(html).toContain("Related-PR links unavailable");
+    expect(html).toContain('id="deco-loading"');
   });
 });
 
@@ -907,6 +905,7 @@ describe("GET /issues — CI fixture rows", () => {
     await env.CI_STATUS.delete("github:rl-backoff");
     await env.CI_STATUS.delete("issues:reconciling");
     await env.CI_STATUS.delete("issues-page:pr-map:refreshing");
+    await env.CI_STATUS.delete("issues-page:project-map:refreshing");
     for (const prefix of ["issue:", "project:"]) {
       let cursor: string | undefined;
       do {
@@ -965,7 +964,7 @@ describe("GET /issues — CI fixture rows", () => {
     // clickable cc-launch anchor.
     expect(html).toContain("🔒 保全");
     expect(html).toContain('class="fixture-badge"');
-    expect(html).toContain('<tr class="fixture">');
+    expect(html).toContain('<tr class="fixture"');
     expect(html).toContain('class="cc-launch-disabled"');
     expect(html).not.toContain('<a class="cc-launch"');
   });
@@ -995,6 +994,7 @@ describe("GET /issues — SWR (Refs #304)", () => {
     await env.CI_STATUS.delete("github:rl-backoff");
     await env.CI_STATUS.delete("issues:reconciling");
     await env.CI_STATUS.delete("issues-page:pr-map:refreshing");
+    await env.CI_STATUS.delete("issues-page:project-map:refreshing");
     for (const prefix of ["issue:", "project:"]) {
       let cursor: string | undefined;
       do {
@@ -1030,6 +1030,12 @@ describe("GET /issues — SWR (Refs #304)", () => {
     await seedIssue("ippoan/rust-alc-api", 7, "cached issue");
     await env.CI_STATUS.put("issues:watermark", new Date(Date.now() - 5_000).toISOString());
     await seedPrMap(Date.now());
+    // project map blob も fresh seed (Refs #323: 無いと cold 扱いで
+    // decoLoading + 背景 refresh が走り banner 判定が変わる)
+    await env.CI_STATUS.put(
+      "issues-page:project-map",
+      JSON.stringify({ storedAt: Date.now(), data: {} }),
+    );
 
     const ctx = createExecutionContext();
     const res = await worker.fetch(new Request("http://localhost/issues"), testEnv(), ctx);
@@ -1142,5 +1148,81 @@ describe("GET /issues — SWR (Refs #304)", () => {
     expect(res.headers.get("Retry-After")).toBeTruthy();
     expect(await res.text()).toContain("rate-limit cooldown");
     expect(searchCalls(fetchSpy as never)).toBe(0);
+  });
+});
+
+// ───── decorations 部分更新 (Refs #323) ─────
+describe("GET /issues — decorations 部分更新 (Refs #323)", () => {
+  beforeEach(async () => {
+    await env.CI_STATUS.delete("issues-page:project-map");
+    await env.CI_STATUS.delete("issues-page:project-map:refreshing");
+    await env.CI_STATUS.delete("issues-page:pr-map:v2");
+    await env.CI_STATUS.delete("issues-page:pr-map:refreshing");
+    await env.CI_STATUS.delete("issues:watermark");
+    await env.CI_STATUS.delete("github:rl-backoff");
+    await env.CI_STATUS.delete("issues:reconciling");
+    for (const prefix of ["issue:", "project:"]) {
+      let cursor: string | undefined;
+      do {
+        const page = await env.CI_STATUS.list({ prefix, cursor });
+        await Promise.all(page.keys.map((k) => env.CI_STATUS.delete(k.name)));
+        cursor = page.list_complete ? undefined : page.cursor;
+      } while (cursor);
+    }
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it("cold start は一覧を即 render し、loading バナー + data-ik + poll script を出す (チップ無し)", async () => {
+    stubFetch({ withPrs: true, withProjects: true });
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(new Request("http://localhost/issues"), testEnv(), ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    // 一覧自体は出ている
+    expect(html).toContain("ippoan/rust-alc-api");
+    // loading 表示 + 部分更新の配線
+    expect(html).toContain('id="deco-loading"');
+    expect(html).toContain("/issues/decorations");
+    expect(html).toContain('data-ik="ippoan/rust-alc-api#7"');
+    // SSR にはチップは含まれない (poll script が後追いで注入)
+    expect(html).not.toContain('<a class="pr-chip"');
+    expect(html).not.toContain('<a class="project-chip"');
+  });
+
+  it("/issues/decorations: cold は ready:false、warm 後は ready:true で chips data を返す", async () => {
+    stubFetch({ withPrs: true, withProjects: true });
+
+    const ctx1 = createExecutionContext();
+    const r1 = await worker.fetch(new Request("http://localhost/issues/decorations"), testEnv(), ctx1);
+    await waitOnExecutionContext(ctx1);
+    expect((await r1.json() as { ready: boolean }).ready).toBe(false);
+
+    // /issues の cold load が背景 fetch を waitUntil で完走させ cache を温める
+    const ctx2 = createExecutionContext();
+    await worker.fetch(new Request("http://localhost/issues"), testEnv(), ctx2);
+    await waitOnExecutionContext(ctx2);
+
+    const ctx3 = createExecutionContext();
+    const r3 = await worker.fetch(new Request("http://localhost/issues/decorations"), testEnv(), ctx3);
+    await waitOnExecutionContext(ctx3);
+    const d3 = await r3.json() as {
+      ready: boolean;
+      prs: Record<string, unknown[]>;
+      projects: Record<string, unknown[]>;
+    };
+    expect(d3.ready).toBe(true);
+    expect(Object.keys(d3.prs)).toContain("ippoan/rust-alc-api#7");
+    expect(Object.keys(d3.projects)).toContain("ippoan/rust-alc-api#7");
+  });
+
+  it("warm な 2 回目の load はチップを SSR で inline render する (loading バナー無し)", async () => {
+    stubFetch({ withPrs: true, withProjects: true });
+    const res = await fetchIssuesWarmed();
+    const html = await res.text();
+    expect(html).not.toContain('id="deco-loading"');
+    expect(html).toContain('<a class="pr-chip"');
+    expect(html).toContain('class="project-chip"');
   });
 });
