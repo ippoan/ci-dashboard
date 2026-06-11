@@ -93,6 +93,32 @@ async function applyRefsPatchViaHub(
   }
 }
 
+/** issues event の blob patch を Hub DO に委譲する (Refs #339/#346)。
+ *  `applyRefsPatchViaHub` と同じく res.ok / 応答を検査し、結果を返す:
+ *    "patched"  = 1 行以上 closed 化して blob を書いた
+ *    "noop"     = 該当行なし (index に出ていない issue) — 正常、何もしない
+ *    "degraded" = hub 到達不能 / 非 OK / 応答 parse 失敗 — patch が落ちた疑い。
+ *                 caller が loud log + stale 化 fallback に倒す。
+ *  従来 (#339) は try/catch fail-open で degraded を無音 skip しており、
+ *  webhook は届いているのに blob 反映だけ落ちる無音経路になっていた (#346)。 */
+async function applyIssuePatchViaHub(
+  hub: DurableObjectStub,
+  payload: IssueWebhookPayload,
+): Promise<"patched" | "noop" | "degraded"> {
+  try {
+    const res = await hub.fetch(new Request("http://hub/releases-index-apply-issue", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }));
+    if (!res.ok) return "degraded";
+    const { patched } = await res.json<{ patched?: boolean }>();
+    if (typeof patched !== "boolean") return "degraded";
+    return patched ? "patched" : "noop";
+  } catch {
+    return "degraded";
+  }
+}
+
 /** /releases index の stale 化 + refresh job の即時投函 (Refs #327)。
  *  page view を待たずに consumer が再集計を始めるので、WS reload が届く頃には
  *  fresh blob が出来ている。queue binding 無し環境では stale 化のみ (次の
@@ -529,15 +555,25 @@ async function processWebhookEvent(
     // /releases index は webhook payload で直接 patch する (Refs #339)。
     // blob の read-modify-write は Hub DO で直列化する (Refs #341 — 並走
     // consumer の lost update 防止)。broadcast も DO 内で原子的に行われる。
-    // 該当行が無い (= index に出ていない issue) なら index 内容に影響なし —
-    // stale 化も全集計もしない (1h の安全網が答え合わせする)。hub 到達不能は
-    // fail-open (安全網が拾う)。
-    try {
-      await hub.fetch(new Request("http://hub/releases-index-apply-issue", {
-        method: "POST",
-        body: JSON.stringify(payload),
+    // 該当行が無い ("noop" = index に出ていない issue) なら index 内容に
+    // 影響なし — 何もしない (1h の安全網が答え合わせする)。
+    // patch が落ちた ("degraded": hub 到達不能 / 非 OK / parse 失敗) 時は
+    // **無音にせず** loud log + stale 化 fallback に倒す (Refs #346)。従来の
+    // fail-open は blob 反映漏れを silent に放置し、webhook が動いていない
+    // という誤診の原因になっていた。
+    const issueOutcome = await applyIssuePatchViaHub(hub, payload);
+    if (issueOutcome === "degraded") {
+      console.log(JSON.stringify({
+        msg: "releases-index-apply-issue-degraded",
+        repo: payload.repository.full_name,
+        number: payload.issue.number,
+        action: payload.action,
       }));
-    } catch { /* fail-open */ }
+      // blob 反映が落ちた疑い → stale 化 + refresh enqueue で 1h 安全網より
+      // 早く整合させる (best-effort、失敗は次の page view が拾う)。
+      try { await staleAndKickReleasesIndex(env, payload.repository.full_name); }
+      catch { /* best-effort */ }
+    }
     // /issues page の live reload trigger (Refs #321)。KV upsert 完了後に
     // broadcast するので、reload 時の SSR read は必ず更新後の KV を見る。
     // 通知失敗は page 側の問題に留まる (次の手動 reload で追い付く) ため
