@@ -17,6 +17,7 @@ import {
   getOrFetchProjectIssueMap,
   type ProjectIssueMapResult,
 } from "./project-cache";
+import { parseTaglessRepos } from "./tagless-repos";
 
 // Orgs fetched in full. Same allowlist as github-api.ts (not imported because
 // ALLOWED_ORGS isn't exported; keep the two in sync if either grows).
@@ -123,7 +124,7 @@ interface Freshness {
 }
 
 export async function handleIssuesPage(
-  env: AuthClientWorkerEnv,
+  env: AuthClientWorkerEnv & { TAGLESS_REPOS?: string },
   ctx?: ExecutionContext,
 ): Promise<Response> {
   // SWR (Refs #304): KV を先に読み、warm なら GitHub を一切待たずに render
@@ -272,8 +273,14 @@ export async function handleIssuesPage(
       [...items].sort((a, b) => b.updated_at.localeCompare(a.updated_at)),
     ] as const);
 
+  // Repo の release 運用 badge 用 (Refs #312)。判定は TAGLESS_REPOS wrangler
+  // var のみ (I/O 追加なし)。direct-push allowlist は GitHub fetch が要るので
+  // 本 page では見ない — allowlist のみの repo は「要 tag」表示になるが、
+  // 当該 repo はほぼ issue を持たないため許容 (/releases 側は allowlist も加味)。
+  const taglessSet = parseTaglessRepos(env.TAGLESS_REPOS);
+
   return new Response(
-    renderHtml(merged.total_count, merged.incomplete, projectTagged, repos, project, prs, freshness),
+    renderHtml(merged.total_count, merged.incomplete, projectTagged, repos, project, prs, freshness, taglessSet),
     { headers: { "Content-Type": "text/html; charset=utf-8" } },
   );
 }
@@ -286,13 +293,14 @@ function renderHtml(
   project: ProjectIssueMapResult,
   prs: PrMapResult,
   freshness: Freshness,
+  taglessSet: ReadonlySet<string>,
 ): string {
   const repoSections = repos
-    .map(([repo, items]) => renderRepoSection(repo, items, prs.map))
+    .map(([repo, items]) => renderRepoSection(repo, items, prs.map, taglessSet))
     .join("\n");
 
   const projectSection = projectTagged.length > 0
-    ? renderProjectSection(projectTagged, prs.map)
+    ? renderProjectSection(projectTagged, prs.map, taglessSet)
     : "";
 
   const incompleteBanner = incomplete
@@ -530,6 +538,32 @@ function renderHtml(
       color: #8b949e;
       font-size: 14px;
     }
+    /* Release 運用 badge (Refs #312): tagless = merge がそのまま release で
+       /releases から即 close 可、要 tag = release tag を打つまで close 候補に
+       出ない。issue を片付ける時にどちらの手順かを一目で判別する。 */
+    .release-mode {
+      display: inline-block;
+      font-size: 11px;
+      font-weight: 400;
+      padding: 1px 8px;
+      border-radius: 10px;
+      margin-left: 8px;
+      vertical-align: middle;
+      white-space: nowrap;
+      text-decoration: none;
+    }
+    .mode-tagless {
+      background: #2ea04322;
+      color: #7ee787;
+      border: 1px solid #2ea04388;
+    }
+    .mode-tagless:hover { background: #2ea04344; }
+    .mode-needs-tag {
+      background: #d2992222;
+      color: #e3b341;
+      border: 1px solid #d2992288;
+    }
+    .mode-needs-tag:hover { background: #d2992244; }
   </style>
 </head>
 <body>
@@ -561,9 +595,10 @@ function renderHtml(
 function renderProjectSection(
   items: ReadonlyArray<{ issue: OrgIssue; projects: ProjectRef[] }>,
   prMap: ReadonlyMap<string, IssuePrRef[]>,
+  taglessSet: ReadonlySet<string>,
 ): string {
   const rows = items.map(({ issue, projects }) =>
-    renderProjectRow(issue, projects, prMap)).join("\n");
+    renderProjectRow(issue, projects, prMap, taglessSet)).join("\n");
   return `<section class="projects">
   <h2>📋 Project 付き<span class="count">(${items.length})</span></h2>
   <table>
@@ -577,6 +612,7 @@ function renderProjectRow(
   i: OrgIssue,
   projects: ReadonlyArray<ProjectRef>,
   prMap: ReadonlyMap<string, IssuePrRef[]>,
+  taglessSet: ReadonlySet<string>,
 ): string {
   const chips = projects.map((p) =>
     `<a class="project-chip" href="${escapeHtml(p.url)}" target="_blank" rel="noopener">${escapeHtml(p.title)}</a>`,
@@ -588,7 +624,7 @@ function renderProjectRow(
   const trClass = isFixtureIssue(i) ? ' class="fixture"' : "";
   return `<tr${trClass}>
     <td class="num"><a href="${escapeHtml(i.url)}" target="_blank" rel="noopener">#${i.number}</a></td>
-    <td class="repo"><a href="https://github.com/${escapeHtml(i.repo)}/issues" target="_blank" rel="noopener">${escapeHtml(i.repo)}</a></td>
+    <td class="repo"><a href="https://github.com/${escapeHtml(i.repo)}/issues" target="_blank" rel="noopener">${escapeHtml(i.repo)}</a>${renderReleaseModeBadge(i.repo, taglessSet)}</td>
     <td class="title">${renderFixtureBadge(i)}<a href="${escapeHtml(i.url)}" target="_blank" rel="noopener">${escapeHtml(i.title)}</a><div class="labels">${chips}</div>${labelChips}${renderPrChips(i, prMap)}</td>
     <td class="author">@${escapeHtml(i.author)}</td>
     <td class="updated">${escapeHtml(i.updated_at.slice(0, 10))}</td>
@@ -600,11 +636,12 @@ function renderRepoSection(
   repo: string,
   items: OrgIssue[],
   prMap: ReadonlyMap<string, IssuePrRef[]>,
+  taglessSet: ReadonlySet<string>,
 ): string {
   const rows = items.map((i) => renderRow(i, prMap)).join("\n");
   const repoUrl = `https://github.com/${repo}/issues`;
   return `<section class="repo">
-  <h2><a href="${escapeHtml(repoUrl)}" target="_blank" rel="noopener">${escapeHtml(repo)}</a><span class="count">(${items.length})</span></h2>
+  <h2><a href="${escapeHtml(repoUrl)}" target="_blank" rel="noopener">${escapeHtml(repo)}</a><span class="count">(${items.length})</span>${renderReleaseModeBadge(repo, taglessSet)}</h2>
   <table>
     <thead><tr><th>#</th><th>Title</th><th>Author</th><th>Updated</th><th></th></tr></thead>
     <tbody>${rows}</tbody>
@@ -652,6 +689,20 @@ function renderPrChips(
     return `<a class="pr-chip${cls}" href="${escapeHtml(p.url)}" target="_blank" rel="noopener" title="${escapeHtml(title)}">${icon} #${p.number}${suffix}</a>`;
   }).join("");
   return `<div class="pr-chips">${chips}</div>`;
+}
+
+// Repo の release 運用 badge (Refs #312)。issue を release-close フローで
+// close するのに tag を打つ必要があるか (要 tag) / merge がそのまま release か
+// (tagless) を /issues 上で即読みできるようにする。判定は TAGLESS_REPOS
+// wrangler var のみ (direct-push allowlist は GitHub fetch が要るため見ない)。
+// export しているのは test から直接検証するため。
+export function renderReleaseModeBadge(
+  repo: string,
+  taglessSet: ReadonlySet<string>,
+): string {
+  return taglessSet.has(repo)
+    ? `<a class="release-mode mode-tagless" href="/releases" title="tagless 運用 — merge がそのまま release。tag を打たずに /releases から close できる">tagless</a>`
+    : `<a class="release-mode mode-needs-tag" href="/releases" title="tag-release 運用 — close 候補を出すには release tag を打つ (/tag-release)">🏷️ 要 tag</a>`;
 }
 
 // CI fixture issues (e.g. ippoan/claude-hooks#1, #2) exist only to satisfy

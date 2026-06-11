@@ -115,6 +115,10 @@ interface RepoView {
   repo: string;
   tagBlocks: TagBlock[];
   olderTags: string[];   // tags beyond the displayed top N
+  // tagless 運用 (TAGLESS_REPOS / direct-push allowlist) なら true。
+  // close するのに release tag が要るか (= 要 tag) を card 見出しの badge で
+  // 表示する (Refs #312)。
+  tagless: boolean;
 }
 
 interface TagBlock {
@@ -251,9 +255,10 @@ async function loadRepoView(
         repo: `${owner}/${name}`,
         tagBlocks: block ? [block] : [],
         olderTags: [],
+        tagless: true,
       };
     }
-    return { repo: `${owner}/${name}`, tagBlocks: [], olderTags: [] };
+    return { repo: `${owner}/${name}`, tagBlocks: [], olderTags: [], tagless: false };
   }
 
   // 2. For each inline tag, compare to its immediate predecessor (next in
@@ -347,6 +352,7 @@ async function loadRepoView(
     repo: `${owner}/${name}`,
     tagBlocks,
     olderTags: sorted.slice(TOP_TAGS_INLINE),
+    tagless: useSynthetic,
   };
 }
 
@@ -915,6 +921,16 @@ ${PWA_REGISTER_SCRIPT}
 </body></html>`;
 }
 
+// repo の release 運用 badge (Refs #312)。close するのに tag を打つ必要が
+// あるか (要 tag) / merge がそのまま release か (tagless) を card 見出しで
+// 即読みできるようにする — 「release から close するのに tag が要るか」を
+// 画面から判断できないのが不便、という operator の指摘への対応。
+function renderModeBadge(tagless: boolean): string {
+  return tagless
+    ? `<span class="mode-badge mode-tagless" title="tagless 運用 — merge がそのまま release。tag を打たずにここから close できる">tagless</span>`
+    : `<span class="mode-badge mode-needs-tag" title="tag-release 運用 — close 候補を出すには release tag を打つ (/tag-release)">🏷️ 要 tag</span>`;
+}
+
 function renderIndexRepo(view: RepoView): string {
   // Only tag blocks with at least one OPEN (actionable) issue get the full
   // table+form treatment. Closed-only blocks are pure noise on the landing
@@ -938,6 +954,7 @@ function renderIndexRepo(view: RepoView): string {
       : `<span class="no-refs">No referenced issues in the recent release window.</span>`;
     return `<section class="repo-card repo-card-compact">
       <a class="repo-link" href="https://github.com/${escapeHtml(view.repo)}/releases" target="_blank" rel="noopener">${escapeHtml(view.repo)}</a>
+      ${renderModeBadge(view.tagless)}
       ${summary}
     </section>`;
   }
@@ -965,7 +982,7 @@ function renderIndexRepo(view: RepoView): string {
   // close them in one shot; the POST handler groups by tag for comment
   // attribution.
   return `<section class="repo-card">
-    <h2><a href="https://github.com/${escapeHtml(view.repo)}/releases" target="_blank" rel="noopener">${escapeHtml(view.repo)}</a></h2>
+    <h2><a href="https://github.com/${escapeHtml(view.repo)}/releases" target="_blank" rel="noopener">${escapeHtml(view.repo)}</a>${renderModeBadge(view.tagless)}</h2>
     <form method="POST" action="/api/release-close-batch" class="batch-close-form">
       <input type="hidden" name="repo" value="${escapeHtml(view.repo)}">
       ${tagSections}
@@ -1171,6 +1188,17 @@ const STYLES = `
   }
   .repo-card-compact .repo-link:hover { color: #58a6ff; }
   .repo-card-compact .closed-summary { font-size: 12px; color: #8b949e; }
+  .mode-badge {
+    display: inline-block; font-size: 11px; font-weight: 400;
+    padding: 1px 8px; border-radius: 10px; margin-left: 8px;
+    vertical-align: middle; white-space: nowrap;
+  }
+  .mode-tagless {
+    background: #2ea04322; color: #7ee787; border: 1px solid #2ea04388;
+  }
+  .mode-needs-tag {
+    background: #d2992222; color: #e3b341; border: 1px solid #d2992288;
+  }
   .tag-block { margin-bottom: 14px; }
   .tag-block-header {
     display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap;
