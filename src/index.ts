@@ -6,7 +6,7 @@ import {
   type AuthClientWorkerEnv,
 } from "@ippoan/auth-client-worker";
 import { AUTH_WORKER_ORIGIN } from "./github-api";
-import { handleWebhook } from "./webhook";
+import { handleWebhook, consumeWebhookBatch, type WebhookQueueMessage } from "./webhook";
 import { handleDashboard } from "./dashboard";
 import { handleIssuesPage } from "./issues-page";
 import { handleProjectsPage } from "./projects-page";
@@ -88,6 +88,12 @@ export interface Env extends AuthClientWorkerEnv {
    * Refs #157 / #158、shape は docs/release-wave-compatibility-kv.md。
    */
   COMPAT_KV: KVNamespace;
+  /**
+   * GitHub webhook の ingest queue (Refs #318)。受信 handler は enqueue + 即
+   * 200 のみ行い、処理は本 worker の queue consumer が担う。binding 未設定の
+   * 環境 (wrangler dev / test) は waitUntil fallback で inline 処理される。
+   */
+  WEBHOOK_QUEUE?: Queue<WebhookQueueMessage>;
 }
 
 // OAuth flow config — shared between /oauth/login, /oauth/callback, and the
@@ -366,4 +372,10 @@ app.post("/api/release-wave/backend-rollback", (c) =>
   handleReleaseWaveBackendRollback(c.req.raw, c.env),
 );
 
-export default app;
+// Queues consumer を載せるため Hono app を module worker 形に包む。
+// `fetch` は従来どおり app に委譲 (tests の worker.fetch も互換)。
+export default {
+  fetch: app.fetch,
+  queue: (batch: MessageBatch<WebhookQueueMessage>, env: Env) =>
+    consumeWebhookBatch(batch, env),
+};

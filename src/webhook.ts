@@ -21,6 +21,14 @@ import {
 } from "./release-cache";
 import { applyPullRequestEvent } from "./pr-map-cache";
 
+// Queue 経由で consumer に渡す raw event (Refs #318)。body は署名検証済みの
+// raw JSON 文字列をそのまま積む (consumer 側で event 別に parse する)。
+export interface WebhookQueueMessage {
+  event: string | null;
+  body: string;
+  delivery: string;
+}
+
 interface ReleaseWebhookPayload {
   action: string;
   release: {
@@ -182,11 +190,31 @@ export async function handleWebhook(
     delivery: request.headers.get("X-GitHub-Delivery") ?? "",
   }));
 
-  // Ack-then-process (Refs #318)。GitHub の webhook delivery timeout は 10s で、
-  // timeout した delivery は自動再送されない。Hub DO / KV / cache invalidation を
-  // 応答前に await すると CI burst 時に 10s を超えて event が喪失する実害が出た
-  // (2026-06-11 実測: wallTime 17.5s/18.0s + GitHub 側 "timed out" delivery)。
-  // 署名検証済みのこの時点で即 200 を返し、処理本体は waitUntil に流す
+  // Queue 経路 (Refs #318)。GitHub の webhook delivery timeout は 10s で、
+  // timeout した delivery は自動再送されない。受信側は署名検証 + enqueue
+  // だけ行って即 200 を返し、処理は queue consumer (本 worker の queue handler)
+  // が行う。処理失敗は Queues の retry (max_retries) が面倒を見るため、
+  // waitUntil 方式 (#319) の「応答後 30s + 喪失 silent」問題も解消する。
+  const delivery = request.headers.get("X-GitHub-Delivery") ?? "";
+  if (env.WEBHOOK_QUEUE) {
+    try {
+      await env.WEBHOOK_QUEUE.send({ event, body, delivery });
+      return new Response("OK", { status: 200 });
+    } catch (err) {
+      // send 失敗 (メッセージ 128KB 超 / 一時障害) は下の inline 経路に
+      // fallback して取りこぼしを防ぐ。
+      console.log(JSON.stringify({
+        msg: "webhook-enqueue-failed",
+        event,
+        repo: logRepo,
+        delivery,
+        error: err instanceof Error ? err.message : String(err),
+      }));
+    }
+  }
+
+  // Fallback: queue binding が無い環境 (wrangler dev / test) と enqueue 失敗時。
+  // ack-then-process (#319) — 即 200 を返し、処理本体は waitUntil に流す
   // (応答後 30s まで実行が保証される)。処理失敗は log のみ — GitHub への 500 は
   // 再送を引き起こさないため、応答コードで伝える意味がない。
   const work = processWebhookEvent(event, body, env, hub).catch((err) => {
@@ -204,6 +232,33 @@ export async function handleWebhook(
     await work;
   }
   return new Response("OK", { status: 200 });
+}
+
+// Queue consumer (Refs #318)。wrangler の queues.consumers 設定で本 worker の
+// `queue()` handler に配送される。max_concurrency: 1 + batch 逐次処理で
+// event の相対順序を概ね保つ (GitHub の配信自体に厳密順序は無い)。失敗 message
+// は retry() で Queues の再配送に任せる (max_retries 超過で drop + log 済み)。
+export async function consumeWebhookBatch(
+  batch: MessageBatch<WebhookQueueMessage>,
+  env: Env,
+): Promise<void> {
+  const hub = env.CI_HUB.get(env.CI_HUB.idFromName("singleton"));
+  for (const message of batch.messages) {
+    const { event, body, delivery } = message.body;
+    try {
+      await processWebhookEvent(event, body, env, hub);
+      message.ack();
+    } catch (err) {
+      console.log(JSON.stringify({
+        msg: "webhook-process-failed",
+        event,
+        delivery,
+        attempts: message.attempts,
+        error: err instanceof Error ? err.message : String(err),
+      }));
+      message.retry();
+    }
+  }
 }
 
 // Event 処理本体。handleWebhook から waitUntil 経由で呼ばれる (Refs #318)。
