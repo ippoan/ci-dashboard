@@ -2,7 +2,8 @@ import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:
 import { describe, it, expect, beforeEach } from "vitest";
 import worker from "../src/index";
 import type { Env } from "../src/index";
-import type { CIStatus, JobStatus } from "../src/webhook";
+import type { CIStatus, JobStatus, WebhookQueueMessage } from "../src/webhook";
+import { consumeWebhookBatch } from "../src/webhook";
 
 const WEBHOOK_SECRET = "test-secret";
 
@@ -951,5 +952,125 @@ describe("POST /webhook pull_request — pr-map patch (Refs #304)", () => {
     };
     // closed-unmerged → 除去 (key ごと消える)
     expect(entry.data["ippoan/secrets-inventory-gcp#3"]).toBeUndefined();
+  });
+});
+
+// ───── Queue ingest (Refs #318) ─────
+//
+// WEBHOOK_QUEUE binding がある env では受信 handler は enqueue + 即 200 のみ
+// 行い、処理は consumeWebhookBatch (queue consumer) が担う。binding 無し /
+// enqueue 失敗時は waitUntil fallback で従来どおり inline 処理される。
+describe("webhook queue ingest (Refs #318)", () => {
+  const issueBody = JSON.stringify({
+    action: "opened",
+    issue: {
+      number: 77, title: "queued issue", state: "open", user: { login: "y" },
+      labels: [], assignees: [], comments: 0,
+      created_at: "2026-06-11T00:00:00Z",
+      updated_at: "2026-06-11T00:00:00Z",
+      html_url: "https://github.com/ippoan/foo/issues/77",
+    },
+    repository: { full_name: "ippoan/foo" },
+  });
+
+  beforeEach(async () => {
+    resetHubCalls();
+    await env.CI_STATUS.delete("issue:ippoan/foo#77");
+  });
+
+  it("WEBHOOK_QUEUE があれば enqueue + 200 で、inline 処理はしない", async () => {
+    const sent: WebhookQueueMessage[] = [];
+    const queueEnv = {
+      ...testEnv(),
+      WEBHOOK_QUEUE: { send: async (m: WebhookQueueMessage) => { sent.push(m); } },
+    } as unknown as Env;
+
+    const sig = await sign(issueBody, WEBHOOK_SECRET);
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(
+      new Request("http://localhost/webhook", {
+        method: "POST", body: issueBody,
+        headers: {
+          "X-Hub-Signature-256": sig,
+          "X-GitHub-Event": "issues",
+          "X-GitHub-Delivery": "deliv-1",
+        },
+      }),
+      queueEnv,
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(200);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toEqual({ event: "issues", body: issueBody, delivery: "deliv-1" });
+    // 処理は consumer 側の責務 — 受信時点では KV に入らない
+    expect(await env.CI_STATUS.get("issue:ippoan/foo#77")).toBeNull();
+  });
+
+  it("enqueue 失敗時は inline 処理に fallback する", async () => {
+    const queueEnv = {
+      ...testEnv(),
+      WEBHOOK_QUEUE: { send: async () => { throw new Error("message too large"); } },
+    } as unknown as Env;
+
+    const sig = await sign(issueBody, WEBHOOK_SECRET);
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(
+      new Request("http://localhost/webhook", {
+        method: "POST", body: issueBody,
+        headers: { "X-Hub-Signature-256": sig, "X-GitHub-Event": "issues" },
+      }),
+      queueEnv,
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(200);
+    // fallback で従来どおり KV upsert される
+    const stored = await env.CI_STATUS.get("issue:ippoan/foo#77", "json") as { number: number } | null;
+    expect(stored?.number).toBe(77);
+  });
+
+  it("consumeWebhookBatch: 正常 message は処理して ack", async () => {
+    const acked: string[] = [];
+    const retried: string[] = [];
+    const batch = {
+      messages: [{
+        body: { event: "issues", body: issueBody, delivery: "deliv-2" },
+        attempts: 1,
+        ack: () => acked.push("deliv-2"),
+        retry: () => retried.push("deliv-2"),
+      }],
+    } as unknown as MessageBatch<WebhookQueueMessage>;
+
+    await consumeWebhookBatch(batch, testEnv());
+
+    expect(acked).toEqual(["deliv-2"]);
+    expect(retried).toEqual([]);
+    const stored = await env.CI_STATUS.get("issue:ippoan/foo#77", "json") as { number: number } | null;
+    expect(stored?.number).toBe(77);
+  });
+
+  it("consumeWebhookBatch: 処理失敗 message は retry (後続 message は処理継続)", async () => {
+    const acked: string[] = [];
+    const retried: string[] = [];
+    const make = (delivery: string, event: string, body: string) => ({
+      body: { event, body, delivery },
+      attempts: 1,
+      ack: () => acked.push(delivery),
+      retry: () => retried.push(delivery),
+    });
+    const batch = {
+      messages: [
+        make("bad", "issues", "{not json"),
+        make("good", "issues", issueBody),
+      ],
+    } as unknown as MessageBatch<WebhookQueueMessage>;
+
+    await consumeWebhookBatch(batch, testEnv());
+
+    expect(retried).toEqual(["bad"]);
+    expect(acked).toEqual(["good"]);
   });
 });

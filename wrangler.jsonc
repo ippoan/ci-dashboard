@@ -158,6 +158,31 @@
           "new_sqlite_classes": ["ReleaseWaveHub"]
         }
       ],
+      // GitHub webhook ingest queue (Refs #318)。受信 handler は enqueue + 即
+      // 200、処理は本 worker の queue consumer。**初回 deploy 前に
+      // `npx wrangler queues create ci-dashboard-webhooks` で queue を作成する
+      // こと** (未作成だと deploy が fail する = loud)。consumer は 1 queue
+      // 1 worker 制約のため staging (実運用 env) のみに付ける。
+      "queues": {
+        "producers": [
+          {
+            "binding": "WEBHOOK_QUEUE",
+            "queue": "ci-dashboard-webhooks"
+          }
+        ],
+        "consumers": [
+          {
+            "queue": "ci-dashboard-webhooks",
+            // 順序を概ね保ちつつ burst を平滑化する設定: 直列 1 consumer、
+            // 小 batch、最大 5 回 retry (超過は drop — webhook-process-failed
+            // log に attempts 付きで残る)。
+            "max_batch_size": 10,
+            "max_batch_timeout": 1,
+            "max_retries": 5,
+            "max_concurrency": 1
+          }
+        ]
+      },
       "secrets_store_secrets": [
         {
           "binding": "RELEASE_WAVE_WEBHOOK_SECRET",
