@@ -23,11 +23,13 @@ import {
 const KEY_WATERMARK = "issues:watermark";
 const KEY_PREFIX = "issue:";
 
-// SSR 連続リロード時の thundering herd を吸収しつつ「stale すぎる」と
-// 感じさせない値。書き込みは webhook が数秒以内に届くので 60s 内の更新
-// ラグは webhook 側でほぼ埋まる。issues-page のバナー (「裏で更新中」判定)
-// からも参照するため export (Refs #304)。
-export const FRESH_THRESHOLD_MS = 60 * 1000;
+// Reconcile (Search full snapshot) の最短間隔。webhook-primary 化 (Refs #332):
+// リアルタイム反映は webhook (queue + retry #320) + WS reload が担うため、
+// Search は「webhook 欠落の healing」専用の安全網 — 1h に 1 回で足りる。
+// 旧値 60s は WS 自動 reload (#322/#327) と組み合わさると reload のたびに
+// full snapshot が走り、rate limit の構造要因になっていた (Refs #329)。
+// issues-page のバナー (「裏で更新中」判定) からも参照するため export。
+export const FRESH_THRESHOLD_MS = 60 * 60 * 1000;
 
 // Watermark は `now - SAFETY_WINDOW_MS` でセット。full snapshot 方式では
 // delta query が無いので overlap の意味は無く、次 reconcile の fresh 判定を

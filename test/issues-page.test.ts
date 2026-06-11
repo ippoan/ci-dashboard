@@ -1051,9 +1051,9 @@ describe("GET /issues — SWR (Refs #304)", () => {
   it("warm + stale: 旧データを即返しして background で 6 call refresh", async () => {
     const fetchSpy = stubSearchIssues();
     await seedIssue("ippoan/rust-alc-api", 7, "old cached title");
-    const oldWm = new Date(Date.now() - 120_000).toISOString();
+    const oldWm = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
     await env.CI_STATUS.put("issues:watermark", oldWm);
-    await seedPrMap(Date.now() - 700_000);
+    await seedPrMap(Date.now() - 2 * 60 * 60 * 1000);
 
     const ctx = createExecutionContext();
     const res = await worker.fetch(new Request("http://localhost/issues"), testEnv(), ctx);
@@ -1083,8 +1083,8 @@ describe("GET /issues — SWR (Refs #304)", () => {
       return new Response("API rate limit exceeded", { status: 403 });
     });
     await seedIssue("ippoan/rust-alc-api", 7, "survives rate limit");
-    await env.CI_STATUS.put("issues:watermark", new Date(Date.now() - 120_000).toISOString());
-    await seedPrMap(Date.now() - 700_000);
+    await env.CI_STATUS.put("issues:watermark", new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString());
+    await seedPrMap(Date.now() - 2 * 60 * 60 * 1000);
 
     const ctx = createExecutionContext();
     const res = await worker.fetch(new Request("http://localhost/issues"), testEnv(), ctx);
@@ -1120,7 +1120,7 @@ describe("GET /issues — SWR (Refs #304)", () => {
   it("warm + auth error: 302 せず 200 で cache を返す (background では redirect 不可)", async () => {
     stubSearchIssues();
     await seedIssue("ippoan/rust-alc-api", 7, "warm survives auth expiry");
-    await env.CI_STATUS.put("issues:watermark", new Date(Date.now() - 120_000).toISOString());
+    await env.CI_STATUS.put("issues:watermark", new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString());
     await seedPrMap(Date.now());
     // token cache を落とす → background reconcile が auth error で fail する
     await env.CI_STATUS.delete("auth-client-worker:gh-token");
