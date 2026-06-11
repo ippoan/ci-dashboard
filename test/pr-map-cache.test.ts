@@ -144,15 +144,32 @@ describe("loadPrMap (SWR)", () => {
     expect(entry!.storedAt).toBe(oldStoredAt);
   });
 
-  it("cold start (cache 無し): 同期 fetch、失敗は error として返す (従来挙動)", async () => {
+  it("cold start (cache 無し): 同期 fetch せず loading flag + 背景 refresh (Refs #323)", async () => {
     stubPrSearch({ status: 403, bodyText: "API rate limit exceeded" });
     const ctx = createExecutionContext();
     const res = await loadPrMap(testEnv(), ORGS, YHONDA, ctx);
-    await waitOnExecutionContext(ctx);
+    // SSR をブロックしない: 即 loading で返る
     expect(res.map.size).toBe(0);
-    expect(res.error).toContain("403");
-    // cold start の rate limit も backoff を立てる
+    expect(res.loading).toBe(true);
+    expect(res.error).toBeNull();
+    // 背景 refresh の失敗 (403) は backoff を立てる (waitUntil reject しない)
+    await waitOnExecutionContext(ctx);
     expect(await getRateLimitBackoff(env.CI_STATUS)).not.toBeNull();
+  });
+
+  it("cold start: 背景 refresh 成功後の 2 回目は cache から chips を返す (Refs #323)", async () => {
+    stubPrSearch();
+    const ctx1 = createExecutionContext();
+    const cold = await loadPrMap(testEnv(), ORGS, YHONDA, ctx1);
+    expect(cold.loading).toBe(true);
+    await waitOnExecutionContext(ctx1);
+
+    const ctx2 = createExecutionContext();
+    const warm = await loadPrMap(testEnv(), ORGS, YHONDA, ctx2);
+    await waitOnExecutionContext(ctx2);
+    // 背景 refresh が cache を作っているので 2 回目は loading しない
+    expect(warm.loading).toBe(false);
+    expect(await readMap()).not.toBeNull();
   });
 });
 

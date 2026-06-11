@@ -205,8 +205,21 @@ describe("project-cache", () => {
       expect(await env.CI_STATUS.get(itemsKey("ohishi-exp", 1))).toBe('[]');
     });
 
-    it("invalidateIssuesPageProjectMap は issues-page の project-map key を消す", async () => {
-      await env.CI_STATUS.put(ISSUES_PAGE_PROJECT_MAP_KEY, '{}');
+    it("invalidateIssuesPageProjectMap は blob を stale 化する (delete ではなく storedAt:0、Refs #323)", async () => {
+      await env.CI_STATUS.put(
+        ISSUES_PAGE_PROJECT_MAP_KEY,
+        JSON.stringify({ storedAt: Date.now(), data: { "ippoan/x#1": [] } }),
+      );
+      await invalidateIssuesPageProjectMap(env.CI_STATUS);
+      const blob = await env.CI_STATUS.get(ISSUES_PAGE_PROJECT_MAP_KEY, "json") as
+        { storedAt: number; data: Record<string, unknown[]> } | null;
+      // data は保持したまま storedAt:0 = 次の load で古いチップを出しつつ背景 refresh
+      expect(blob).not.toBeNull();
+      expect(blob!.storedAt).toBe(0);
+      expect(Object.keys(blob!.data)).toContain("ippoan/x#1");
+    });
+
+    it("invalidateIssuesPageProjectMap は blob 不在なら no-op", async () => {
       await invalidateIssuesPageProjectMap(env.CI_STATUS);
       expect(await env.CI_STATUS.get(ISSUES_PAGE_PROJECT_MAP_KEY)).toBeNull();
     });
@@ -216,7 +229,10 @@ describe("project-cache", () => {
     it("organization.login から org を引いて list + items + project-map を flush", async () => {
       await env.CI_STATUS.put(orgListKey("ippoan"), '[]');
       await env.CI_STATUS.put(itemsKey("ippoan", 1), '[]');
-      await env.CI_STATUS.put(ISSUES_PAGE_PROJECT_MAP_KEY, '{}');
+      await env.CI_STATUS.put(
+        ISSUES_PAGE_PROJECT_MAP_KEY,
+        JSON.stringify({ storedAt: Date.now(), data: {} }),
+      );
       await applyProjectsV2Event(env.CI_STATUS, {
         action: "edited",
         projects_v2: { id: 1, node_id: "PVT_1" },
@@ -224,7 +240,9 @@ describe("project-cache", () => {
       });
       expect(await env.CI_STATUS.get(orgListKey("ippoan"))).toBeNull();
       expect(await env.CI_STATUS.get(itemsKey("ippoan", 1))).toBeNull();
-      expect(await env.CI_STATUS.get(ISSUES_PAGE_PROJECT_MAP_KEY)).toBeNull();
+      // blob は stale 化 (storedAt:0) — loading に戻さない (Refs #323)
+      const blob = await env.CI_STATUS.get(ISSUES_PAGE_PROJECT_MAP_KEY, "json") as { storedAt: number } | null;
+      expect(blob!.storedAt).toBe(0);
     });
 
     it("organization が無くても projects_v2.owner.login で fallback", async () => {
@@ -342,7 +360,10 @@ describe("project-cache", () => {
     it("items + issues-page project-map だけ flush し、list は保つ", async () => {
       await env.CI_STATUS.put(orgListKey("ippoan"), '[]');
       await env.CI_STATUS.put(itemsKey("ippoan", 1), '[]');
-      await env.CI_STATUS.put(ISSUES_PAGE_PROJECT_MAP_KEY, '{}');
+      await env.CI_STATUS.put(
+        ISSUES_PAGE_PROJECT_MAP_KEY,
+        JSON.stringify({ storedAt: Date.now(), data: {} }),
+      );
       await applyProjectsV2ItemEvent(env.CI_STATUS, {
         action: "created",
         projects_v2_item: {
@@ -353,7 +374,9 @@ describe("project-cache", () => {
       });
       expect(await env.CI_STATUS.get(orgListKey("ippoan"))).toBe('[]'); // 残る
       expect(await env.CI_STATUS.get(itemsKey("ippoan", 1))).toBeNull(); // 消える
-      expect(await env.CI_STATUS.get(ISSUES_PAGE_PROJECT_MAP_KEY)).toBeNull(); // 消える
+      // blob は stale 化 (storedAt:0、Refs #323)
+      const blob = await env.CI_STATUS.get(ISSUES_PAGE_PROJECT_MAP_KEY, "json") as { storedAt: number } | null;
+      expect(blob!.storedAt).toBe(0);
     });
 
     it("organization が無い (user-owned projects 等) なら no-op", async () => {

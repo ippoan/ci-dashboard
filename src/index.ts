@@ -8,7 +8,7 @@ import {
 import { AUTH_WORKER_ORIGIN } from "./github-api";
 import { handleWebhook, consumeWebhookBatch, type WebhookQueueMessage } from "./webhook";
 import { handleDashboard } from "./dashboard";
-import { handleIssuesPage } from "./issues-page";
+import { handleIssuesPage, handleIssuesDecorations } from "./issues-page";
 import { handleProjectsPage } from "./projects-page";
 import { handleReleasesPage } from "./releases-page";
 import { handleReleaseClose } from "./release-close";
@@ -128,6 +128,9 @@ app.get("/", () => handleDashboard());
 // Open issues (SSR, cross-org)。executionCtx は SWR の background
 // reconcile / PR map refresh 用 (Refs #304)。
 app.get("/issues", (c) => handleIssuesPage(c.env, c.executionCtx));
+
+// decorations (Project/PR チップ) の部分更新用 JSON (Refs #323)。KV read のみ。
+app.get("/issues/decorations", (c) => handleIssuesDecorations(c.env));
 
 // Projects v2 read-only listing (SSR, cross-org). Refs #72.
 app.get("/projects", (c) => handleProjectsPage(c.env));

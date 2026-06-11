@@ -238,11 +238,112 @@ export async function invalidateOrgItems(kv: KVNamespace, org: string): Promise<
   } while (cursor);
 }
 
-/** `/issues` page の project map cache (Phase 1 で既存) を flush。
- *  `projects_v2_item` event でカードが移動した時、/issues 側の 5min TTL を
- *  待たずに即反映するために併せて呼ぶ。 */
+/** `/issues` page の project map blob を stale 化する。delete ではなく
+ *  storedAt:0 への書き換えにするのは、webhook (projects_v2*) の度に /issues
+ *  が loading 状態 (= チップ無し) に戻るのを避けるため — 古いチップを出し
+ *  つつ背景 refresh で追い付く (Refs #323)。blob が無ければ no-op。 */
 export async function invalidateIssuesPageProjectMap(kv: KVNamespace): Promise<void> {
-  await kv.delete(ISSUES_PAGE_PROJECT_MAP_KEY);
+  const blob = await kv.get(ISSUES_PAGE_PROJECT_MAP_KEY, "json") as ProjectMapBlobEntry | null;
+  if (!blob) return;
+  await kv.put(
+    ISSUES_PAGE_PROJECT_MAP_KEY,
+    JSON.stringify({ ...blob, storedAt: 0 }),
+    { expirationTtl: PROJECT_MAP_STORE_SECONDS },
+  );
+}
+
+// ───── /issues page 向け SWR blob (Refs #323) ─────
+//
+// getOrFetchProjectIssueMap は層別 KV cache (org list 30min + per-board items)
+// を持つが、TTL 切れの SSR hit が GraphQL fan-out を**同期で**待っていた
+// (実測: /issues 平均 wall 13.8s / p90 35s、CPU 28ms = ほぼ全部この待ち)。
+// pr-map-cache と同じ SWR pattern で結合済み map を 1 blob として持ち、
+// warm/stale は即返し + 背景 refresh、cold は loading flag で SSR を
+// ブロックしない (page 側が /issues/decorations を poll して部分更新する)。
+
+interface ProjectMapBlobEntry {
+  storedAt: number;
+  data: Record<string, ProjectRef[]>;
+}
+
+const PROJECT_MAP_FRESH_SECONDS = 600;
+const PROJECT_MAP_STORE_SECONDS = 86400;
+const PROJECT_MAP_REFRESH_LOCK = "issues-page:project-map:refreshing";
+const PROJECT_MAP_REFRESH_LOCK_TTL = 60;
+
+export interface ProjectIssueMapSwrResult {
+  map: Map<string, ProjectRef[]>;
+  /** blob が無く背景 fetch 中 (= cold start)。page は loading 表示 +
+   *  /issues/decorations poll で部分更新する。 */
+  loading: boolean;
+  /** stale blob を即返しして背景 refresh 中 (mild banner)。 */
+  refreshing: boolean;
+}
+
+/** SWR 読み出し: blob があれば常に即返し (stale なら背景 refresh)。blob が
+ *  無い cold start も同期 fetch せず、背景 refresh + loading flag を返す。 */
+export async function loadProjectIssueMapSwr(
+  env: AuthClientWorkerEnv,
+  orgs: string[],
+  ctx?: ExecutionContext,
+): Promise<ProjectIssueMapSwrResult> {
+  const kv = env.CI_STATUS;
+  const blob = await kv.get(ISSUES_PAGE_PROJECT_MAP_KEY, "json") as ProjectMapBlobEntry | null;
+  const now = Date.now();
+  const kick = () => {
+    const p = refreshProjectIssueMapBlob(env, orgs).catch((err) => {
+      console.log(JSON.stringify({
+        msg: "project-map-bg-refresh-failed",
+        error: err instanceof Error ? err.message : String(err),
+      }));
+    });
+    if (ctx) ctx.waitUntil(p);
+    else void p;
+  };
+
+  if (blob) {
+    const fresh = now - blob.storedAt < PROJECT_MAP_FRESH_SECONDS * 1000;
+    if (!fresh) kick();
+    return {
+      map: new Map(Object.entries(blob.data)),
+      loading: false,
+      refreshing: !fresh,
+    };
+  }
+  kick();
+  return { map: new Map(), loading: true, refreshing: true };
+}
+
+/** blob を取り直す (背景実行前提)。層別 cache 持ちの
+ *  getOrFetchProjectIssueMap に委譲するので、warm な層は GraphQL 0 call。
+ *  backoff / lock / 既に fresh なら no-op。 */
+export async function refreshProjectIssueMapBlob(
+  env: AuthClientWorkerEnv,
+  orgs: string[],
+): Promise<void> {
+  const kv = env.CI_STATUS;
+  if (await getRateLimitBackoff(kv)) return;
+  if (await kv.get(PROJECT_MAP_REFRESH_LOCK)) return;
+  await kv.put(PROJECT_MAP_REFRESH_LOCK, "1", { expirationTtl: PROJECT_MAP_REFRESH_LOCK_TTL });
+  const recheck = await kv.get(ISSUES_PAGE_PROJECT_MAP_KEY, "json") as ProjectMapBlobEntry | null;
+  if (recheck && Date.now() - recheck.storedAt < PROJECT_MAP_FRESH_SECONDS * 1000) return;
+
+  const res = await getOrFetchProjectIssueMap(env, orgs);
+  const entry: ProjectMapBlobEntry = {
+    storedAt: Date.now(),
+    data: Object.fromEntries(res.map),
+  };
+  await kv.put(ISSUES_PAGE_PROJECT_MAP_KEY, JSON.stringify(entry), {
+    expirationTtl: PROJECT_MAP_STORE_SECONDS,
+  });
+}
+
+/** /issues/decorations 用: blob を KV read だけで返す (GitHub fetch なし)。 */
+export async function readProjectIssueMapBlob(
+  kv: KVNamespace,
+): Promise<Record<string, ProjectRef[]> | null> {
+  const blob = await kv.get(ISSUES_PAGE_PROJECT_MAP_KEY, "json") as ProjectMapBlobEntry | null;
+  return blob ? blob.data : null;
 }
 
 // ───── Webhook payload types ─────
@@ -302,6 +403,8 @@ export const __testing = {
   TTL_SECONDS,
   STORE_TTL_SECONDS,
   ISSUES_PAGE_PROJECT_MAP_KEY,
+  PROJECT_MAP_FRESH_SECONDS,
+  PROJECT_MAP_REFRESH_LOCK,
   orgListKey,
   itemsKey,
 };
