@@ -204,7 +204,8 @@ describe("POST /webhook", () => {
     const res = await worker.fetch(req, testEnv(), ctx);
     await waitOnExecutionContext(ctx);
     expect(res.status).toBe(200);
-    expect(await res.text()).toBe("Ignored event: watch");
+    // Ack-then-process (Refs #318): 応答は event 処理結果を反映せず常に "OK"。
+    expect(await res.text()).toBe("OK");
   });
 
   it("stores workflow_run status in KV", async () => {
