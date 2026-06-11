@@ -112,9 +112,26 @@ export async function handleReleaseClose(
     await Promise.all(
       closed.map((n) => invalidateIssue(env.CI_STATUS, owner, name, n)),
     );
-    // /releases index は close で発火する issues webhook の直接 patch
-    // (Refs #339) が反映する — ここでの stale 化 (= 全集計の引き金) は不要に
-    // なった。redirect 直後の表示は flash 整合が担保する。
+  }
+
+  // /releases index blob を close 経路で同期 patch する (Refs #343)。issues
+  // webhook 直接 patch (#339) は per-repo 購読に依存し、未購読 repo では
+  // blob が patch されず closed issue が reload で復活する (= #343 の実害)。
+  // close handler は確定した closed[] を握っているので、redirect 前に hub
+  // 経由で blob を直す。flash 整合だけに頼らず blob 自体を closed にするので
+  // 2 回目以降の reload でも復活しない。hub 到達不能は fail-open (flash 整合
+  // + 1h 安全網が拾う)。webhook patch と二重に走っても Hub DO 直列化(#342) +
+  // last-write-wins で冪等。
+  if (hub && closed.length > 0) {
+    const closedUrls = closed.map(
+      (n) => `https://github.com/${owner}/${name}/issues/${n}`,
+    );
+    try {
+      await hub.fetch(new Request("http://hub/releases-index-apply-close", {
+        method: "POST",
+        body: JSON.stringify({ repo: repoParam, urls: closedUrls }),
+      }));
+    } catch { /* fail-open: flash 整合 + 1h 安全網が拾う */ }
   }
 
   // Kick the Hub to recompute the banner alert state for this repo when at

@@ -3,6 +3,9 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import worker from "../src/index";
 import type { Env } from "../src/index";
 
+// hub.fetch の記録用。テストごとに reset する。
+const hubCalls: Array<{ url: string; body: unknown }> = [];
+
 function testEnv(): Env {
   return {
     CI_STATUS: env.CI_STATUS,
@@ -10,7 +13,14 @@ function testEnv(): Env {
     INTERNAL_SHARED_SECRET: { get: async () => "test-internal" } as unknown as SecretsStoreSecret,
     CI_HUB: {
       idFromName: () => ({}),
-      get: () => ({ fetch: async () => new Response("OK") }),
+      get: () => ({
+        fetch: async (req: Request) => {
+          let body: unknown = null;
+          try { body = await req.clone().json(); } catch { /* no body */ }
+          hubCalls.push({ url: req.url, body });
+          return Response.json({ patched: true });
+        },
+      }),
     } as unknown as DurableObjectNamespace,
     RELEASE_WAVE_HUB: { idFromName: () => ({}), get: () => ({ fetch: async () => new Response("OK") }) } as unknown as DurableObjectNamespace,
     RELEASE_WAVE_WEBHOOK_SECRET: { get: async () => "test-webhook-secret" } as unknown as SecretsStoreSecret,
@@ -66,7 +76,54 @@ function formBody(pairs: Array<[string, string]>): string {
 }
 
 describe("POST /api/release-close", () => {
-  afterEach(() => { vi.restoreAllMocks(); });
+  afterEach(() => { vi.restoreAllMocks(); hubCalls.length = 0; });
+
+  it("delegates closed issues to the hub for synchronous blob patch (Refs #343)", async () => {
+    stubCloseFlow();
+    const req = new Request("http://localhost/api/release-close", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: formBody([
+        ["repo", "ippoan/claude-skills"],
+        ["tag", "v1.2.0"],
+        ["issue", "68"],
+        ["issue", "70"],
+      ]),
+    });
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(req, testEnv(), ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(303);
+    const applyClose = hubCalls.find((c) => c.url.includes("/releases-index-apply-close"));
+    expect(applyClose).toBeDefined();
+    expect(applyClose!.body).toMatchObject({
+      repo: "ippoan/claude-skills",
+      urls: [
+        "https://github.com/ippoan/claude-skills/issues/68",
+        "https://github.com/ippoan/claude-skills/issues/70",
+      ],
+    });
+  });
+
+  it("does not call the close-patch hub when every issue fails to close", async () => {
+    stubCloseFlow({ failIssue: 68 });
+    const req = new Request("http://localhost/api/release-close", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: formBody([
+        ["repo", "ippoan/claude-skills"],
+        ["tag", "v1.2.0"],
+        ["issue", "68"],
+      ]),
+    });
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(req, testEnv(), ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(303);
+    expect(hubCalls.find((c) => c.url.includes("/releases-index-apply-close"))).toBeUndefined();
+  });
 
   it("closes selected issues and redirects with the closed flash", async () => {
     const { calls } = stubCloseFlow();

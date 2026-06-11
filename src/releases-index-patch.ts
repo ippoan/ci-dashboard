@@ -56,6 +56,47 @@ export async function applyIssueEventToReleasesIndex(
   return true;
 }
 
+/** ダッシュボード起点の close (`handleReleaseClose`) が、確定した closed issue を
+ *  index blob に同期反映する (Refs #343)。issues webhook 直接 patch (#339) は
+ *  per-repo 購読 + GitHub 配信 + fail-open hub fetch の単一非同期チェーンに依存し、
+ *  webhook 未購読 repo では blob が patch されず closed issue が reload で復活する。
+ *  close handler は自分の結果 (closed[]) を握っているので、それを使って同期的に
+ *  blob を直す (webhook patch とは last-write-wins で冪等)。
+ *
+ *  行の特定は `applyIssueEventToReleasesIndex` と同じく url 完全一致。close の
+ *  対象 url は `https://github.com/<owner>/<name>/issues/<n>` で、同一 repo 行
+ *  (url がそれ自身) も cross-repo 行 (Refs #292、`row.repo` が close 対象 repo の
+ *  時その url を持つ) も同じ突合で拾える。
+ *
+ *  state 以外 (title / labels / assignees / updated_at) は GitHub を引き直さず
+ *  行の既存値を保持する — close は state しか変えないため。
+ *  @returns true = 1 行以上 patch して blob を書いた (WS reload して良い)。 */
+export async function applyCloseToReleasesIndex(
+  kv: KVNamespace,
+  closedUrls: string[],
+): Promise<boolean> {
+  if (closedUrls.length === 0) return false;
+  const blob = await readReleasesIndexBlob<RepoView[]>(kv);
+  if (!blob) return false;
+
+  const targets = new Set(closedUrls);
+  let patched = false;
+  for (const view of blob.views) {
+    for (const block of view.tagBlocks) {
+      for (const row of block.issues) {
+        if (!targets.has(row.url)) continue;
+        if (row.state === "closed") continue;
+        row.state = "closed";
+        row.warnings = computeWarnings({ state: "closed", labels: row.labels });
+        patched = true;
+      }
+    }
+  }
+  if (!patched) return false;
+  await writePatchedReleasesIndexBlob(kv, blob);
+  return true;
+}
+
 export type RefsPatchOutcome = "patched" | "noop" | "fallback";
 
 /** merge / default-branch push で参照された issue (`Refs #N`) を tagless repo
