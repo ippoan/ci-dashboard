@@ -266,7 +266,10 @@ interface ProjectMapBlobEntry {
   data: Record<string, ProjectRef[]>;
 }
 
-const PROJECT_MAP_FRESH_SECONDS = 600;
+// Blob 再構築の最短間隔。webhook-primary 化 (Refs #332): projects_v2* event
+// が層別 cache + blob を invalidation する (= 変化は即 stale 化される) ため、
+// 時間ベースの取り直しは安全網 — 1h で足りる。
+const PROJECT_MAP_FRESH_SECONDS = 3600;
 const PROJECT_MAP_STORE_SECONDS = 86400;
 const PROJECT_MAP_REFRESH_LOCK = "issues-page:project-map:refreshing";
 const PROJECT_MAP_REFRESH_LOCK_TTL = 60;

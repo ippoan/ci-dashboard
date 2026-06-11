@@ -27,7 +27,10 @@ export const PR_MAP_CACHE_KEY = "issues-page:pr-map:v2";
 // Webhook patch (applyPullRequestEvent) が PR の open/merge を秒で反映する
 // ようになったので、full refresh は安全網に格下げして 120s → 600s に拡大
 // (= Search ×4 の頻度を 1/5 に。Refs #304 の rate limit 対策本体)。
-const PR_MAP_FRESH_SECONDS = 600;
+// Full 4-search refresh の最短間隔。webhook-primary 化 (Refs #332): chips の
+// リアルタイム反映は applyPullRequestEvent (+ recentPatches #330) が担い、
+// Search は欠落 healing 用の安全網 — 1h で足りる。
+const PR_MAP_FRESH_SECONDS = 3600;
 const PR_MAP_STORE_SECONDS = 86400;
 
 // SWR の background refresh が同一 fresh window 内で重複しないための
