@@ -4,6 +4,12 @@ import worker from "../src/index";
 import type { Env } from "../src/index";
 import type { CIStatus, JobStatus, WebhookQueueMessage } from "../src/webhook";
 import { consumeWebhookBatch } from "../src/webhook";
+import {
+  RELEASES_INDEX_KEY,
+  readReleasesIndexBlob,
+  writeReleasesIndexBlob,
+} from "../src/releases-index-cache";
+import type { RepoView } from "../src/releases-page";
 
 const WEBHOOK_SECRET = "test-secret";
 
@@ -857,6 +863,74 @@ describe("POST /webhook", () => {
     const updates = hubCalls.filter((c) => c.path === "/issues-updated");
     expect(updates).toHaveLength(1);
     expect(updates[0].body).toEqual({ repo: "ippoan/foo", number: 42, state: "closed" });
+  });
+
+  // Refs #346: hub の apply-issue が非 OK を返す (degraded) 時、従来は無音
+  // skip だったが、loud log + stale 化 fallback に倒す。stale 化が走ったことを
+  // blob の storedAt:0 + staleRepos で検証する。
+  it("issues event falls back to staling the index when the hub apply-issue is degraded", async () => {
+    // 既存の fresh blob を仕込む (markReleasesIndexStale は blob 不在なら no-op)。
+    await writeReleasesIndexBlob(env.CI_STATUS, [
+      {
+        repo: "ippoan/foo",
+        tagless: false,
+        tagBlocks: [{
+          tag: "v1", prevTag: null,
+          issues: [{
+            number: 42, title: "x", state: "open", labels: [], assignees: [],
+            url: "https://github.com/ippoan/foo/issues/42",
+            updated_at: "2026-05-27T01:00:00Z", warnings: [],
+          }],
+        }],
+      },
+    ] satisfies RepoView[]);
+    const before = await readReleasesIndexBlob<RepoView[]>(env.CI_STATUS);
+    expect(before!.storedAt).toBeGreaterThan(0);
+
+    // apply-issue だけ 500 を返す degraded hub。他経路は通常どおり。
+    const degradedHub = {
+      fetch: async (req: Request) => {
+        const url = new URL(req.url);
+        if (url.pathname === "/releases-index-apply-issue") {
+          return new Response("boom", { status: 500 });
+        }
+        return new Response("OK");
+      },
+    } as unknown as DurableObjectStub;
+    const degradedEnv: Env = {
+      ...testEnv(),
+      CI_HUB: { idFromName: () => ({}), get: () => degradedHub } as unknown as DurableObjectNamespace,
+    };
+
+    const body = JSON.stringify({
+      action: "closed",
+      issue: {
+        number: 42, title: "x", state: "closed", user: { login: "y" },
+        labels: [], assignees: [], comments: 0,
+        created_at: "2026-05-27T00:00:00Z",
+        updated_at: "2026-05-27T01:00:00Z",
+        html_url: "https://github.com/ippoan/foo/issues/42",
+      },
+      repository: { full_name: "ippoan/foo" },
+    });
+    const sig = await sign(body, WEBHOOK_SECRET);
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(
+      new Request("http://localhost/webhook", {
+        method: "POST",
+        body,
+        headers: { "X-Hub-Signature-256": sig, "X-GitHub-Event": "issues" },
+      }),
+      degradedEnv,
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+    expect(res.status).toBe(200);
+
+    // degraded fallback で blob が stale 化された (= 1h 安全網より早く再集計される)。
+    const after = await readReleasesIndexBlob<RepoView[]>(env.CI_STATUS);
+    expect(after!.storedAt).toBe(0);
+    expect(after!.staleRepos).toContain("ippoan/foo");
   });
 });
 
