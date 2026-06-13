@@ -28,6 +28,46 @@ const LIVE_JS = `(function () {
     };
   }
   connect();
+
+  // copy-to-clipboard wiring。inline JS は CSP で禁止なので、外部 self script
+  // (= この live.js) から data-copy 属性のボタンに click listener を張る。
+  // data-copy="<id>" の指す要素の textContent を clipboard に書き込む。
+  function wireCopy() {
+    var btns = document.querySelectorAll("[data-copy]");
+    for (var i = 0; i < btns.length; i++) {
+      (function (btn) {
+        btn.addEventListener("click", function () {
+          var target = document.getElementById(btn.getAttribute("data-copy"));
+          if (!target) return;
+          var text = target.textContent || "";
+          var label = btn.textContent;
+          function done() {
+            btn.textContent = "\\u2713 copied";
+            setTimeout(function () { btn.textContent = label; }, 1500);
+          }
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(done, done);
+          } else {
+            // 古い環境向け fallback (execCommand)。
+            try {
+              var ta = document.createElement("textarea");
+              ta.value = text;
+              document.body.appendChild(ta);
+              ta.select();
+              document.execCommand("copy");
+              document.body.removeChild(ta);
+              done();
+            } catch (e) {}
+          }
+        });
+      })(btns[i]);
+    }
+  }
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", wireCopy);
+  } else {
+    wireCopy();
+  }
 })();
 `;
 
