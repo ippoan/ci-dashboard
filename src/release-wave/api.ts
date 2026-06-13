@@ -595,9 +595,13 @@ export async function pendingFlipAllCore(
 
   // Pending releases の単一真実 (workers=traffic:: / cloudrun=pending-release::)
   // を導出する (= 画面の表示と同じ source、Refs #237)。
-  const unified = await loadUnifiedPending(env);
+  const all = await loadUnifiedPending(env);
+  // 未 tag version の flip は禁止 (single flip と同じ gate)。tag が無い version は
+  // v* tag リリース (= prod テスト gate) を経ていないため、一括 flip でも対象外に
+  // する。tag 付き (release 由来) のみ flip する。Refs ippoan/ci-dashboard#237。
+  const unified = all.filter((u) => !!u.tag);
   if (unified.length === 0) {
-    // flip 対象が無ければ no-op。
+    // flip 可能 (tag 付き) 対象が無ければ no-op。未 tag のみ残っていても flip しない。
     return { ok: true, flipped: [] };
   }
 
@@ -930,6 +934,17 @@ export async function handleReleaseWaveTrafficRollback(
     });
   }
   const tag = fromHistory?.tag ?? fromVersions?.tag ?? null;
+
+  // 未 tag version の 100% flip は禁止。tag が無い version = v* tag リリース
+  // (= prod テスト gate) を経ていない version で、これを 100% に上げると
+  // 「prod テストなしに本番反映」になる。tag 付き (release 由来) version のみ
+  // flip を許可する。Refs ippoan/ci-dashboard#237。
+  if (!tag) {
+    return jsonResponse(400, {
+      code: "UNTAGGED_VERSION_FORBIDDEN",
+      error: `version ${versionId} (${repo}) は未 tag (release 由来でない) のため 100% flip できません。未 tag version の flip は tag-release / prod テスト gate を迂回するため禁止です。v* tag リリースで上げた version のみ flip 可能です。`,
+    });
+  }
 
   const results = await dispatchAll(env, [
     buildTrafficRollbackDispatch(repo, versionId, tag),

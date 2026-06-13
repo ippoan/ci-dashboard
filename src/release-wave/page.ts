@@ -825,8 +825,11 @@ function renderPendingReleaseSection(
       //    `wrangler versions deploy <id>@100%`。
       //  - pending (cloudrun 等): /pending-release/flip に repo を渡す
       //    (handler が platform で routing、cloudrun は target_tag→pending-<tag>)。
-      const flipForm =
-        r.source === "traffic"
+      // 未 tag version は flip 禁止 (release / prod テスト gate 未通過)。ボタンを
+      // 出さず理由を表示する (API 側も UNTAGGED_VERSION_FORBIDDEN で reject)。
+      const flipForm = !r.tag
+        ? `<span class="meta" title="未 tag version (v* tag リリースを経ていない) は 100% flip 禁止。v* tag を打って release で上げ直してください。">未tag — flip不可</span>`
+        : r.source === "traffic"
           ? `<form method="post" action="/api/release-wave/traffic-rollback" style="margin:0">
               <input type="hidden" name="repo" value="${escapeHtml(r.repo)}">
               <input type="hidden" name="version_id" value="${escapeHtml(r.version_id)}">

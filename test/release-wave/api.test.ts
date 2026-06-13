@@ -838,6 +838,36 @@ describe("handleReleaseWaveTrafficRollback", () => {
     expect(resp.status).toBe(404);
   });
 
+  it("returns 400 (UNTAGGED_VERSION_FORBIDDEN) when the target version has no tag", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    // 未 tag (tag: null) の version を 100% flip しようとすると拒否される。
+    const kv = memKv({
+      "traffic::ippoan/auth-worker": {
+        schema_version: 4,
+        repo: "ippoan/auth-worker",
+        versions: [
+          { version_id: "current-vid", percentage: 100, tag: "v0.2.50" },
+          { version_id: "untagged-vid", percentage: 0, tag: null },
+        ],
+        reported_at: "2026-05-29T09:30:00Z",
+      },
+    });
+    const resp = await handleReleaseWaveTrafficRollback(
+      postRequest("/api/release-wave/traffic-rollback", {
+        formBody: { repo: "ippoan/auth-worker", version_id: "untagged-vid" },
+      }),
+      pendingFlipEnv(kv),
+    );
+    expect(resp.status).toBe(400);
+    const body = (await resp.json()) as { code: string };
+    expect(body.code).toBe("UNTAGGED_VERSION_FORBIDDEN");
+    // dispatch は一切飛ばない (GitHub dispatches 呼び出し 0 件)
+    expect(
+      fetchSpy.mock.calls.some((c) => String(c[0]).includes("/dispatches")),
+    ).toBe(false);
+  });
+
   it("dispatches release-wave-traffic-rollback with previewed_version_id + marker", async () => {
     const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetchSpy);
@@ -981,6 +1011,46 @@ describe("handleReleaseWavePendingReleaseFlipAll", () => {
       String(c[0]).includes("/dispatches"),
     );
     expect(dispatchCall).toBeUndefined();
+  });
+
+  it("skips untagged traffic-source pending (no dispatch, no flip-group)", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    // traffic record の最新 0% version が未 tag → unifiedPending に traffic source
+    // で出るが、tag が無いので flip-all は flip しない (release gate 未通過)。
+    const kv = memKv({
+      "traffic::ippoan/auth-worker": {
+        schema_version: 4,
+        repo: "ippoan/auth-worker",
+        versions: [
+          {
+            version_id: "active-tagged",
+            percentage: 100,
+            tag: "v0.2.37",
+            created_on: "2026-05-27T00:00:00Z",
+          },
+          {
+            version_id: "newer-untagged",
+            percentage: 0,
+            tag: null,
+            created_on: "2026-05-28T00:00:00Z",
+          },
+        ],
+        deploy_history: [
+          { version_id: "active-tagged", tag: "v0.2.37", became_active_at: "2026-05-27T00:00:00Z" },
+        ],
+        reported_at: "2026-05-28T00:00:00Z",
+      },
+    });
+    const resp = await handleReleaseWavePendingReleaseFlipAll(
+      postRequest("/api/release-wave/pending-release/flip-all"),
+      pendingFlipEnv(kv),
+    );
+    expect(resp.status).toBe(303);
+    expect(
+      fetchSpy.mock.calls.some((c) => String(c[0]).includes("/dispatches")),
+    ).toBe(false);
+    expect(await getFlipGroup(kv)).toBeNull();
   });
 
   it("flips all pending releases, clears them, and records a flip-group with the prior active version as rollback target", async () => {
