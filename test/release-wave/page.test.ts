@@ -168,31 +168,6 @@ describe("handleReleaseWaveListPage", () => {
     expect(html).toContain('href="https://abc-auth-worker.example.workers.dev/"');
   });
 
-  it("renders inline pending debug (<details>) with the raw KV record driving the count", async () => {
-    const env = fakeEnv({
-      listReturn: [],
-      compatKv: memKv({
-        "pending-release::ippoan/alc-app": {
-          schema_version: 1,
-          repo: "ippoan/alc-app",
-          version_id: "2538f19d-a4de-4e08-82c4-53cbd0b4d916",
-          tag: "v0.0.7",
-          uploaded_at: "2026-06-09T10:51:00Z",
-        },
-      }),
-    });
-    const html = await (await handleReleaseWaveListPage(env)).text();
-    // 折りたたみ debug が出ていること
-    expect(html).toContain("元データ (KV) を表示");
-    expect(html).toContain("<details");
-    // 件数を生む生 KV データ (computeUnifiedPending の入力) が含まれること
-    expect(html).toContain("computed_pending_count");
-    expect(html).toContain("pending-release:: records");
-    expect(html).toContain("2538f19d-a4de-4e08-82c4-53cbd0b4d916");
-    // 別ページではなく同じ list ページ内 (= ナビゲーション不要)
-    expect(html).toContain("Pending releases (no-traffic)");
-  });
-
   it("escapes HTML special chars in wave_id / repo", async () => {
     const env = fakeEnv({
       listReturn: [makeWave({ wave_id: "evil<script>" })],
@@ -1470,6 +1445,34 @@ describe("handleReleaseWaveListPage global compat overlay", () => {
     );
     // 具体的な flip 対象 (wave_id 付き Approve & Flip ボタン) は無い
     expect(html).not.toContain("Approve &amp; Flip: ");
+  });
+
+  it("renders an inline debug (<details>) + copy button right below the Flip all button", async () => {
+    const env = fakeEnv({
+      listReturn: [makeWave({ wave_id: "w-done", state: "flipped" })],
+      compatKv: memKv(pendingSeed),
+    });
+    const html = await (await handleReleaseWaveListPage(env)).text();
+    // Flip all (1) と、その直下に折りたたみ debug
+    expect(html).toContain("⚡ Flip all to 100% (1)");
+    expect(html).toContain("元データ (KV) を表示");
+    expect(html).toContain("<details");
+    // 件数を生む生 KV データ (computeUnifiedPending の入力)
+    expect(html).toContain("computed_pending_count");
+    expect(html).toContain("530b908c-5385-451c-b163-747caaedafd3");
+    // copy ボタン (live.js が data-copy で wiring する)
+    expect(html).toContain('data-copy="pending-debug-json"');
+    expect(html).toContain("📋 copy");
+    expect(html).toContain('id="pending-debug-json"');
+  });
+
+  it("omits the inline debug when there are no pending releases", async () => {
+    const env = fakeEnv({
+      listReturn: [makeWave({ wave_id: "w-done", state: "flipped" })],
+      compatKv: memKv(compatSeed),
+    });
+    const html = await (await handleReleaseWaveListPage(env)).text();
+    expect(html).not.toContain("元データ (KV) を表示");
   });
 
   it("renders the 一括 flip button alongside per-wave Approve & Flip", async () => {

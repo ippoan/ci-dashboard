@@ -492,18 +492,25 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
     migrationRepos,
   );
 
+  // 「⚡ Flip all to 100% (N)」が なぜ その N なのかを、その場 (Staged previews
+  // の Flip all ボタン直下) で展開できる inline debug を組み立てる。
+  const pendingDebugHtml = renderPendingDebug(
+    unifiedPending,
+    flipGroup,
+    trafficByRepo,
+    pendingReleases,
+  );
   const compatSection = renderGlobalCompatibilitySection(
     globalCompat,
     buildActiveWaveInfo(waves),
     trafficByRepo,
     unifiedPending.length,
     migrationsByRepo,
+    pendingDebugHtml,
   );
   const pendingReleaseSection = renderPendingReleaseSection(
     unifiedPending,
     flipGroup,
-    trafficByRepo,
-    pendingReleases,
   );
 
   // frontend (repo) 単位の追跡セクション。wave 中心の一覧テーブルは廃止し、
@@ -803,8 +810,6 @@ export async function handleReleaseWaveDetailPage(
 function renderPendingReleaseSection(
   records: UnifiedPending[],
   flipGroup: FlipGroupRecord | null,
-  trafficByRepo?: Map<string, TrafficRecord>,
-  pendingReleases?: PendingReleaseRecord[],
 ): string {
   const rows = records
     .map((r) => {
@@ -885,7 +890,6 @@ function renderPendingReleaseSection(
         Refs <a href="https://github.com/ippoan/ci-dashboard/issues/237">#237</a>.`,
       )}</h2>
       ${body}
-      ${renderPendingDebug(records, flipGroup, trafficByRepo, pendingReleases)}
       ${renderFlipGroupRollback(flipGroup)}
     </div>`;
 }
@@ -928,10 +932,17 @@ function renderPendingDebug(
   };
   const json = JSON.stringify(debug, null, 2);
 
+  // copy ボタンは inline JS 不可 (strict CSP) のため、data-copy 属性だけ付けて
+  // live.js (script-src 'self') 側で click listener を張る。data-copy は <pre> の
+  // id を指す。
   return `
     <details style="margin-top:10px">
       <summary class="meta" style="cursor:pointer">🔧 この件数 (${records.length}) の元データ (KV) を表示</summary>
-      <pre style="white-space:pre-wrap;word-break:break-word;font-size:11px;background:#f6f8fa;border:1px solid #d0d7de;border-radius:6px;padding:8px;overflow-x:auto;margin:6px 0 0">${escapeHtml(
+      <div style="margin:6px 0 0">
+        <button type="button" data-copy="pending-debug-json" class="meta"
+          style="cursor:pointer;font-size:11px;padding:2px 8px;border:1px solid #d0d7de;border-radius:6px;background:#fff">📋 copy</button>
+      </div>
+      <pre id="pending-debug-json" style="white-space:pre-wrap;word-break:break-word;font-size:11px;background:#f6f8fa;border:1px solid #d0d7de;border-radius:6px;padding:8px;overflow-x:auto;margin:6px 0 0">${escapeHtml(
         json,
       )}</pre>
     </details>`;
@@ -1031,6 +1042,7 @@ function renderGlobalCompatibilitySection(
   trafficByRepo?: Map<string, TrafficRecord>,
   pendingFlipCount = 0,
   migrationsByRepo?: Map<string, RepoPendingMigrations>,
+  pendingDebugHtml = "",
 ): string {
   if (!compat || compat.backends.length === 0) {
     return `
@@ -1064,7 +1076,7 @@ function renderGlobalCompatibilitySection(
       )}</h2>
       ${body}
       ${renderGlobalRetestButtons(compat)}
-      ${renderActiveWaveOverlay(active, pendingFlipCount)}
+      ${renderActiveWaveOverlay(active, pendingFlipCount, pendingDebugHtml)}
     </div>`;
 }
 
@@ -1127,6 +1139,7 @@ function renderGlobalRetestButtons(compat: WaveCompatibility): string {
 function renderActiveWaveOverlay(
   active?: ActiveWaveInfo,
   pendingFlipCount = 0,
+  debugHtml = "",
 ): string {
   const previewEntries = active ? [...active.preview.entries()] : [];
   const pendingFlips = active ? active.pendingFlips : [];
@@ -1190,7 +1203,11 @@ function renderActiveWaveOverlay(
     </div>`
       : "";
 
-  return previewBlock + flipBlock;
+  // Flip all (N) の「なぜその N か」を、ボタン直下でその場展開する inline debug。
+  // pending (no-traffic) が 1 件以上ある時だけ出す (= ボタンと対応)。
+  const debugBlock = pendingFlipCount > 0 ? debugHtml : "";
+
+  return previewBlock + flipBlock + debugBlock;
 }
 
 /**
