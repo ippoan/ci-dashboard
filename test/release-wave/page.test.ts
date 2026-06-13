@@ -168,6 +168,31 @@ describe("handleReleaseWaveListPage", () => {
     expect(html).toContain('href="https://abc-auth-worker.example.workers.dev/"');
   });
 
+  it("renders inline pending debug (<details>) with the raw KV record driving the count", async () => {
+    const env = fakeEnv({
+      listReturn: [],
+      compatKv: memKv({
+        "pending-release::ippoan/alc-app": {
+          schema_version: 1,
+          repo: "ippoan/alc-app",
+          version_id: "2538f19d-a4de-4e08-82c4-53cbd0b4d916",
+          tag: "v0.0.7",
+          uploaded_at: "2026-06-09T10:51:00Z",
+        },
+      }),
+    });
+    const html = await (await handleReleaseWaveListPage(env)).text();
+    // 折りたたみ debug が出ていること
+    expect(html).toContain("元データ (KV) を表示");
+    expect(html).toContain("<details");
+    // 件数を生む生 KV データ (computeUnifiedPending の入力) が含まれること
+    expect(html).toContain("computed_pending_count");
+    expect(html).toContain("pending-release:: records");
+    expect(html).toContain("2538f19d-a4de-4e08-82c4-53cbd0b4d916");
+    // 別ページではなく同じ list ページ内 (= ナビゲーション不要)
+    expect(html).toContain("Pending releases (no-traffic)");
+  });
+
   it("escapes HTML special chars in wave_id / repo", async () => {
     const env = fakeEnv({
       listReturn: [makeWave({ wave_id: "evil<script>" })],

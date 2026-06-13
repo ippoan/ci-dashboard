@@ -502,6 +502,8 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
   const pendingReleaseSection = renderPendingReleaseSection(
     unifiedPending,
     flipGroup,
+    trafficByRepo,
+    pendingReleases,
   );
 
   // frontend (repo) 単位の追跡セクション。wave 中心の一覧テーブルは廃止し、
@@ -527,8 +529,6 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
       <span class="meta">Cross-repo coordinated release flows. Refs <a href="https://github.com/ippoan/ci-dashboard/issues/137">#137</a>.</span>
       <a class="refresh-btn" href="/release-wave"
         title="ページを再取得して最新状態に更新する (ブラウザキャッシュ無視 = ハードリセット)">🔄 更新（ハードリセット）</a>
-      <a class="meta" href="/release-wave/debug-kv"
-        title="COMPAT_KV の生データ (traffic:: / pending-release:: / flip-group::) を read-only で確認する。Pending/Traffic が実機と合わない時の stale record 調査用">🔧 KV debug</a>
     </div>
     <div class="wave-grid">
       <div class="wave-col">
@@ -803,6 +803,8 @@ export async function handleReleaseWaveDetailPage(
 function renderPendingReleaseSection(
   records: UnifiedPending[],
   flipGroup: FlipGroupRecord | null,
+  trafficByRepo?: Map<string, TrafficRecord>,
+  pendingReleases?: PendingReleaseRecord[],
 ): string {
   const rows = records
     .map((r) => {
@@ -883,8 +885,56 @@ function renderPendingReleaseSection(
         Refs <a href="https://github.com/ippoan/ci-dashboard/issues/237">#237</a>.`,
       )}</h2>
       ${body}
+      ${renderPendingDebug(records, flipGroup, trafficByRepo, pendingReleases)}
       ${renderFlipGroupRollback(flipGroup)}
     </div>`;
+}
+
+/**
+ * Pending releases の件数 (= 「⚡ Flip all to 100% (N)」) が「なぜその N に
+ * なっているか」を、その場で展開できる inline debug (折りたたみ)。strict CSP
+ * (script 無効) でも JS 不要の <details>/<summary> で開閉する。別ページに飛ばず
+ * 同じ「Pending releases」セクション内で、N を生む KV の生データ
+ * (computeUnifiedPending の入力 = traffic:: / pending-release:: / flip-group::)
+ * と算出結果を確認できる。
+ *
+ * 主用途: 「flip 済みなのに Pending に残る」「Traffic % が実機と合わない」系の
+ * stale record 切り分け。例: alc-app の traffic:: record が 0% のままなら、
+ * report-traffic-split が届いていない (= KV が古い) と一目で分かる。
+ */
+function renderPendingDebug(
+  records: UnifiedPending[],
+  flipGroup: FlipGroupRecord | null,
+  trafficByRepo?: Map<string, TrafficRecord>,
+  pendingReleases?: PendingReleaseRecord[],
+): string {
+  // 件数に効く生データだけを絞って出す (全 KV dump はしない)。
+  // - pending に出ている repo の raw traffic:: record (= 0%/100% の実値)
+  // - raw pending-release:: record 一覧
+  // - flip-group:: latest
+  const pendingRepos = new Set(records.map((r) => r.repo));
+  const trafficForPending = trafficByRepo
+    ? [...trafficByRepo.entries()]
+        .filter(([repo]) => pendingRepos.has(repo))
+        .map(([repo, rec]) => ({ repo, record: rec }))
+    : null;
+
+  const debug = {
+    computed_pending_count: records.length,
+    computed_pending: records,
+    "traffic::<repo> (pending に出ている repo のみ)": trafficForPending,
+    "pending-release:: records": pendingReleases ?? null,
+    "flip-group::latest": flipGroup,
+  };
+  const json = JSON.stringify(debug, null, 2);
+
+  return `
+    <details style="margin-top:10px">
+      <summary class="meta" style="cursor:pointer">🔧 この件数 (${records.length}) の元データ (KV) を表示</summary>
+      <pre style="white-space:pre-wrap;word-break:break-word;font-size:11px;background:#f6f8fa;border:1px solid #d0d7de;border-radius:6px;padding:8px;overflow-x:auto;margin:6px 0 0">${escapeHtml(
+        json,
+      )}</pre>
+    </details>`;
 }
 
 /**
