@@ -527,6 +527,8 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
       <span class="meta">Cross-repo coordinated release flows. Refs <a href="https://github.com/ippoan/ci-dashboard/issues/137">#137</a>.</span>
       <a class="refresh-btn" href="/release-wave"
         title="ページを再取得して最新状態に更新する (ブラウザキャッシュ無視 = ハードリセット)">🔄 更新（ハードリセット）</a>
+      <a class="meta" href="/release-wave/debug-kv"
+        title="COMPAT_KV の生データ (traffic:: / pending-release:: / flip-group::) を read-only で確認する。Pending/Traffic が実機と合わない時の stale record 調査用">🔧 KV debug</a>
     </div>
     <div class="wave-grid">
       <div class="wave-col">

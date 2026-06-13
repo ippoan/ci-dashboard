@@ -41,6 +41,7 @@ import {
   handleReleaseWaveDetailPage,
 } from "./release-wave/page";
 import { handleReleaseWaveLiveJs } from "./release-wave/live";
+import { handleReleaseWaveDebugKvPage } from "./release-wave/debug-kv";
 import {
   handleReleaseWaveApprove,
   handleReleaseWaveRollback,
@@ -315,6 +316,11 @@ app.get("/release-wave/ws", (c) => {
   return getReleaseWaveHub(c.env).fetch(new Request(wsUrl, c.req.raw));
 });
 app.get("/release-wave/live.js", () => handleReleaseWaveLiveJs());
+// COMPAT_KV 生データ閲覧 (read-only debug)。`:wave_id` catch-all より前に登録
+// (Hono 登録順マッチ、"debug-kv" が wave_id として捕捉されるのを防ぐ)。
+app.get("/release-wave/debug-kv", (c) =>
+  handleReleaseWaveDebugKvPage(c.env, c.req.raw),
+);
 app.get("/release-wave/:wave_id", (c) =>
   handleReleaseWaveDetailPage(c.env, c.req.param("wave_id")),
 );
