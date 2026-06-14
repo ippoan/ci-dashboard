@@ -51,18 +51,29 @@ describe("needsRelease", () => {
 });
 
 describe("renderFlipGuardSelfTest", () => {
-  it("renders the self-test button with data-flipguard attrs + version-tag clarification", () => {
-    const html = renderFlipGuardSelfTest(
-      "ippoan/nuxt-items",
-      "bc961392-b62f-47e8-88c4-64d53fce1713",
-    );
+  it("renders an active button with data-flipguard attrs when a sample is given", () => {
+    const html = renderFlipGuardSelfTest({
+      repo: "ippoan/nuxt-items",
+      versionId: "bc961392-b62f-47e8-88c4-64d53fce1713",
+    });
     expect(html).toContain("flip ガードを試す");
     expect(html).toContain('data-flipguard-repo="ippoan/nuxt-items"');
     expect(html).toContain('data-flipguard-vid="bc961392-b62f-47e8-88c4-64d53fce1713"');
     expect(html).toContain("flipguard-result");
+    expect(html).not.toContain("disabled");
     // repo の git tag (Repo リリース状況の未tag) とは別概念だと明記している
     expect(html).toContain("release tag 未紐付け CF version");
     expect(html).toContain("Repo リリース状況");
+  });
+
+  it("renders a disabled button (no data-flipguard) when no sample is given", () => {
+    const html = renderFlipGuardSelfTest();
+    // UI は出るがボタンは disabled・押せない
+    expect(html).toContain("flip ガードを試す");
+    expect(html).toContain("disabled");
+    expect(html).toContain("テスト対象なし");
+    // 押下対象が無いので data-flipguard は付けない (live.js が拾わない)
+    expect(html).not.toContain("data-flipguard-repo");
   });
 });
 
