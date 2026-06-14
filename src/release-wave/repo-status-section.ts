@@ -152,14 +152,19 @@ export function renderRepoReleaseStatusSection(
 }
 
 /**
- * 「未 tag version の 100% flip 禁止」ガードのセルフテストボタン。
+ * flip ガード (未 tag version の 100% flip 禁止, #354) のセルフテストボタン。
  *
- * 実在の未 tag version (traffic record の `tag:null` version) に対して実 API
- * (`/api/release-wave/traffic-rollback`) を叩き、**400 UNTAGGED_VERSION_FORBIDDEN**
- * で拒否されること (= prod テスト gate を経ていない version は本番に出せない) を
- * その場で確認する。未 tag version は guard が dispatch 前に弾くので、押しても
- * **実デプロイは起きない**。click 処理は live.js (script-src 'self') が
- * data-flipguard-* 属性を見て wiring する (strict CSP のため inline JS 不可)。
+ * ここでいう「未 tag version」= **CF worker version の traffic record 上で
+ * `tag` フィールドが null の version**（= release tag に紐づかない、no-traffic
+ * upload した中間 version 等）。これは **「Repo リリース状況」の『未tag』
+ * (= repo に git の v* リリースタグが無い) とは別概念**。tag 付き repo (例:
+ * auth-worker = 最新) でも、その CF worker には tag:null version が多数あり得る。
+ *
+ * 実在の tag:null version に対し実 API (`/api/release-wave/traffic-rollback`) を
+ * 叩き、**400 UNTAGGED_VERSION_FORBIDDEN** で拒否されること (= prod テスト gate
+ * を経ていない version は本番に出せない) をその場で確認する。guard が dispatch
+ * 前に弾くため **実デプロイは起きない**。click 処理は live.js (script-src 'self')
+ * が data-flipguard-* 属性を見て wiring する (strict CSP のため inline JS 不可)。
  */
 function renderFlipGuardSelfTest(repo: string, versionId: string): string {
   const shortVid = versionId.length > 8 ? versionId.slice(0, 8) : versionId;
@@ -168,12 +173,15 @@ function renderFlipGuardSelfTest(repo: string, versionId: string): string {
       <button type="button"
         data-flipguard-repo="${escapeHtml(repo)}"
         data-flipguard-vid="${escapeHtml(versionId)}"
-        title="未 tag version (${escapeHtml(repo)} ${escapeHtml(shortVid)}…) を実 API で 100% flip しようとし、400 UNTAGGED_VERSION_FORBIDDEN で拒否されることを確認する。未 tag は guard が dispatch 前に弾くため実デプロイは起きない。"
+        title="release tag に紐づかない CF version (${escapeHtml(repo)} ${escapeHtml(shortVid)}…、traffic 上 tag:null) を実 API で 100% flip しようとし、400 UNTAGGED_VERSION_FORBIDDEN で拒否されることを確認する。guard が dispatch 前に弾くため実デプロイは起きない。"
         style="font-size:12px;padding:3px 10px;border:1px solid #d0d7de;border-radius:6px;background:#fff;cursor:pointer">
-        🔒 未tag flip ガードを試す
+        🔒 flip ガードを試す
       </button>
       <span class="flipguard-result meta" style="margin-left:8px"></span>
-      <div class="meta" style="margin-top:4px;font-size:11px">対象: <code>${escapeHtml(repo)}</code> の未tag version <code>${escapeHtml(shortVid)}…</code> (実デプロイなし・400 で弾かれることを確認)</div>
+      <div class="meta" style="margin-top:4px;font-size:11px">
+        対象 (代表 1 件): <code>${escapeHtml(repo)}</code> の <strong>release tag 未紐付け CF version</strong> <code>${escapeHtml(shortVid)}…</code>。
+        ※ ここの「tag 無し」は <em>CF version の tag 注釈</em>のこと。上表「Repo リリース状況」の <strong>未tag</strong> (= repo の git リリースタグ有無) とは別物で、tag 付き repo でも tag:null version は持ち得る。実デプロイなし・400 で弾かれることを確認するだけ。guard は全 repo 共通。
+      </div>
     </div>`;
 }
 

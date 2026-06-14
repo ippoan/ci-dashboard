@@ -66,7 +66,8 @@ describe("renderRepoReleaseStatusSection", () => {
       [status({ repo: "ippoan/foo", hasTag: true, latestTag: "v1.0.0", behind: 0 })],
       { repo: "ippoan/nuxt-items", versionId: "bc961392-b62f-47e8-88c4-64d53fce1713" },
     );
-    expect(html).toContain("未tag flip ガードを試す");
+    expect(html).toContain("flip ガードを試す");
+    expect(html).toContain("release tag 未紐付け CF version");
     expect(html).toContain('data-flipguard-repo="ippoan/nuxt-items"');
     expect(html).toContain('data-flipguard-vid="bc961392-b62f-47e8-88c4-64d53fce1713"');
     expect(html).toContain("flipguard-result");
