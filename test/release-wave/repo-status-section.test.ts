@@ -8,6 +8,7 @@ import {
   injectCompatTagReleaseButtons,
   renderTrafficVersionsBlock,
   renderBackendRollbackBlock,
+  renderFlipGuardSelfTest,
   handleReleaseWaveListPageWithRepoStatus,
 } from "../../src/release-wave/repo-status-section";
 import type { TrafficRecord } from "../../src/release-wave/traffic";
@@ -49,6 +50,22 @@ describe("needsRelease", () => {
   });
 });
 
+describe("renderFlipGuardSelfTest", () => {
+  it("renders the self-test button with data-flipguard attrs + version-tag clarification", () => {
+    const html = renderFlipGuardSelfTest(
+      "ippoan/nuxt-items",
+      "bc961392-b62f-47e8-88c4-64d53fce1713",
+    );
+    expect(html).toContain("flip ガードを試す");
+    expect(html).toContain('data-flipguard-repo="ippoan/nuxt-items"');
+    expect(html).toContain('data-flipguard-vid="bc961392-b62f-47e8-88c4-64d53fce1713"');
+    expect(html).toContain("flipguard-result");
+    // repo の git tag (Repo リリース状況の未tag) とは別概念だと明記している
+    expect(html).toContain("release tag 未紐付け CF version");
+    expect(html).toContain("Repo リリース状況");
+  });
+});
+
 describe("renderRepoReleaseStatusSection", () => {
   it("shows untagged repo as 未tag with a Tag Release button", () => {
     const html = renderRepoReleaseStatusSection([
@@ -61,23 +78,14 @@ describe("renderRepoReleaseStatusSection", () => {
     expect(html).toContain("未tag 1");
   });
 
-  it("renders the flip-guard self-test button when a sample untagged version is given", () => {
-    const html = renderRepoReleaseStatusSection(
-      [status({ repo: "ippoan/foo", hasTag: true, latestTag: "v1.0.0", behind: 0 })],
-      { repo: "ippoan/nuxt-items", versionId: "bc961392-b62f-47e8-88c4-64d53fce1713" },
-    );
-    expect(html).toContain("flip ガードを試す");
-    expect(html).toContain("release tag 未紐付け CF version");
-    expect(html).toContain('data-flipguard-repo="ippoan/nuxt-items"');
-    expect(html).toContain('data-flipguard-vid="bc961392-b62f-47e8-88c4-64d53fce1713"');
-    expect(html).toContain("flipguard-result");
-  });
-
-  it("omits the self-test button when no untagged sample is given", () => {
+  // flip ガード self-test は version-level の話なので「Repo リリース状況」表には
+  // 出さない (repo-level の『未tag』と紛らわしいため)。
+  it("does not embed the flip-guard self-test in the Repo リリース状況 section", () => {
     const html = renderRepoReleaseStatusSection([
       status({ repo: "ippoan/foo", hasTag: true, latestTag: "v1.0.0", behind: 0 }),
     ]);
     expect(html).not.toContain("data-flipguard-repo");
+    expect(html).not.toContain("flip ガードを試す");
   });
 
   it("shows tagged + up-to-date repo with the tag and no button", () => {
