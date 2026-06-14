@@ -91,7 +91,7 @@ const LIVE_JS = `(function () {
             })
             .then(function (res) {
               if (res.s === 400 && res.j && res.j.code === "UNTAGGED_VERSION_FORBIDDEN") {
-                show(" \\u2705 PASS: 400 UNTAGGED_VERSION_FORBIDDEN (未tag flip は拒否された)");
+                show(" \\u2705 PASS: 400 UNTAGGED_VERSION_FORBIDDEN (release tag 未紐付け version の flip は拒否された)");
               } else {
                 show(" \\u26a0\\ufe0f UNEXPECTED: status=" + res.s + " code=" + (res.j && res.j.code));
               }
