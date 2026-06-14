@@ -64,7 +64,6 @@ const DARKGRAY = "#5f6368";
 /** 監視対象 repo の tag 状況テーブル + サマリを HTML で返す (tagless は除外)。 */
 export function renderRepoReleaseStatusSection(
   statuses: RepoReleaseStatus[],
-  sampleUntagged?: { repo: string; versionId: string },
 ): string {
   // tagless repo はリリース対象ではないので一覧から除外する。
   const visible = statuses.filter((s) => !s.tagless);
@@ -147,7 +146,6 @@ export function renderRepoReleaseStatusSection(
       )}</h2>
       <div style="margin:8px 0">${summary}</div>
       ${tableOrEmpty}
-      ${sampleUntagged ? renderFlipGuardSelfTest(sampleUntagged.repo, sampleUntagged.versionId) : ""}
     </div>`;
 }
 
@@ -166,21 +164,24 @@ export function renderRepoReleaseStatusSection(
  * 前に弾くため **実デプロイは起きない**。click 処理は live.js (script-src 'self')
  * が data-flipguard-* 属性を見て wiring する (strict CSP のため inline JS 不可)。
  */
-function renderFlipGuardSelfTest(repo: string, versionId: string): string {
+export function renderFlipGuardSelfTest(repo: string, versionId: string): string {
   const shortVid = versionId.length > 8 ? versionId.slice(0, 8) : versionId;
   return `
     <div style="margin-top:12px;padding-top:8px;border-top:1px solid #e8eaed">
-      <button type="button"
-        data-flipguard-repo="${escapeHtml(repo)}"
-        data-flipguard-vid="${escapeHtml(versionId)}"
-        title="release tag に紐づかない CF version (${escapeHtml(repo)} ${escapeHtml(shortVid)}…、traffic 上 tag:null) を実 API で 100% flip しようとし、400 UNTAGGED_VERSION_FORBIDDEN で拒否されることを確認する。guard が dispatch 前に弾くため実デプロイは起きない。"
-        style="font-size:12px;padding:3px 10px;border:1px solid #d0d7de;border-radius:6px;background:#fff;cursor:pointer">
-        🔒 flip ガードを試す
-      </button>
-      <span class="flipguard-result meta" style="margin-left:8px"></span>
+      <strong class="meta">flip ガード self-test</strong>
+      <div style="margin-top:6px">
+        <button type="button"
+          data-flipguard-repo="${escapeHtml(repo)}"
+          data-flipguard-vid="${escapeHtml(versionId)}"
+          title="release tag に紐づかない CF version (${escapeHtml(repo)} ${escapeHtml(shortVid)}…、traffic 上 tag:null) を実 API で 100% flip しようとし、400 UNTAGGED_VERSION_FORBIDDEN で拒否されることを確認する。guard が dispatch 前に弾くため実デプロイは起きない。"
+          style="font-size:12px;padding:3px 10px;border:1px solid #d0d7de;border-radius:6px;background:#fff;cursor:pointer">
+          🔒 flip ガードを試す
+        </button>
+        <span class="flipguard-result meta" style="margin-left:8px"></span>
+      </div>
       <div class="meta" style="margin-top:4px;font-size:11px">
-        対象 (代表 1 件): <code>${escapeHtml(repo)}</code> の <strong>release tag 未紐付け CF version</strong> <code>${escapeHtml(shortVid)}…</code>。
-        ※ ここの「tag 無し」は <em>CF version の tag 注釈</em>のこと。上表「Repo リリース状況」の <strong>未tag</strong> (= repo の git リリースタグ有無) とは別物で、tag 付き repo でも tag:null version は持ち得る。実デプロイなし・400 で弾かれることを確認するだけ。guard は全 repo 共通。
+        対象 (代表 1 件): <code>${escapeHtml(repo)}</code> の <strong>release tag 未紐付け CF version</strong> <code>${escapeHtml(shortVid)}…</code>（traffic 上 tag:null）。
+        ※ ここの「tag 無し」は <em>CF version の tag 注釈</em>のこと。「Repo リリース状況」の <strong>未tag</strong>（= repo の git リリースタグ有無）とは別概念で、tag 付き repo でも tag:null version は持ち得る。実デプロイなし・400 で弾かれることを確認するだけ。guard は全 repo 共通。
       </div>
     </div>`;
 }
@@ -734,7 +735,7 @@ export async function handleReleaseWaveListPageWithRepoStatus(
     }
   }
 
-  const section = renderRepoReleaseStatusSection(statuses, sampleUntagged);
+  const section = renderRepoReleaseStatusSection(statuses);
   let html = await res.text();
   html = injectRepoStatusSection(html, section);
 
@@ -760,7 +761,14 @@ export async function handleReleaseWaveListPageWithRepoStatus(
       const buttons = renderCompatTagReleaseButtons(repos, tagless, statusByRepo);
 
       // version traffic split (frontend CI が報告) をグラフ下に出す。
-      const trafficBlock = renderTrafficVersionsBlock(repos, trafficByRepo);
+      // flip ガード self-test は version-level の話なので、ここ (version traffic
+      // split) の直下に置く。「Repo リリース状況」の repo-level『未tag』と混ざって
+      // 紛らわしくならないよう、敢えてこのブロックに同居させる。
+      const trafficBlock =
+        renderTrafficVersionsBlock(repos, trafficByRepo) +
+        (sampleUntagged
+          ? renderFlipGuardSelfTest(sampleUntagged.repo, sampleUntagged.versionId)
+          : "");
 
       // backend (Cloud Run) の実 traffic split + rollback ボタンをグラフ下に出す。
       // 実 traffic (backend-traffic::) があれば GCP 実態を、無ければ current_image
