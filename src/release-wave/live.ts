@@ -63,10 +63,50 @@ const LIVE_JS = `(function () {
       })(btns[i]);
     }
   }
+  // flip-guard self-test: data-flipguard-repo / -vid を持つボタンを押すと、
+  // 実 API (/api/release-wave/traffic-rollback) を **未 tag version** で叩く。
+  // ガードが効いていれば 400 UNTAGGED_VERSION_FORBIDDEN が返る (= dispatch されず
+  // 実デプロイは起きない)。結果を隣の .flipguard-result に inline 表示する。
+  function wireFlipGuard() {
+    var btns = document.querySelectorAll("[data-flipguard-repo]");
+    for (var i = 0; i < btns.length; i++) {
+      (function (btn) {
+        btn.addEventListener("click", function () {
+          var repo = btn.getAttribute("data-flipguard-repo");
+          var vid = btn.getAttribute("data-flipguard-vid");
+          var out = btn.parentNode
+            ? btn.parentNode.querySelector(".flipguard-result")
+            : null;
+          function show(msg) { if (out) out.textContent = msg; }
+          show(" \\u2026 testing");
+          var fd = new FormData();
+          fd.append("repo", repo);
+          fd.append("version_id", vid);
+          fetch("/api/release-wave/traffic-rollback", { method: "POST", body: fd })
+            .then(function (r) {
+              return r.json().then(
+                function (j) { return { s: r.status, j: j }; },
+                function () { return { s: r.status, j: {} }; },
+              );
+            })
+            .then(function (res) {
+              if (res.s === 400 && res.j && res.j.code === "UNTAGGED_VERSION_FORBIDDEN") {
+                show(" \\u2705 PASS: 400 UNTAGGED_VERSION_FORBIDDEN (未tag flip は拒否された)");
+              } else {
+                show(" \\u26a0\\ufe0f UNEXPECTED: status=" + res.s + " code=" + (res.j && res.j.code));
+              }
+            })
+            .catch(function (e) { show(" \\u26a0\\ufe0f error: " + e); });
+        });
+      })(btns[i]);
+    }
+  }
+
+  function wireAll() { wireCopy(); wireFlipGuard(); }
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", wireCopy);
+    document.addEventListener("DOMContentLoaded", wireAll);
   } else {
-    wireCopy();
+    wireAll();
   }
 })();
 `;
