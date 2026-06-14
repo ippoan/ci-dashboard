@@ -64,6 +64,7 @@ const DARKGRAY = "#5f6368";
 /** 監視対象 repo の tag 状況テーブル + サマリを HTML で返す (tagless は除外)。 */
 export function renderRepoReleaseStatusSection(
   statuses: RepoReleaseStatus[],
+  sampleUntagged?: { repo: string; versionId: string },
 ): string {
   // tagless repo はリリース対象ではないので一覧から除外する。
   const visible = statuses.filter((s) => !s.tagless);
@@ -146,6 +147,33 @@ export function renderRepoReleaseStatusSection(
       )}</h2>
       <div style="margin:8px 0">${summary}</div>
       ${tableOrEmpty}
+      ${sampleUntagged ? renderFlipGuardSelfTest(sampleUntagged.repo, sampleUntagged.versionId) : ""}
+    </div>`;
+}
+
+/**
+ * 「未 tag version の 100% flip 禁止」ガードのセルフテストボタン。
+ *
+ * 実在の未 tag version (traffic record の `tag:null` version) に対して実 API
+ * (`/api/release-wave/traffic-rollback`) を叩き、**400 UNTAGGED_VERSION_FORBIDDEN**
+ * で拒否されること (= prod テスト gate を経ていない version は本番に出せない) を
+ * その場で確認する。未 tag version は guard が dispatch 前に弾くので、押しても
+ * **実デプロイは起きない**。click 処理は live.js (script-src 'self') が
+ * data-flipguard-* 属性を見て wiring する (strict CSP のため inline JS 不可)。
+ */
+function renderFlipGuardSelfTest(repo: string, versionId: string): string {
+  const shortVid = versionId.length > 8 ? versionId.slice(0, 8) : versionId;
+  return `
+    <div style="margin-top:12px;padding-top:8px;border-top:1px solid #e8eaed">
+      <button type="button"
+        data-flipguard-repo="${escapeHtml(repo)}"
+        data-flipguard-vid="${escapeHtml(versionId)}"
+        title="未 tag version (${escapeHtml(repo)} ${escapeHtml(shortVid)}…) を実 API で 100% flip しようとし、400 UNTAGGED_VERSION_FORBIDDEN で拒否されることを確認する。未 tag は guard が dispatch 前に弾くため実デプロイは起きない。"
+        style="font-size:12px;padding:3px 10px;border:1px solid #d0d7de;border-radius:6px;background:#fff;cursor:pointer">
+        🔒 未tag flip ガードを試す
+      </button>
+      <span class="flipguard-result meta" style="margin-left:8px"></span>
+      <div class="meta" style="margin-top:4px;font-size:11px">対象: <code>${escapeHtml(repo)}</code> の未tag version <code>${escapeHtml(shortVid)}…</code> (実デプロイなし・400 で弾かれることを確認)</div>
     </div>`;
 }
 
@@ -671,7 +699,34 @@ export async function handleReleaseWaveListPageWithRepoStatus(
     return res;
   }
 
-  const section = renderRepoReleaseStatusSection(statuses);
+  // flip-guard self-test ボタン用に、実在の未 tag version を 1 つ探す。
+  // compat graph の repo の traffic record (`tag:null` version) から拾う。
+  // compat / traffic を後段の block と共有するため、ここで 1 回だけ取得する。
+  let compat: WaveCompatibility | null = null;
+  const compatRepos = new Set<string>();
+  let trafficByRepo = new Map<string, TrafficRecord>();
+  let sampleUntagged: { repo: string; versionId: string } | undefined;
+  if (env.COMPAT_KV) {
+    try {
+      compat = await computeGlobalCompatibility(env.COMPAT_KV);
+      for (const b of compat.backends) {
+        compatRepos.add(b.backend_repo);
+        for (const m of b.matrix) compatRepos.add(m.frontend);
+      }
+      trafficByRepo = await getTrafficForRepos(env.COMPAT_KV, compatRepos);
+      for (const [repo, rec] of trafficByRepo) {
+        const v = (rec.versions ?? []).find((x) => !x.tag);
+        if (v) {
+          sampleUntagged = { repo, versionId: v.version_id };
+          break;
+        }
+      }
+    } catch {
+      // compat 取得失敗 → self-test ボタンは出さない (sampleUntagged 未設定)
+    }
+  }
+
+  const section = renderRepoReleaseStatusSection(statuses, sampleUntagged);
   let html = await res.text();
   html = injectRepoStatusSection(html, section);
 
@@ -686,14 +741,10 @@ export async function handleReleaseWaveListPageWithRepoStatus(
   // ci-dashboard 側) は ippoan/ci-workflows#96① で完了済み。
 
   // Compatibility (all consumers) グラフ内 repo に Tag Release ボタンを足す。
-  if (env.COMPAT_KV) {
+  // compat / compatRepos / trafficByRepo は上の self-test 探索で取得済みを再利用。
+  if (env.COMPAT_KV && compat) {
     try {
-      const compat = await computeGlobalCompatibility(env.COMPAT_KV);
-      const repos = new Set<string>();
-      for (const b of compat.backends) {
-        repos.add(b.backend_repo);
-        for (const m of b.matrix) repos.add(m.frontend);
-      }
+      const repos = compatRepos;
       const tagless = parseTaglessRepos(env.TAGLESS_REPOS);
       // Repo リリース状況で算出済みの status を repo→status で引けるようにし、
       // 「最新」repo のボタンを inactive にする。
@@ -701,7 +752,6 @@ export async function handleReleaseWaveListPageWithRepoStatus(
       const buttons = renderCompatTagReleaseButtons(repos, tagless, statusByRepo);
 
       // version traffic split (frontend CI が報告) をグラフ下に出す。
-      const trafficByRepo = await getTrafficForRepos(env.COMPAT_KV, repos);
       const trafficBlock = renderTrafficVersionsBlock(repos, trafficByRepo);
 
       // backend (Cloud Run) の実 traffic split + rollback ボタンをグラフ下に出す。

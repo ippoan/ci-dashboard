@@ -61,6 +61,24 @@ describe("renderRepoReleaseStatusSection", () => {
     expect(html).toContain("未tag 1");
   });
 
+  it("renders the flip-guard self-test button when a sample untagged version is given", () => {
+    const html = renderRepoReleaseStatusSection(
+      [status({ repo: "ippoan/foo", hasTag: true, latestTag: "v1.0.0", behind: 0 })],
+      { repo: "ippoan/nuxt-items", versionId: "bc961392-b62f-47e8-88c4-64d53fce1713" },
+    );
+    expect(html).toContain("未tag flip ガードを試す");
+    expect(html).toContain('data-flipguard-repo="ippoan/nuxt-items"');
+    expect(html).toContain('data-flipguard-vid="bc961392-b62f-47e8-88c4-64d53fce1713"');
+    expect(html).toContain("flipguard-result");
+  });
+
+  it("omits the self-test button when no untagged sample is given", () => {
+    const html = renderRepoReleaseStatusSection([
+      status({ repo: "ippoan/foo", hasTag: true, latestTag: "v1.0.0", behind: 0 }),
+    ]);
+    expect(html).not.toContain("data-flipguard-repo");
+  });
+
   it("shows tagged + up-to-date repo with the tag and no button", () => {
     const html = renderRepoReleaseStatusSection([
       status({ repo: "ippoan/bar", hasTag: true, latestTag: "v2.1.0", behind: 0 }),
