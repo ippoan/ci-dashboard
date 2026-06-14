@@ -9,6 +9,7 @@ import {
   renderTrafficVersionsBlock,
   renderBackendRollbackBlock,
   renderFlipGuardSelfTest,
+  promotableZeroVersions,
   handleReleaseWaveListPageWithRepoStatus,
 } from "../../src/release-wave/repo-status-section";
 import type { TrafficRecord } from "../../src/release-wave/traffic";
@@ -47,6 +48,42 @@ describe("needsRelease", () => {
   });
   it("errored repo (behind<0) does not", () => {
     expect(needsRelease(status({ behind: -1 }))).toBe(false);
+  });
+});
+
+describe("promotableZeroVersions", () => {
+  const rec = (versions: Array<{ version_id: string; percentage: number; created_on?: string | null; tag?: string | null }>) =>
+    ({ schema_version: 4, repo: "x", versions, reported_at: "" }) as never;
+
+  it("returns only 0% versions newer than the newest active (excludes old history)", () => {
+    const out = promotableZeroVersions(
+      rec([
+        { version_id: "active", percentage: 100, created_on: "2026-05-01T00:00:00Z", tag: "v1" },
+        { version_id: "newer-0", percentage: 0, created_on: "2026-06-01T00:00:00Z", tag: "v2" },
+        { version_id: "older-0", percentage: 0, created_on: "2026-04-01T00:00:00Z", tag: null },
+      ]),
+    );
+    expect(out.map((v: { version_id: string }) => v.version_id)).toEqual(["newer-0"]);
+  });
+
+  it("drops 0% versions with no created_on when an active newest exists", () => {
+    const out = promotableZeroVersions(
+      rec([
+        { version_id: "active", percentage: 100, created_on: "2026-05-01T00:00:00Z" },
+        { version_id: "no-date", percentage: 0, created_on: null, tag: null },
+      ]),
+    );
+    expect(out).toHaveLength(0);
+  });
+
+  it("keeps all 0% when no active version (comparison impossible)", () => {
+    const out = promotableZeroVersions(
+      rec([
+        { version_id: "a", percentage: 0, created_on: "2026-04-01T00:00:00Z" },
+        { version_id: "b", percentage: 0, created_on: null },
+      ]),
+    );
+    expect(out).toHaveLength(2);
   });
 });
 

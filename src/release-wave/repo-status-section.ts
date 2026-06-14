@@ -339,6 +339,31 @@ function shortWhen(iso: string | null | undefined): string {
 }
 
 /**
+ * promote 候補の 0% version (= 現 active より新しい no-traffic version) を返す。
+ * Traffic (version split) 表の 0% 行と、flip self-test の対象選定で**共有する
+ * 単一フィルタ**。これにより self-test は「表に出ている deploy 済み 0% candidate」
+ * だけを対象にし、**active より古い過去履歴 (用済みの version) は掴まない**
+ * (= もし guard が壊れても古い版へ flip しようとしない安全側)。
+ * active が無い / active の日時不明時は比較不能なので全 0% を候補にする。
+ */
+export function promotableZeroVersions(rec: TrafficRecord): TrafficVersion[] {
+  const versions = rec.versions ?? [];
+  const active = versions.filter((v) => v.percentage > 0);
+  const activeNewest = active
+    .map((v) => v.created_on)
+    .filter((c): c is string => !!c)
+    .sort()
+    .at(-1);
+  return versions
+    .filter((v) => v.percentage <= 0)
+    .filter((v) => {
+      if (!activeNewest) return true; // 比較不能 → 残す
+      if (!v.created_on) return false; // 日時不明の古い 0% は落とす
+      return v.created_on > activeNewest; // active より新しいものだけ
+    });
+}
+
+/**
  * Compatibility グラフに出ている repo の version traffic split を HTML で返す。
  * frontend CI が報告した `traffic::<repo>` を読み、repo ごとに:
  *   - traffic を受けている version (100% / canary 等、percentage > 0) は全行表示
@@ -395,21 +420,9 @@ export function renderTrafficVersionsBlock(
     .map((repo) => {
       const rec = trafficByRepo.get(repo)!;
       const active = rec.versions.filter((v) => v.percentage > 0);
-      // active (100%) version の最新 created_on。これより古い 0% は「もう用済みの
-      // 過去履歴」(promote 候補ではない) なので除外する。active に日時が無い /
-      // active が無い場合は比較できないので 0% は全件残す。
-      const activeNewest = active
-        .map((v) => v.created_on)
-        .filter((c): c is string => !!c)
-        .sort()
-        .at(-1);
-      const zero = rec.versions
-        .filter((v) => v.percentage <= 0)
-        .filter((v) => {
-          if (!activeNewest) return true; // 比較不能 → 残す
-          if (!v.created_on) return false; // 日時不明の古い 0% は落とす
-          return v.created_on > activeNewest; // active より新しいものだけ
-        });
+      // promote 候補の 0% (= active より新しい no-traffic)。表と self-test で
+      // 共有する promotableZeroVersions に集約 (active より古い 0% は除外)。
+      const zero = promotableZeroVersions(rec);
       // 表示する version = active 全件 + 最新 0% 1 件。残り 0% 件数は最新 0% 行の
       // % セルに「(他N件)」で併記する (= 別行サマリは作らない)。
       const zeroShown = zero.slice(0, 1);
@@ -733,7 +746,11 @@ export async function handleReleaseWaveListPageWithRepoStatus(
   }
 
   // flip-guard self-test ボタン用に、実在の未 tag version を 1 つ探す。
-  // compat graph の repo の traffic record (`tag:null` version) から拾う。
+  // 対象は **Traffic (version split) 表に出る promote 候補 (= active より新しい
+  // 0% version)** に限る (promotableZeroVersions で表と同一フィルタ)。これにより
+  // 表から除外済みの「active より古い過去履歴」は self-test の対象にしない
+  // (= もし guard が壊れても古い版へ flip しようとしない安全側)。現行 candidate が
+  // 全て tag 付き (= pending release) なら未 tag 対象は無く、self-test は disabled。
   // compat / traffic を後段の block と共有するため、ここで 1 回だけ取得する。
   let compat: WaveCompatibility | null = null;
   const compatRepos = new Set<string>();
@@ -748,7 +765,8 @@ export async function handleReleaseWaveListPageWithRepoStatus(
       }
       trafficByRepo = await getTrafficForRepos(env.COMPAT_KV, compatRepos);
       for (const [repo, rec] of trafficByRepo) {
-        const v = (rec.versions ?? []).find((x) => !x.tag);
+        // 表に出る promote 候補 (active より新しい 0%) の中の未 tag のみ対象。
+        const v = promotableZeroVersions(rec).find((x) => !x.tag);
         if (v) {
           sampleUntagged = { repo, versionId: v.version_id };
           break;
