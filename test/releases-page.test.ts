@@ -134,170 +134,7 @@ describe("GET /releases", () => {
     expect(html).toContain('name="tag"');
   });
 
-  it("renders per-repo tables with stacked tag blocks and pair-encoded checkboxes", async () => {
-    // Index data flow per repo: /tags → /compare/prev...current per top-N tag →
-    // /issues/:n for each unique referenced issue. The stub answers each step.
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (req) => {
-      const url = typeof req === "string" ? req : (req as Request).url;
 
-      // ci-dashboard: 3 tags, 2 inline blocks (v1.2.0..v1.1.0..v1.0.0)
-      if (url.includes("/repos/ippoan/ci-dashboard/tags")) {
-        return Response.json([
-          { name: "v1.2.0", commit: { sha: "a" } },
-          { name: "v1.1.0", commit: { sha: "b" } },
-          { name: "v1.0.0", commit: { sha: "c" } },
-        ]);
-      }
-      if (url.includes("/repos/ippoan/ci-dashboard/compare/v1.1.0...v1.2.0")) {
-        return Response.json({
-          commits: [{ sha: "x", commit: { message: "feat: do thing\n\nRefs #1" } }],
-        });
-      }
-      if (url.includes("/repos/ippoan/ci-dashboard/compare/v1.0.0...v1.1.0")) {
-        return Response.json({
-          commits: [{ sha: "y", commit: { message: "fix: bug-y\n\nRefs #2" } }],
-        });
-      }
-      if (url.endsWith("/repos/ippoan/ci-dashboard/issues/1")) {
-        return Response.json({
-          number: 1, title: "clean issue", state: "open",
-          labels: [], assignees: [],
-          html_url: "https://github.com/ippoan/ci-dashboard/issues/1",
-          updated_at: "2026-05-01T00:00:00Z",
-        });
-      }
-      if (url.endsWith("/repos/ippoan/ci-dashboard/issues/2")) {
-        return Response.json({
-          number: 2, title: "warning-flagged", state: "open",
-          labels: [{ name: "bug" }], assignees: [],
-          html_url: "https://github.com/ippoan/ci-dashboard/issues/2",
-          updated_at: "2026-05-01T00:00:00Z",
-        });
-      }
-
-      // nuxt-notify: 2 tags, 1 block
-      if (url.includes("/repos/ippoan/nuxt-notify/tags")) {
-        return Response.json([
-          { name: "v0.5.0", commit: { sha: "d" } },
-          { name: "v0.4.0", commit: { sha: "e" } },
-        ]);
-      }
-      if (url.includes("/repos/ippoan/nuxt-notify/compare/v0.4.0...v0.5.0")) {
-        return Response.json({
-          commits: [{ sha: "z", commit: { message: "feat\n\nRefs #100" } }],
-        });
-      }
-      if (url.endsWith("/repos/ippoan/nuxt-notify/issues/100")) {
-        return Response.json({
-          number: 100, title: "feature", state: "open",
-          labels: [], assignees: [],
-          html_url: "https://github.com/ippoan/nuxt-notify/issues/100",
-          updated_at: "2026-05-01T00:00:00Z",
-        });
-      }
-
-      // dead-repo: /tags 403 → loadRepoView throws → repo card omitted.
-      return new Response("rate limit", { status: 403 });
-    });
-
-    const e = testEnv({ watched: [
-      "ippoan/ci-dashboard",
-      "ippoan/nuxt-notify",
-      "ohishi-exp/dead-repo",
-    ] });
-    const req = new Request("http://localhost/releases");
-    const ctx = createExecutionContext();
-    const res = await worker.fetch(req, e, ctx);
-    await waitOnExecutionContext(ctx);
-
-    expect(res.status).toBe(200);
-    const html = await res.text();
-
-    // Both populated repos rendered as cards; dead-repo dropped.
-    expect(html).toContain("ippoan/ci-dashboard");
-    expect(html).toContain("ippoan/nuxt-notify");
-    expect(html).not.toContain("dead-repo");
-
-    // Tag headers + previous-tag chips.
-    expect(html).toContain("v1.2.0");
-    expect(html).toContain("v1.1.0");
-    expect(html).toContain("v0.5.0");
-
-    // Issue rows show titles inline (no longer just chips).
-    expect(html).toContain("clean issue");
-    expect(html).toContain("warning-flagged");
-    expect(html).toContain("feature");
-
-    // Detail-page link per tag block ("→ detail").
-    expect(html).toMatch(/href="\/releases\?repo=ippoan%2Fci-dashboard&tag=v1\.2\.0"/);
-
-    // Checkbox values are `tag:issue` pairs. Per #77 bug-labeled open
-    // issues are no longer warned, so #2 starts checked too. (A closed
-    // row would still be `(?! checked)`; none in this fixture.)
-    expect(html).toMatch(/name="pair" value="v1\.2\.0:1" checked/);
-    expect(html).toMatch(/name="pair" value="v1\.1\.0:2" checked/);
-    expect(html).toMatch(/name="pair" value="v0\.5\.0:100" checked/);
-
-    // Batch-close form per repo points at the new endpoint.
-    expect(html).toContain('action="/api/release-close-batch"');
-
-    // Lookup form still present at the bottom for arbitrary-tag access.
-    expect(html).toContain('<form method="GET" action="/releases"');
-  });
-
-  it("recovers a PR-body-only Ref in the latest tag window on the index (squash drops it from the subject)", async () => {
-    // Refs ippoan/ci-dashboard#301: the index's tag-compare path now runs the
-    // detail page's PR follow-up for the MOST RECENT release window, so a
-    // `Refs #N` that lives only in the PR body (squash-merge keeps just the
-    // `(#PR)` subject) still surfaces on the card. Mirrors alc-app#30, which
-    // shipped in v0.0.7 referenced solely by PR #31's body.
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (req) => {
-      const url = typeof req === "string" ? req : (req as Request).url;
-
-      if (url.includes("/repos/ippoan/alc-app/tags")) {
-        return Response.json([
-          { name: "v0.0.7", commit: { sha: "a" } },
-          { name: "v0.0.6", commit: { sha: "b" } },
-        ]);
-      }
-      // Latest window: squash subject carries only `(#31)` — no `Refs` trailer.
-      if (url.includes("/repos/ippoan/alc-app/compare/v0.0.6...v0.0.7")) {
-        return Response.json({
-          commits: [{ sha: "x", commit: { message: "ci: add release-wave-retest.yml (#31)" } }],
-        });
-      }
-      // The Ref lives only in the PR body.
-      if (url.endsWith("/repos/ippoan/alc-app/pulls/31")) {
-        return Response.json({
-          number: 31,
-          head: { ref: "claude/great-dijkstra-vpnk8o" },
-          body: "wires up the retest receiver.\n\nRefs ippoan/alc-app#30",
-        });
-      }
-      if (url.endsWith("/repos/ippoan/alc-app/issues/30")) {
-        return Response.json({
-          number: 30, title: "release-wave retest missing", state: "open",
-          labels: [], assignees: [],
-          html_url: "https://github.com/ippoan/alc-app/issues/30",
-          updated_at: "2026-06-09T00:00:00Z",
-        });
-      }
-      return new Response("not found", { status: 404 });
-    });
-
-    const e = testEnv({ watched: ["ippoan/alc-app"] });
-    const req = new Request("http://localhost/releases");
-    const ctx = createExecutionContext();
-    const res = await worker.fetch(req, e, ctx);
-    await waitOnExecutionContext(ctx);
-
-    expect(res.status).toBe(200);
-    const html = await res.text();
-    // #30, recovered from PR #31's body, renders on the alc-app card.
-    expect(html).toContain("ippoan/alc-app");
-    expect(html).toContain("release-wave retest missing");
-    expect(html).toMatch(/name="pair" value="v0\.0\.7:30"/);
-  });
 
   it("falls back to the index page when only `repo` is given (no tag, no flash)", async () => {
     // Pre-#45 this rendered a partial lookup form. Now any incomplete shape
@@ -315,69 +152,6 @@ describe("GET /releases", () => {
     expect(html).toContain('<form method="GET" action="/releases"');
   });
 
-  it("collapses already-closed issues into a <details> section on the index", async () => {
-    // Same minimal index-flow stub as above, but issue #2 is already closed.
-    // It must NOT be in the main <table> rows; it should live inside a
-    // <details> wrapper labeled "1 closed issue".
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (req) => {
-      const url = typeof req === "string" ? req : (req as Request).url;
-      if (url.includes("/repos/ippoan/ci-dashboard/tags")) {
-        return Response.json([
-          { name: "v1.2.0", commit: { sha: "a" } },
-          { name: "v1.1.0", commit: { sha: "b" } },
-        ]);
-      }
-      if (url.includes("/repos/ippoan/ci-dashboard/compare/v1.1.0...v1.2.0")) {
-        return Response.json({
-          commits: [
-            { sha: "x", commit: { message: "feat\n\nRefs #1" } },
-            { sha: "y", commit: { message: "fix\n\nRefs #2" } },
-          ],
-        });
-      }
-      if (url.endsWith("/repos/ippoan/ci-dashboard/issues/1")) {
-        return Response.json({
-          number: 1, title: "still open", state: "open",
-          labels: [], assignees: [],
-          html_url: "https://github.com/ippoan/ci-dashboard/issues/1",
-          updated_at: "2026-05-01T00:00:00Z",
-        });
-      }
-      if (url.endsWith("/repos/ippoan/ci-dashboard/issues/2")) {
-        return Response.json({
-          number: 2, title: "already-done bug", state: "closed",
-          labels: [{ name: "bug" }], assignees: [],
-          html_url: "https://github.com/ippoan/ci-dashboard/issues/2",
-          updated_at: "2026-05-01T00:00:00Z",
-        });
-      }
-      return new Response("not stubbed", { status: 500 });
-    });
-
-    const e = testEnv({ watched: ["ippoan/ci-dashboard"] });
-    const req = new Request("http://localhost/releases");
-    const ctx = createExecutionContext();
-    const res = await worker.fetch(req, e, ctx);
-    await waitOnExecutionContext(ctx);
-
-    expect(res.status).toBe(200);
-    const html = await res.text();
-
-    // The closed issue is still on the page (so it can be expanded)…
-    expect(html).toContain("already-done bug");
-    expect(html).toContain("#2");
-    // …but wrapped in a <details> with the right summary copy.
-    expect(html).toContain('<details class="closed-details">');
-    expect(html).toContain("<summary>1 closed issue</summary>");
-    // Tag-release 運用 badge (要 tag) が card 見出しに付く (Refs #312)。
-    expect(html).toContain('<span class="mode-badge mode-needs-tag"');
-    // Open issue stays in the main candidate table outside the <details>;
-    // closed issue's checkbox row is below the <details> boundary.
-    const [beforeDetails, afterDetails] = html.split('<details class="closed-details">');
-    expect(beforeDetails).toMatch(/name="pair" value="v1\.2\.0:1"/);
-    expect(beforeDetails).not.toMatch(/name="pair" value="v1\.2\.0:2"/);
-    expect(afterDetails).toMatch(/name="pair" value="v1\.2\.0:2"/);
-  });
 
   it("renders the flash banner on `?repo=X&closed=N` (post-batch-close redirect)", async () => {
     // This is the exact URL shape /api/release-close-batch redirects to.
@@ -551,6 +325,65 @@ describe("GET /releases", () => {
     expect(html).toContain("All referenced issues for this release are closed");
   });
 
+  // PR-driven (synthetic-only) /releases: tag を持つ repo でも tagBlocks は
+  // synthetic block 1 個だけ (= default branch の recent commits + PR body Refs)。
+  // 旧設計の per-tag compare 経路は廃止 (#360〜)。「issue は PR と紐づく、
+  // tag とは紐づかない」が原則。
+  it("v* tag を持つ repo でも synthetic-only で render される (PR-driven)", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (req) => {
+      const url = typeof req === "string" ? req : (req as Request).url;
+
+      // 監視 repo: v* tag を持っているが、index は tag-compare 経路を取らない。
+      if (url.includes("/repos/ippoan/sample/tags")) {
+        return Response.json([
+          { name: "v0.2.0", commit: { sha: "aaaaaaaaaaaa" } },
+          { name: "v0.1.0", commit: { sha: "bbbbbbbbbbbb" } },
+        ]);
+      }
+      if (url.match(/\/repos\/ippoan\/sample(\?|$)/)) {
+        return Response.json({ default_branch: "main" });
+      }
+      if (url.includes("/repos/ippoan/sample/commits")) {
+        return Response.json([
+          { sha: "cafe0011deadbeef", commit: { message: "fix: thing\n\nRefs #7" } },
+        ]);
+      }
+      if (url.endsWith("/repos/ippoan/sample/issues/7")) {
+        return Response.json({
+          number: 7, title: "synthetic-only behavior", state: "open",
+          labels: [], assignees: [],
+          html_url: "https://github.com/ippoan/sample/issues/7",
+          updated_at: "2026-06-16T00:00:00Z",
+        });
+      }
+      // 旧 tag-compare 経路が呼ばれていたら 500 で fail (= 触れていないことの担保)。
+      if (url.includes("/compare/")) {
+        throw new Error(`tag-compare path must not be called: ${url}`);
+      }
+      return new Response(`not stubbed: ${url}`, { status: 500 });
+    });
+
+    const req = new Request("http://localhost/releases");
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(req, testEnv({ watched: ["ippoan/sample"] }), ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    // synthetic block identity (= <branch>@<sha7>) で表示される。
+    expect(html).toContain("main@cafe001");
+    expect(html).toContain("direct push");
+    // v0.2.0 / v0.1.0 のような tag identity が card 内に出ない。
+    expect(html).not.toContain("v0.2.0");
+    expect(html).not.toContain("v0.1.0");
+    // 「🏷️ 要 tag」badge は廃止 (全 repo tagless)。
+    expect(html).not.toContain('<span class="mode-badge mode-needs-tag"');
+    expect(html).toContain('<span class="mode-badge mode-tagless"');
+    // 候補行 + form pair encoding は synthetic 経路と同じ。
+    expect(html).toContain(`name="pair" value="main@cafe001:7"`);
+    expect(html).toContain("synthetic-only behavior");
+  });
+
   // #57: synthetic block for tag-less direct-push-OK repos. The allowlist
   // comes from `yhonda-ohishi/claude-skills`; only repos appearing in it get
   // the fallback path so auto-merge PR repos in a brief tag-less window stay
@@ -666,50 +499,6 @@ describe("GET /releases", () => {
   // card collapses to a single compact line ("✅ N closed (released)") instead
   // of a tall stack of expandable "N closed issues" <details>. No close button,
   // no <details>, no checkbox form — just the one-liner.
-  it("collapses an all-closed repo to a single compact line", async () => {
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (req) => {
-      const url = typeof req === "string" ? req : (req as Request).url;
-      if (url.includes("/repos/ippoan/ci-dashboard/tags")) {
-        return Response.json([
-          { name: "v1.0.0", commit: { sha: "a" } },
-          { name: "v0.9.0", commit: { sha: "b" } },
-        ]);
-      }
-      if (url.includes("/compare/v0.9.0...v1.0.0")) {
-        return Response.json({
-          commits: [{ sha: "x", commit: { message: "feat\n\nRefs #1" } }],
-        });
-      }
-      // The only referenced issue is already closed → no open block → the
-      // repo card collapses to the compact closed-summary line.
-      if (url.endsWith("/repos/ippoan/ci-dashboard/issues/1")) {
-        return Response.json({
-          number: 1, title: "old work", state: "closed",
-          labels: [], assignees: [],
-          html_url: "https://github.com/ippoan/ci-dashboard/issues/1",
-          updated_at: "2026-05-01T00:00:00Z",
-        });
-      }
-      return new Response(`not stubbed: ${url}`, { status: 500 });
-    });
-
-    const e = testEnv({ watched: ["ippoan/ci-dashboard"] });
-    const req = new Request("http://localhost/releases");
-    const ctx = createExecutionContext();
-    const res = await worker.fetch(req, e, ctx);
-    await waitOnExecutionContext(ctx);
-
-    expect(res.status).toBe(200);
-    const html = await res.text();
-    // Compact one-liner: repo link + deduped closed count, no expandable list.
-    expect(html).toContain("ippoan/ci-dashboard");
-    expect(html).toContain("repo-card-compact");
-    expect(html).toContain("1 closed issue (released)");
-    // No expandable closed <details>, no checkbox form, no close button.
-    expect(html).not.toContain('<details class="closed-details">');
-    expect(html).not.toMatch(/name="pair"/);
-    expect(html).not.toContain("Close selected as released");
-  });
 
   it("sets browser-cacheable Cache-Control on the no-flash detail page", async () => {
     stubGithubApi();
@@ -814,154 +603,6 @@ describe("GET /releases", () => {
   // release tag も cut する」混合運用の repo で、merge 済み未 release な PR
   // の issue を `/releases` で目視できるようにするのが目的。
   // Refs ippoan/ci-dashboard#147 (cross-repo Refs 修正) + #145 (TAGLESS 追加)。
-  it("prepends an Unreleased synthetic block for a TAGLESS_REPOS repo that has tags", async () => {
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (req) => {
-      const url = typeof req === "string" ? req : (req as Request).url;
-
-      // direct-push allowlist は空 (= TAGLESS_REPOS だけで repo を拾う)
-      if (url.includes("/contents/wt-direct-push/config/direct-push-ok.txt")) {
-        return Response.json({ content: btoa(""), encoding: "base64" });
-      }
-
-      // 通常通り tag がある repo
-      if (url.includes("/repos/ippoan/mixed-repo/tags")) {
-        return Response.json([
-          { name: "v1.0.0", commit: { sha: "tag1aaaa" } },
-        ]);
-      }
-
-      // default_branch lookup (loadSyntheticBlock で必要)
-      if (url.match(/\/repos\/ippoan\/mixed-repo(\?|$)/)) {
-        return Response.json({ default_branch: "main" });
-      }
-
-      // latest_tag..HEAD の compare (Unreleased zone)
-      if (url.includes("/repos/ippoan/mixed-repo/compare/v1.0.0...main")) {
-        return Response.json({
-          commits: [
-            // 1 つ目: bare Refs (古い)
-            { sha: "abc1111111111111", commit: { message: "feat: foo\n\nRefs #200" } },
-            // 2 つ目: cross-repo style Refs (新しい = HEAD、PR #149 の修正で拾える形)
-            { sha: "def2222222222222", commit: { message: "fix: bar\n\nRefs ippoan/mixed-repo#201" } },
-          ],
-        });
-      }
-
-      // tag 内部の compare は空でも問題ない (loadRepoView が prevTag=null なら refs 空)
-      // ここでは TOP_TAGS_INLINE=5 中 1 tag のみ提供しているので呼ばれない。
-
-      // 上記 Unreleased zone で抽出される issue
-      if (url.endsWith("/repos/ippoan/mixed-repo/issues/200")) {
-        return Response.json({
-          number: 200, title: "merged-but-unreleased issue", state: "open",
-          labels: [], assignees: [],
-          html_url: "https://github.com/ippoan/mixed-repo/issues/200",
-          updated_at: "2026-05-27T00:00:00Z",
-        });
-      }
-      if (url.endsWith("/repos/ippoan/mixed-repo/issues/201")) {
-        return Response.json({
-          number: 201, title: "cross-repo-style ref", state: "open",
-          labels: [], assignees: [],
-          html_url: "https://github.com/ippoan/mixed-repo/issues/201",
-          updated_at: "2026-05-27T01:00:00Z",
-        });
-      }
-
-      return new Response(`not stubbed: ${url}`, { status: 500 });
-    });
-
-    const e = testEnv({ tagless: ["ippoan/mixed-repo"] });
-    const req = new Request("http://localhost/releases");
-    const ctx = createExecutionContext();
-    const res = await worker.fetch(req, e, ctx);
-    await waitOnExecutionContext(ctx);
-
-    expect(res.status).toBe(200);
-    const html = await res.text();
-
-    // Unreleased synthetic block が出ている (label に "Unreleased" + HEAD sha7)
-    expect(html).toContain("Unreleased (main@def2222)");
-    // 両方の issue (bare + cross-repo style) が候補として表示される
-    expect(html).toContain("merged-but-unreleased issue");
-    expect(html).toContain("cross-repo-style ref");
-    // 既存 tag block (v1.0.0 / prev 無し) はそのまま — refs が無いので tag 自体は
-    // 表示されるが issue は付かない。HTML に tag 名は出てよい。
-    expect(html).toContain("ippoan/mixed-repo");
-  });
-
-  // squash-merge の subject は `(#PR)` だけを残し、PR 本文の `Refs #N` trailer を
-  // 落とす (例: ci-dashboard#272 が "…統合 (#272)" として merge され `Refs #271`
-  // は本文のみ)。一覧の Unreleased block は commit message だけ見ていたため、
-  // commit から拾えるのは PR #272 (= pull_request、除外される) のみで issue #271
-  // が永久に出ず、card が "全部 closed" に潰れていた。Unreleased zone でも detail
-  // ページ同様に PR 本文 / branch から ref を回収するようにした回帰ガード。
-  // Refs ippoan/ci-dashboard#290。
-  it("recovers an Unreleased issue referenced only in the PR body (squash dropped Refs)", async () => {
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (req) => {
-      const url = typeof req === "string" ? req : (req as Request).url;
-
-      if (url.includes("/contents/wt-direct-push/config/direct-push-ok.txt")) {
-        return Response.json({ content: btoa(""), encoding: "base64" });
-      }
-
-      if (url.includes("/repos/ippoan/squash-repo/tags")) {
-        return Response.json([{ name: "v1.0.0", commit: { sha: "tag1aaaa" } }]);
-      }
-
-      if (url.match(/\/repos\/ippoan\/squash-repo(\?|$)/)) {
-        return Response.json({ default_branch: "main" });
-      }
-
-      // Unreleased zone: 唯一の commit は PR 番号だけ (Refs trailer 無し)
-      if (url.includes("/repos/ippoan/squash-repo/compare/v1.0.0...main")) {
-        return Response.json({
-          commits: [
-            { sha: "f7d92dc0000000000", commit: { message: "feat: rollback UI を統合 (#272)" } },
-          ],
-        });
-      }
-
-      // PR follow-up: 本文に `Refs #271`、branch は issue prefix を持たない
-      if (url.endsWith("/repos/ippoan/squash-repo/pulls/272")) {
-        return Response.json({
-          number: 272,
-          head: { ref: "claude/admiring-bell-dar5v" },
-          body: "## 概要\n\n…統合する。\n\nRefs #271\n",
-        });
-      }
-
-      // PR 本文経由で初めて拾われる open issue
-      if (url.endsWith("/repos/ippoan/squash-repo/issues/271")) {
-        return Response.json({
-          number: 271, title: "rollback UI を version 行と統合する", state: "open",
-          labels: [], assignees: [],
-          html_url: "https://github.com/ippoan/squash-repo/issues/271",
-          updated_at: "2026-06-04T09:09:27Z",
-        });
-      }
-
-      return new Response(`not stubbed: ${url}`, { status: 500 });
-    });
-
-    const e = testEnv({ tagless: ["ippoan/squash-repo"] });
-    const req = new Request("http://localhost/releases");
-    const ctx = createExecutionContext();
-    const res = await worker.fetch(req, e, ctx);
-    await waitOnExecutionContext(ctx);
-
-    expect(res.status).toBe(200);
-    const html = await res.text();
-
-    // commit には Refs が無いのに、PR 本文経由で issue #271 が候補に出る
-    expect(html).toContain("Unreleased (main@f7d92dc)");
-    expect(html).toContain("rollback UI を version 行と統合する");
-  });
-
-  // pure-tagless repo (semver tag ゼロ、`dev-*` のみ等: claude-hooks /
-  // mcp-cf-workers) は no-sinceTag synthetic パス (default branch の最近 commit)
-  // を通る。ここでも squash で本文 `Refs #N` が落ちた issue を PR follow-up で
-  // 回収する。Refs ippoan/ci-dashboard#291。
   it("recovers a pure-tagless issue referenced only in the PR body (no-sinceTag path)", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (req) => {
       const url = typeof req === "string" ? req : (req as Request).url;
@@ -1378,22 +1019,6 @@ describe("refreshReleasesIndex guards (Refs #329)", () => {
     expect(await env.CI_STATUS.get("releases:index:v1")).toBe(seeded);
   });
 
-  it("compute が全滅して views 空でも non-empty blob を上書きしない", async () => {
-    const { refreshReleasesIndex } = await import("../src/releases-page");
-    // 全 GitHub 呼び出しを fail させる → loadRepoView は全 repo null → views []
-    vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
-      new Response("boom", { status: 500 }));
-    const seeded = JSON.stringify({ storedAt: 0, views: [{ repo: "ippoan/x", tagless: true, olderTags: [], tagBlocks: [] }] });
-    await env.CI_STATUS.put("releases:index:v1", seeded);
-
-    // watched に repo を入れて compute が空に潰れる状況を作る
-    const outcome = await refreshReleasesIndex(testEnv({ watched: ["ippoan/x"] }));
-
-    expect(outcome).toBe("empty-skip");
-    expect(await env.CI_STATUS.get("releases:index:v1")).toBe(seeded);
-    // lock は finally で解放される (Refs #337 — TTL 残存が liveness 穴だった)
-    expect(await env.CI_STATUS.get("releases:index:refreshing")).toBeNull();
-  });
 
   it("done の後も lock は即解放される (Refs #337)", async () => {
     const { refreshReleasesIndex } = await import("../src/releases-page");

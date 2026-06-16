@@ -423,126 +423,32 @@ async function loadRepoView(
     /* archived 判定不能 — 続行 */
   }
 
-  // 1. Recent semver tags. 10 gives us 5 inline + room for the predecessor
-  //    pairing on the oldest of those 5 + a small "older" strip.
-  const allTags = await cachedTags(token, kv, owner, name, 10);
-  // Non-semver tags (e.g. `installer-*` install stamps) are not release tags;
-  // keep them out of topTags so a repo whose only tags are stamps still takes
-  // the synthetic (direct-push) path below instead of the stale tag-compare
-  // path — otherwise its open Refs never surface here. Refs #199.
-  const sorted = sortSemverDesc(allTags.map((t) => t.name).filter(isSemverTag));
-  const topTags = sorted.slice(0, TOP_TAGS_INLINE);
-  if (topTags.length === 0) {
-    // Tag-less repos opted into synthetic-block rendering (either via the
-    // direct-push allowlist or the TAGLESS_REPOS wrangler var) still need a
-    // way to surface their open Refs. Fall back to a synthetic block built
-    // from the default branch's recent commits (#57). Other tag-less repos
-    // return empty as before so we don't accidentally promote a regular
-    // auto-merge repo into the synthetic path mid-release.
-    if (useSynthetic) {
-      const block = await loadSyntheticBlock(env, token, owner, name, kv);
-      return {
-        repo: `${owner}/${name}`,
-        tagBlocks: block ? [block] : [],
-        olderTags: [],
-        tagless: true,
-      };
-    }
-    return { repo: `${owner}/${name}`, tagBlocks: [], olderTags: [], tagless: false };
-  }
-
-  // 2. For each inline tag, compare to its immediate predecessor (next in
-  //    sorted-desc) and harvest issue refs from commit messages.
+  // /releases index は **常に PR-driven (synthetic-only)** に倒す。
   //
-  //    For the MOST RECENT release window (i === 0) we additionally recover
-  //    refs that live only in the PR body / head branch — squash-merge drops
-  //    the `Refs #N` trailer from the commit subject, keeping just `(#PR)`, so
-  //    a commit-message-only scan misses them (e.g. alc-app#30, referenced
-  //    solely in PR #31's body). This reuses the detail page's
-  //    collectIssueNumbersForRange with a MAX_PR_FOLLOWUP cap so the per-repo
-  //    PR fan-out, multiplied across N repos on the index, stays within the
-  //    Worker subrequest budget. Older inline tags (i >= 1) stay on the cheap
-  //    commit-message-only scan — the latest window is the one operators act
-  //    on for close-confirmation. Refs ippoan/ci-dashboard#301.
-  const rawBlocks = await Promise.all(topTags.map(async (tag, i) => {
-    const prevTag = sorted[i + 1] ?? null;
-    if (!prevTag) {
-      return { tag, prevTag: null, refs: [] as number[] };
-    }
-    if (i === 0) {
-      try {
-        const { issueNumbers } = await collectIssueNumbersForRange(
-          token, owner, name, tag, prevTag, kv, MAX_PR_FOLLOWUP,
-        );
-        return { tag, prevTag, refs: [...issueNumbers] };
-      } catch {
-        return { tag, prevTag, refs: [] };
-      }
-    }
-    try {
-      const cmp = await cachedCompare(token, kv, owner, name, prevTag, tag);
-      const refs = new Set<number>();
-      for (const c of cmp.commits) {
-        for (const n of extractRefIssues(c.commit.message, { owner, name })) refs.add(n);
-      }
-      return { tag, prevTag, refs: [...refs] };
-    } catch {
-      return { tag, prevTag, refs: [] };
-    }
-  }));
+  // 旧設計: tag (v*) を持つ repo は per-tag compare で Refs harvest、tag を
+  //         持たない repo だけ synthetic 経路 (default branch の recent commits +
+  //         PR body Refs harvest)。
+  // 問題: 「issue は PR と紐づき、tag とは紐づかない」。tag は release packaging で
+  //       あって issue ↔ commit/PR 関係には無関係。tag-compare 経路は本質を
+  //       表現しておらず、新 tag を切るまで merge 済みの Refs が card に出ない
+  //       (= operator が close 候補を見落とす)。さらに「🏷️ 要 tag」badge は
+  //       roster opt-in 漏れの空 card を生んでいた (#360〜 で個別追加していた)。
+  // 新設計: tag の有無を見ず、全 repo を synthetic block 1 つで表現する。
+  //         tag は detail page (`?repo=X&tag=Y`) からは引けるが、index 上の
+  //         主役ではなくなる (= 古い tag への older strip も廃止)。
+  //         consumer-facing badge は全て tagless (= "🏷️ 要 tag" badge 廃止)。
+  //
+  // `useSynthetic` param は呼出側互換のため signature に残しているが、
+  // 振る舞いは入力に依らず常に synthetic。直接読まないので unused 警告を
+  // 回避するためだけに参照する。
+  void useSynthetic;
 
-  // 3. Deduplicate issue numbers across blocks so the same issue referenced
-  //    by two tags only triggers one GitHub fetch.
-  const uniqueRefs = new Set<number>();
-  for (const b of rawBlocks) for (const n of b.refs) uniqueRefs.add(n);
-
-  const issueByNum = new Map<number, IssueRow | null>();
-  await Promise.all([...uniqueRefs].map(async (n) => {
-    try {
-      const issue = await cachedIssue(token, kv, owner, name, n);
-      if (issue.pull_request) { issueByNum.set(n, null); return; }
-      const labels = issue.labels.map((l) => l.name);
-      issueByNum.set(n, {
-        number: issue.number,
-        title: issue.title,
-        state: issue.state,
-        labels,
-        assignees: issue.assignees.map((a) => a.login),
-        url: issue.html_url,
-        updated_at: issue.updated_at,
-        warnings: computeWarnings({ state: issue.state, labels }),
-      });
-    } catch {
-      issueByNum.set(n, null);
-    }
-  }));
-
-  const tagBlocks: TagBlock[] = rawBlocks.map((b) => ({
-    tag: b.tag,
-    prevTag: b.prevTag,
-    issues: b.refs
-      .map((n) => issueByNum.get(n) ?? null)
-      .filter((i): i is IssueRow => i !== null)
-      .sort((a, c) => a.number - c.number),
-  }));
-
-  // TAGLESS_REPOS に居る repo が tag を持つ場合、latest tag → HEAD で merge
-  // されたが未 release な PR 由来の open issue を「Unreleased」block として
-  // tag blocks の先頭に追加する。ci-dashboard / secrets-inventory のような
-  // 「PR merge = staging deploy だが release tag も cut する」混合運用の repo
-  // で、merge 済み未 release の issue を見落とさないようにするのが目的。
-  // Refs ippoan/ci-dashboard#147 (cross-repo Refs 修正) + #145 (TAGLESS 追加)。
-  if (useSynthetic) {
-    const latestTag = sorted[0]!;
-    const unreleased = await loadSyntheticBlock(env, token, owner, name, kv, latestTag);
-    if (unreleased) tagBlocks.unshift(unreleased);
-  }
-
+  const block = await loadSyntheticBlock(env, token, owner, name, kv);
   return {
     repo: `${owner}/${name}`,
-    tagBlocks,
-    olderTags: sorted.slice(TOP_TAGS_INLINE),
-    tagless: useSynthetic,
+    tagBlocks: block ? [block] : [],
+    olderTags: [],
+    tagless: true,
   };
 }
 
