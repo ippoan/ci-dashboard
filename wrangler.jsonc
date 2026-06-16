@@ -124,7 +124,7 @@
         // cut release tags: dashboard はこれらの PR merge を mini-release 扱いし、
         // merged PR の `Refs #N` を逆引きして /releases synthetic block + banner に
         // 出す (= stable tag 前でも早期 close 可能)。未掲載 repo は tag-driven flow。
-        "TAGLESS_REPOS": "ippoan/secrets-inventory,ippoan/secrets-inventory-gcp,ippoan/ci-dashboard,ippoan/HealthConnectReaderWorker,ippoan/claude-md,ippoan/mcp-relay-rs,ippoan/cc-relay,ippoan/mcp-cf-workers,ippoan/claude-skills,ippoan/ci-workflows,ippoan/ref-files-worker,ippoan/claude-hooks,ippoan/cdp-relay,ippoan/release-wave-gcp,ippoan/ui-preview,ippoan/nuxt-notify,ippoan/nuxt-egov,ippoan/rust-flickr,ippoan/cf-billing-monitor,ippoan/email-receiver,ohishi-exp/rust-ichibanboshi,ohishi-exp/daiun-salary"
+        "TAGLESS_REPOS": "ippoan/secrets-inventory,ippoan/secrets-inventory-gcp,ippoan/ci-dashboard,ippoan/HealthConnectReaderWorker,ippoan/claude-md,ippoan/mcp-relay-rs,ippoan/cc-relay,ippoan/mcp-cf-workers,ippoan/claude-skills,ippoan/ci-workflows,ippoan/ref-files-worker,ippoan/claude-hooks,ippoan/cdp-relay,ippoan/release-wave-gcp,ippoan/ui-preview,ippoan/nuxt-notify,ippoan/nuxt-egov,ippoan/rust-flickr,ippoan/cf-billing-monitor,ippoan/email-receiver,ippoan/security-notification-app,ohishi-exp/rust-ichibanboshi,ohishi-exp/daiun-salary"
       },
       "kv_namespaces": [
         {
