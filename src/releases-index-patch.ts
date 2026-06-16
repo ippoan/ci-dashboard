@@ -32,11 +32,22 @@ export async function applyIssueEventToReleasesIndex(
   payload: IssueWebhookPayload,
 ): Promise<boolean> {
   const blob = await readReleasesIndexBlob<RepoView[]>(kv);
-  if (!blob) return false;
+  if (!blob) {
+    console.log(JSON.stringify({
+      msg: "releases-index-apply-issue",
+      url: payload.issue.html_url,
+      action: payload.action,
+      state: payload.issue.state,
+      blob: "missing",
+      matched: 0,
+      written: false,
+    }));
+    return false;
+  }
 
   const issue = payload.issue;
   const labels = issue.labels.map((l) => l.name);
-  let patched = false;
+  let matched = 0;
   for (const view of blob.views) {
     for (const block of view.tagBlocks) {
       for (const row of block.issues) {
@@ -47,11 +58,20 @@ export async function applyIssueEventToReleasesIndex(
         row.assignees = issue.assignees.map((a) => a.login);
         row.updated_at = issue.updated_at;
         row.warnings = computeWarnings({ state: issue.state, labels });
-        patched = true;
+        matched++;
       }
     }
   }
-  if (!patched) return false;
+  const written = matched > 0;
+  console.log(JSON.stringify({
+    msg: "releases-index-apply-issue",
+    url: issue.html_url,
+    action: payload.action,
+    state: issue.state,
+    matched,
+    written,
+  }));
+  if (!written) return false;
   await writePatchedReleasesIndexBlob(kv, blob);
   return true;
 }
@@ -77,22 +97,49 @@ export async function applyCloseToReleasesIndex(
 ): Promise<boolean> {
   if (closedUrls.length === 0) return false;
   const blob = await readReleasesIndexBlob<RepoView[]>(kv);
-  if (!blob) return false;
+  if (!blob) {
+    console.log(JSON.stringify({
+      msg: "releases-index-apply-close",
+      total: closedUrls.length,
+      matched: 0,
+      alreadyClosed: 0,
+      blob: "missing",
+      written: false,
+    }));
+    return false;
+  }
 
   const targets = new Set(closedUrls);
-  let patched = false;
+  // Track which target URLs were found in blob (matched) vs. already closed
+  // (no-op) vs. not in blob at all (missing). Operator-side diagnostic for
+  // "close した issue が復活する" 系の症状切り分け — どの URL が blob に
+  // 見つからなかったか後追いできる。
+  const matchedUrls = new Set<string>();
+  let alreadyClosed = 0;
+  let written = false;
   for (const view of blob.views) {
     for (const block of view.tagBlocks) {
       for (const row of block.issues) {
         if (!targets.has(row.url)) continue;
-        if (row.state === "closed") continue;
+        matchedUrls.add(row.url);
+        if (row.state === "closed") { alreadyClosed++; continue; }
         row.state = "closed";
         row.warnings = computeWarnings({ state: "closed", labels: row.labels });
-        patched = true;
+        written = true;
       }
     }
   }
-  if (!patched) return false;
+  const missing = closedUrls.filter((u) => !matchedUrls.has(u));
+  console.log(JSON.stringify({
+    msg: "releases-index-apply-close",
+    total: closedUrls.length,
+    matched: matchedUrls.size,
+    alreadyClosed,
+    missing: missing.slice(0, 10),
+    missingCount: missing.length,
+    written,
+  }));
+  if (!written) return false;
   await writePatchedReleasesIndexBlob(kv, blob);
   return true;
 }
@@ -113,21 +160,29 @@ export async function applyRefsPatchToReleasesIndex(
   refs: number[],
   headSha: string | null,
 ): Promise<RefsPatchOutcome> {
+  const logOutcome = (outcome: RefsPatchOutcome, extra: Record<string, unknown> = {}): RefsPatchOutcome => {
+    console.log(JSON.stringify({
+      msg: "releases-index-apply-refs",
+      repo, refs, headSha, outcome, ...extra,
+    }));
+    return outcome;
+  };
+
   const blob = await readReleasesIndexBlob<RepoView[]>(kv);
-  if (!blob) return "fallback";
+  if (!blob) return logOutcome("fallback", { reason: "blob-missing" });
 
   const view = blob.views.find((v) => v.repo === repo);
   // Roster に未登場の repo は全集計でしか発見できない。
-  if (!view) return "fallback";
+  if (!view) return logOutcome("fallback", { reason: "view-missing" });
   // 非 tagless repo の merge は index 内容を変えない (tag が出るまで
   // close 候補にならない)。stale 化もしない。
-  if (!view.tagless) return "noop";
+  if (!view.tagless) return logOutcome("noop", { reason: "not-tagless" });
 
   const block = view.tagBlocks.find((b) => b.synthetic);
   if (!block) {
     // tagless なのに synthetic block が無い形は loadRepoView が作らない
     // はずだが、見つからなければ構造を推測せず全集計に任せる。
-    return refs.length === 0 ? "noop" : "fallback";
+    return logOutcome(refs.length === 0 ? "noop" : "fallback", { reason: "synthetic-block-missing" });
   }
 
   let changed = false;
@@ -139,7 +194,7 @@ export async function applyRefsPatchToReleasesIndex(
     if (!cached) {
       // /issues KV に無い (closed 済 / 未配信)。中途半端に挿入せず全集計へ。
       // ここまでの patch は書かずに捨てる (fallback の全集計が全部やり直す)。
-      return "fallback";
+      return logOutcome("fallback", { reason: "issue-cache-miss", missingRef: n });
     }
     const row: IssueRow = {
       number: cached.number,
@@ -167,7 +222,7 @@ export async function applyRefsPatchToReleasesIndex(
     }
   }
 
-  if (!changed) return "noop";
+  if (!changed) return logOutcome("noop", { reason: "no-change" });
   await writePatchedReleasesIndexBlob(kv, blob);
-  return "patched";
+  return logOutcome("patched", { added: block.issues.length });
 }

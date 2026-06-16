@@ -307,6 +307,7 @@ async function refreshReleasesIndexInner(
     // closed と判定 / blob が open) は patch 漏れケースで refresh の結果が正なので
     // そのまま使う。
     const latest = await readReleasesIndexBlob<RepoView[]>(kv);
+    let preserved = 0;
     if (latest) {
       const closedUrls = new Set<string>();
       for (const v of latest.views) {
@@ -321,12 +322,20 @@ async function refreshReleasesIndexInner(
               if (r.state !== "closed" && closedUrls.has(r.url)) {
                 r.state = "closed";
                 r.warnings = computeWarnings({ state: "closed", labels: r.labels });
+                preserved++;
               }
             }
           }
         }
       }
     }
+    // race fix が実際に火を吹いたか後追いするため、blob 書込み直前で
+    // preserved 件数を必ず 1 行出す (= 0 でも記録、race ヒット率の指標)。
+    console.log(JSON.stringify({
+      msg: "releases-index-refresh-preserved-closed",
+      preserved,
+      latestExists: latest !== null,
+    }));
     await writeReleasesIndexBlob(kv, views);
     // token 取得が成功した = 認証は生きている。失効 banner を自動回復 (Refs #334)。
     await clearGitHubAuthBroken(kv);
