@@ -500,7 +500,11 @@ describe("GET /releases", () => {
   // of a tall stack of expandable "N closed issues" <details>. No close button,
   // no <details>, no checkbox form — just the one-liner.
 
-  it("sets browser-cacheable Cache-Control on the no-flash detail page", async () => {
+  it("全 page を no-store にして close 直後の stale 表示を防ぐ", async () => {
+    // 旧設計の `max-age=15 / swr=60` (index) や `max-age=30 / swr=120` (detail)
+    // は close 直後の `?closed=N` flash が消えた後の reload で旧 open 行を
+    // 表示し続ける害があった。SSR は blob KV read のみで cheap なので
+    // 全 page no-store に統一する (Refs ippoan/ci-dashboard PR #364 以降)。
     stubGithubApi();
     const req = new Request("http://localhost/releases?repo=ippoan/ci-dashboard&tag=v1.2.0");
     const ctx = createExecutionContext();
@@ -508,9 +512,7 @@ describe("GET /releases", () => {
     await waitOnExecutionContext(ctx);
 
     expect(res.status).toBe(200);
-    // Detail page: longer TTL since a single repo+tag changes less often.
-    expect(res.headers.get("Cache-Control")).toMatch(/max-age=30/);
-    expect(res.headers.get("Cache-Control")).toMatch(/stale-while-revalidate/);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
   });
 
   it("disables browser caching when flash params are present", async () => {

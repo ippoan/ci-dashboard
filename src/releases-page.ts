@@ -103,17 +103,14 @@ export async function handleReleasesPage(
 }
 
 // Cache-Control policy:
-//   - Flash redirects: `no-store` so the banner doesn't get pinned in the
-//     browser's bfcache or revisited cache after a back-button click.
-//   - Detail page (single repo+tag): max-age 30, swr 120. Already-cached KV
-//     hits are usually <50ms but the HTML still costs CPU.
-//   - Index page: max-age 15, swr 60. Multi-repo fan-out means even cached
-//     paths are bigger; keep freshness tight so a new tag shows up quickly.
-function cacheControlFor(hasFlash: boolean, detail: boolean): string {
-  if (hasFlash) return "private, no-store";
-  return detail
-    ? "private, max-age=30, stale-while-revalidate=120"
-    : "private, max-age=15, stale-while-revalidate=60";
+//   - 全 page を `no-store` に倒す。SSR は blob KV read だけで cheap (<50ms)、
+//     対して browser cache (旧 max-age=15 / swr=60) は close 直後の
+//     `?closed=N` flash が消えた後の reload で **stale な open 行を表示し続ける**
+//     害悪のほうが大きい (close 反応無し問題、Refs ippoan/ci-dashboard PR #364)。
+//   - 旧設計の swr は revalidate 中も古い HTML を返すため、apply-close で blob を
+//     即 patch しても browser 側で見えるのは古い view という非対称が常時発生していた。
+function cacheControlFor(_hasFlash: boolean, _detail: boolean): string {
+  return "private, no-store";
 }
 
 // --------------------------------------------------------------------------
