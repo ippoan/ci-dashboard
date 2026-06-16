@@ -291,6 +291,42 @@ async function refreshReleasesIndexInner(
     if (views.length === 0 && recheck && (recheck.views?.length ?? 0) > 0) {
       return "empty-skip";
     }
+    // Close 復活レース対策 (Refs #343 後継)。`refresh` は ~16-35s かかり、
+    // その間に close handler (`/releases-index-apply-close`) や issues webhook
+    // (`/releases-index-apply-issue`) が blob を closed に patch しても、
+    // refresh の computeIndexViews は **fetch 開始時点の cachedIssue (TTL 60s)**
+    // から views を組むため #N=open のまま固まり、ここで write すると patch が
+    // 上書きされて closed issue が reload で「復活」する。close 経路 (#343) と
+    // webhook 経路 (#339) は KV lock 圏外 (DO の serializeReleasesPatch のみ)
+    // なので refresh とは元から無関係に race する設計。
+    //
+    // 修正: write 直前に最新 blob を読み直し、「最新 blob で closed の行」を
+    // 新 views でも強制 closed に保つ。GitHub 上で closed の事実は blob patch が
+    // 既に確定させているので、computeIndexViews の stale open を上書きするのは
+    // 一方向 (closed → open には戻さない) なら安全。逆方向 (refresh fresh fetch が
+    // closed と判定 / blob が open) は patch 漏れケースで refresh の結果が正なので
+    // そのまま使う。
+    const latest = await readReleasesIndexBlob<RepoView[]>(kv);
+    if (latest) {
+      const closedUrls = new Set<string>();
+      for (const v of latest.views) {
+        for (const b of v.tagBlocks) {
+          for (const r of b.issues) if (r.state === "closed") closedUrls.add(r.url);
+        }
+      }
+      if (closedUrls.size > 0) {
+        for (const v of views) {
+          for (const b of v.tagBlocks) {
+            for (const r of b.issues) {
+              if (r.state !== "closed" && closedUrls.has(r.url)) {
+                r.state = "closed";
+                r.warnings = computeWarnings({ state: "closed", labels: r.labels });
+              }
+            }
+          }
+        }
+      }
+    }
     await writeReleasesIndexBlob(kv, views);
     // token 取得が成功した = 認証は生きている。失効 banner を自動回復 (Refs #334)。
     await clearGitHubAuthBroken(kv);
