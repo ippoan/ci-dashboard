@@ -1008,15 +1008,53 @@ function renderRow(r: IssueRow): string {
 // が再表示されず、確認のための再読込が「また close された」ように見えない。
 // `repo` は tag 同伴 (detail page) の時だけ残す — tag 無しの repo= は index に
 // fall through する flash 添付用 param なので一緒に消す。
+// close 後の UX: flash banner を `position: fixed` の toast として浮かべるため
+// inline には DOM を増やさず、scroll 位置・周辺 card layout を一切ずらさない
+// (Refs #411)。close form の submit 直前に scrollY を sessionStorage に保存し、
+// landing 時に `?closed=` フラッシュ params があれば即復元する。toast 自身は
+// 数秒で fade out (auto-cleanup)。
 const FLASH_CLEANUP_SCRIPT = `<script>
 (() => {
   try {
     const u = new URL(location.href);
+    const hadFlash = ["closed", "failed", "failed_reasons"].some((k) => u.searchParams.has(k));
     for (const k of ["closed", "failed", "failed_reasons"]) u.searchParams.delete(k);
     if (!u.searchParams.get("tag")) u.searchParams.delete("repo");
     const qs = u.searchParams.toString();
     history.replaceState(null, "", u.pathname + (qs ? "?" + qs : ""));
+    // close 直前に保存した scroll 位置を即復元 (= form POST→GET redirect の
+    // top jump を相殺、card は元の viewport 位置に戻る)。
+    if (hadFlash) {
+      const raw = sessionStorage.getItem("releases-scroll");
+      if (raw !== null) {
+        const y = parseInt(raw, 10);
+        if (Number.isFinite(y)) {
+          // history.scrollRestoration が auto だと browser が上書きする可能性
+          // があるので manual に倒した上で scroll する。
+          if ("scrollRestoration" in history) history.scrollRestoration = "manual";
+          window.scrollTo(0, y);
+        }
+        sessionStorage.removeItem("releases-scroll");
+      }
+    }
   } catch { /* URL/History API 非対応環境では従来挙動のまま */ }
+})();
+</script>`;
+
+// close 操作の前に scrollY を sessionStorage に保存する (Refs #411)。
+// 全 batch-close-form (per-repo の close 確定ボタン) に submit listener を
+// 1 回だけ載せる。capture phase で記録するので redirect で page が捨てられる前
+// に確実に取れる。
+const RELEASES_SCROLL_SAVE_SCRIPT = `<script>
+(() => {
+  try {
+    document.addEventListener("submit", (e) => {
+      const t = e.target;
+      if (t && t.classList && t.classList.contains("batch-close-form")) {
+        sessionStorage.setItem("releases-scroll", String(window.scrollY));
+      }
+    }, true);
+  } catch { /* ignore */ }
 })();
 </script>`;
 
@@ -1032,6 +1070,8 @@ function renderFlash(
   const issueLink = (n: number): string => repo
     ? `<a href="https://github.com/${escapeHtml(repo)}/issues/${n}" target="_blank" rel="noopener">#${n}</a>`
     : `#${n}`;
+  // flash は `position: fixed` の toast container にまとめ inline DOM 高を 0 に
+  // する (Refs #411 — close 後 card の表示位置を 1px もずらさない)。
   const closedList = closed.length > 0
     ? `<div class="flash ok">✅ Closed: ${closed.map(issueLink).join(" ")}</div>`
     : "";
@@ -1054,7 +1094,7 @@ function renderFlash(
       failedList = `<div class="flash err">❌ Failed to close: ${failed.map(issueLink).join(" ")} (try again)</div>`;
     }
   }
-  return closedList + failedList + FLASH_CLEANUP_SCRIPT;
+  return `<div class="flash-toast">${closedList}${failedList}</div>` + FLASH_CLEANUP_SCRIPT;
 }
 
 function renderIndex(
@@ -1113,6 +1153,7 @@ ${body}
 ${renderLookupForm(null, null)}
 ${PWA_REGISTER_SCRIPT}
 ${RELEASES_LIVE_RELOAD_SCRIPT}
+${RELEASES_SCROLL_SAVE_SCRIPT}
 </body></html>`;
 }
 
@@ -1409,6 +1450,31 @@ const STYLES = `
   .flash.ok  { background: #1f3d28; border: 1px solid #238636; color: #a3e3b0; }
   .flash.err { background: #341a1f; border: 1px solid #f85149; color: #ffa198; }
   .flash a { color: inherit; text-decoration: underline; }
+
+  /* close 結果の flash banner は viewport 右上に fixed で浮かべ、inline DOM を
+     1 行も増やさない (Refs #411)。card layout も scroll 位置もずらさず、操作
+     直後の確認だけ可視化して数秒で fade。 */
+  .flash-toast {
+    position: fixed;
+    top: 16px; right: 16px;
+    z-index: 1000;
+    max-width: min(420px, calc(100vw - 32px));
+    pointer-events: none;
+    display: flex; flex-direction: column; gap: 8px;
+    animation: flash-toast-fade 6s ease forwards;
+  }
+  .flash-toast:empty { display: none; }
+  .flash-toast .flash {
+    margin-bottom: 0;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
+    pointer-events: auto;
+  }
+  @keyframes flash-toast-fade {
+    0%   { opacity: 0; transform: translateY(-6px); }
+    8%   { opacity: 1; transform: translateY(0); }
+    85%  { opacity: 1; }
+    100% { opacity: 0; transform: translateY(-6px); visibility: hidden; }
+  }
 
   /* Recent releases landing page — repo card with stacked tag blocks */
   .repo-card {
