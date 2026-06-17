@@ -201,15 +201,12 @@ app.get("/projects", (c) => handleProjectsPage(c.env));
 // secret put / GitHub Actions secrets.
 app.get("/secret-gen", () => handleSecretGenPage());
 app.get("/cap-catalog", (c) => handleCapCatalogPage(c.env, c.executionCtx));
-<<<<<<< HEAD
 // お気に入り server-side 永続 (CF Access email で per-user)。未認証は 401 で
 // client は localStorage fallback。Refs ippoan/cap-catalog#1。
 app.get("/api/cap-catalog/favorites", (c) => handleFavoritesGet(c.req.raw, c.env));
 app.put("/api/cap-catalog/favorites", (c) => handleFavoritesPut(c.req.raw, c.env));
-=======
 // Reusable workflow 採用状況の 1 ページマトリクス。Refs #377。
 app.get("/ci-matrix", (c) => handleCiMatrixPage(c.req.raw));
->>>>>>> 5b7aba5 (feat(ci-matrix): 6h scanner + `/ci-matrix` SSR ページで reusable 採用状況を可視化)
 
 // Launch redirect for the open-multirepo skill. Stateless: reconstructs the
 // long claude.ai/code URL from a compact `?i=<issue>` query and 302s to it, so
