@@ -230,6 +230,15 @@ app.post("/api/release-close",
 app.post("/api/release-close-batch",
   (c) => handleReleaseCloseBatch(c.req.raw, c.env, getHub(c.env), c.executionCtx));
 
+// /releases blob ダンプ (Refs #407, bug 1 診断用 — 確定後 revert する一時 endpoint)。
+// CF Access (zone-level) で gate。返却は CI_STATUS KV の `releases:index:v3` 生値。
+app.get("/admin/dump-releases-blob", async (c) => {
+  const blob = await c.env.CI_STATUS.get("releases:index:v3", "json");
+  return Response.json(blob ?? null, {
+    headers: { "cache-control": "no-store" },
+  });
+});
+
 // WebSocket
 app.get("/ws", (c) => getHub(c.env).fetch(c.req.raw));
 
