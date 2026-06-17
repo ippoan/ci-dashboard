@@ -407,7 +407,20 @@ const CLIENT_SCRIPT = `
             ) + '</span>'
           : '';
         const sig = s.signature ? '<div class="sig">' + escape(s.signature) + '</div>' : '';
-        const doc = s.doc ? '<div class="doc">' + escape(s.doc.split('\\n')[0]) + '</div>' : '';
+        // 検索 query が doc に match している時は、その match を含む行を
+        // 1 行目の代わりに表示する (= なぜ hit したか視覚的に分かる)。
+        // query 無し or 1 行目に match があれば従来通り 1 行目を出す。
+        let docLineRaw = '';
+        if (s.doc) {
+          const lines = s.doc.split('\\n');
+          if (needle && !lines[0].toLowerCase().includes(needle)) {
+            const hit = lines.find(function(l){ return l.toLowerCase().includes(needle); });
+            docLineRaw = hit || lines[0];
+          } else {
+            docLineRaw = lines[0];
+          }
+        }
+        const doc = docLineRaw ? '<div class="doc">' + escape(docLineRaw) + '</div>' : '';
         const feats = s.features && s.features.length
           ? '<div class="features">' + s.features.map(function(f){ return '<span class="feat">' + escape(f) + '</span>'; }).join('') + '</div>'
           : '';
@@ -446,7 +459,13 @@ const CLIENT_SCRIPT = `
 
 export async function handleCapCatalogPage(env: Env, _ctx?: ExecutionContext): Promise<Response> {
   const source = await fetchCatalogSource(env);
-  const dataJson = source.symbols.map((s) => JSON.stringify(s)).join(",\n");
+  // `<` を `<` に escape して `<script>` 内の JSON literal を
+  // HTML tokenizer から完全に隠す。Rust doc-comment 等に `</script>` /
+  // `<!--` が混入していても tag break-out 不可能になる。`<` は valid な
+  // JSON escape なので client-side `JSON.parse` で `<` に正しく戻る。
+  const dataJson = source.symbols
+    .map((s) => JSON.stringify(s).replace(/</g, "\\u003c"))
+    .join(",\n");
   const banner = renderBanner(source);
 
   const html = `<!DOCTYPE html>
