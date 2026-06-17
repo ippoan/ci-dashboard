@@ -116,7 +116,7 @@ describe("GET /releases", () => {
     await clearReleaseCache(env.CI_STATUS);
     await env.CI_STATUS.delete("direct-push-allowlist:v1");
     // /releases index の SWR blob (Refs #325) もテスト間で leak しないよう flush。
-    await env.CI_STATUS.delete("releases:index:v1");
+    await env.CI_STATUS.delete("releases:index:v2");
     await env.CI_STATUS.delete("releases:index:refreshing");
     await env.CI_STATUS.delete(PR_MAP_CACHE_KEY);
   });
@@ -894,14 +894,14 @@ describe("GET /releases — index SWR blob (Refs #325)", () => {
     vi.restoreAllMocks();
     await clearReleaseCache(env.CI_STATUS);
     await env.CI_STATUS.delete("direct-push-allowlist:v1");
-    await env.CI_STATUS.delete("releases:index:v1");
+    await env.CI_STATUS.delete("releases:index:v2");
     await env.CI_STATUS.delete("releases:index:refreshing");
     await env.CI_STATUS.delete(PR_MAP_CACHE_KEY);
   });
 
   function seedIndexBlob(storedAt: number, views: unknown[]): Promise<void> {
     return env.CI_STATUS.put(
-      "releases:index:v1",
+      "releases:index:v2",
       JSON.stringify({ storedAt, views }),
     );
   }
@@ -958,7 +958,7 @@ describe("GET /releases — index SWR blob (Refs #325)", () => {
 
     // waitUntil の背景 refresh が blob を書き直す (空 → 空なので invariant 非該当)
     await waitOnExecutionContext(ctx);
-    const blob = await env.CI_STATUS.get("releases:index:v1", "json") as
+    const blob = await env.CI_STATUS.get("releases:index:v2", "json") as
       { storedAt: number; views: unknown[] };
     expect(blob.storedAt).toBeGreaterThan(oldStoredAt);
   });
@@ -1006,7 +1006,7 @@ describe("GET /releases — index SWR blob (Refs #325)", () => {
     await waitOnExecutionContext(ctx);
 
     expect(res.status).toBe(200);
-    expect(await env.CI_STATUS.get("releases:index:v1")).not.toBeNull();
+    expect(await env.CI_STATUS.get("releases:index:v2")).not.toBeNull();
   });
 });
 
@@ -1016,7 +1016,7 @@ describe("GET /releases — 更新中バッジ + live reload (Refs #327)", () =>
     vi.restoreAllMocks();
     await clearReleaseCache(env.CI_STATUS);
     await env.CI_STATUS.delete("direct-push-allowlist:v1");
-    await env.CI_STATUS.delete("releases:index:v1");
+    await env.CI_STATUS.delete("releases:index:v2");
     await env.CI_STATUS.delete("releases:index:refreshing");
     await env.CI_STATUS.delete(PR_MAP_CACHE_KEY);
   });
@@ -1037,7 +1037,7 @@ describe("GET /releases — 更新中バッジ + live reload (Refs #327)", () =>
   it("staleRepos の repo card に 🔄 更新中バッジ + note に repo 列挙", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
       new Response("not stubbed", { status: 500 }));
-    await env.CI_STATUS.put("releases:index:v1", JSON.stringify({
+    await env.CI_STATUS.put("releases:index:v2", JSON.stringify({
       storedAt: 0,
       views: [view("ippoan/foo"), view("ippoan/bar")],
       staleRepos: ["ippoan/foo"],
@@ -1059,7 +1059,7 @@ describe("GET /releases — 更新中バッジ + live reload (Refs #327)", () =>
   });
 
   it("live reload script (releases-updated listener) を埋め込む", async () => {
-    await env.CI_STATUS.put("releases:index:v1", JSON.stringify({
+    await env.CI_STATUS.put("releases:index:v2", JSON.stringify({
       storedAt: Date.now(), views: [],
     }));
     const ctx = createExecutionContext();
@@ -1077,7 +1077,7 @@ describe("refreshReleasesIndex guards (Refs #329)", () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     await clearReleaseCache(env.CI_STATUS);
-    await env.CI_STATUS.delete("releases:index:v1");
+    await env.CI_STATUS.delete("releases:index:v2");
     await env.CI_STATUS.delete("releases:index:refreshing");
     await env.CI_STATUS.delete("github:rl-backoff");
   });
@@ -1088,7 +1088,7 @@ describe("refreshReleasesIndex guards (Refs #329)", () => {
     const { refreshReleasesIndex } = await import("../src/releases-page");
     await setRateLimitBackoff(env.CI_STATUS, new GitHubApiError(403, "rate limit"));
     const seeded = JSON.stringify({ storedAt: 0, views: [{ repo: "ippoan/x", tagless: true, olderTags: [], tagBlocks: [] }], staleRepos: ["ippoan/x"] });
-    await env.CI_STATUS.put("releases:index:v1", seeded);
+    await env.CI_STATUS.put("releases:index:v2", seeded);
     const fetchSpy = vi.spyOn(globalThis, "fetch");
 
     const outcome = await refreshReleasesIndex(testEnv());
@@ -1096,7 +1096,7 @@ describe("refreshReleasesIndex guards (Refs #329)", () => {
     expect(outcome).toBe("backoff");
     expect(fetchSpy).not.toHaveBeenCalled();
     // blob は stale のまま温存 (cooldown 明けの reschedule で追い付く)
-    expect(await env.CI_STATUS.get("releases:index:v1")).toBe(seeded);
+    expect(await env.CI_STATUS.get("releases:index:v2")).toBe(seeded);
   });
 
 
@@ -1105,7 +1105,7 @@ describe("refreshReleasesIndex guards (Refs #329)", () => {
     // watched 空 → views [] / recheck 無し → 正常 write の "done" 経路
     const outcome = await refreshReleasesIndex(testEnv());
     expect(outcome).toBe("done");
-    expect(await env.CI_STATUS.get("releases:index:v1")).not.toBeNull();
+    expect(await env.CI_STATUS.get("releases:index:v2")).not.toBeNull();
     expect(await env.CI_STATUS.get("releases:index:refreshing")).toBeNull();
   });
 
@@ -1113,14 +1113,14 @@ describe("refreshReleasesIndex guards (Refs #329)", () => {
     const { refreshReleasesIndex } = await import("../src/releases-page");
     await env.CI_STATUS.put("releases:index:refreshing", "1", { expirationTtl: 60 });
     const seeded = JSON.stringify({ storedAt: 0, views: [] });
-    await env.CI_STATUS.put("releases:index:v1", seeded);
+    await env.CI_STATUS.put("releases:index:v2", seeded);
     const fetchSpy = vi.spyOn(globalThis, "fetch");
 
     const outcome = await refreshReleasesIndex(testEnv());
 
     expect(outcome).toBe("lock");
     expect(fetchSpy).not.toHaveBeenCalled();
-    expect(await env.CI_STATUS.get("releases:index:v1")).toBe(seeded);
+    expect(await env.CI_STATUS.get("releases:index:v2")).toBe(seeded);
   });
 });
 
@@ -1129,13 +1129,13 @@ describe("GET /releases — auth-broken note (Refs #334)", () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     await clearReleaseCache(env.CI_STATUS);
-    await env.CI_STATUS.delete("releases:index:v1");
+    await env.CI_STATUS.delete("releases:index:v2");
     await env.CI_STATUS.delete("releases:index:refreshing");
     await env.CI_STATUS.delete("github:auth-broken");
   });
 
   it("marker があれば再ログイン note を出す", async () => {
-    await env.CI_STATUS.put("releases:index:v1", JSON.stringify({ storedAt: Date.now(), views: [] }));
+    await env.CI_STATUS.put("releases:index:v2", JSON.stringify({ storedAt: Date.now(), views: [] }));
     await env.CI_STATUS.put("github:auth-broken", JSON.stringify({ at: Date.now(), message: "invalid_grant" }));
     const ctx = createExecutionContext();
     const res = await worker.fetch(new Request("http://localhost/releases"), testEnv(), ctx);
