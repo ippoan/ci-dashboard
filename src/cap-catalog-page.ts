@@ -515,12 +515,58 @@ const CLIENT_SCRIPT = `
   }
   let favorites = loadFavorites();
   let favOnly = loadFavOnly();
+
+  // server-side persistence (CF Access email 単位、CI_STATUS KV)。
+  // hydrate: load 時に GET → 成功なら local を上書き (= cross-device 共有)。
+  // PUT は debounce してから走らせる (= rapid star toggle / 順位変更で
+  // KV を叩きすぎない)。401 (= 未認証) なら以後の同期を諦め、localStorage のみで運用。
+  let syncEnabled = true;
+  let pendingPut = null;
+  function schedulePut() {
+    if (!syncEnabled) return;
+    if (pendingPut != null) clearTimeout(pendingPut);
+    pendingPut = setTimeout(function(){
+      pendingPut = null;
+      fetch('/api/cap-catalog/favorites', {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ keys: favorites, favOnly: favOnly }),
+      }).then(function(res){
+        if (res.status === 401) syncEnabled = false;
+      }).catch(function(){ /* offline: localStorage に既に保存済 */ });
+    }, 600);
+  }
+  function hydrateFromServer() {
+    fetch('/api/cap-catalog/favorites', { headers: { 'accept': 'application/json' } })
+      .then(function(res){
+        if (res.status === 401) { syncEnabled = false; return null; }
+        if (!res.ok) return null;
+        return res.json();
+      })
+      .then(function(remote){
+        if (!remote || !Array.isArray(remote.keys)) return;
+        // server を真実とする。local と差があれば server で上書きして再描画。
+        const same = remote.keys.length === favorites.length
+          && remote.keys.every(function(k, i){ return k === favorites[i]; })
+          && (remote.favOnly === true) === favOnly;
+        if (same) return;
+        favorites = remote.keys.slice();
+        favOnly = remote.favOnly === true;
+        saveFavorites(favorites);
+        saveFavOnly(favOnly);
+        renderFavToggle();
+        render(input.value);
+      })
+      .catch(function(){ /* network failure: localStorage で続行 */ });
+  }
+
   function isFav(s) { return favorites.indexOf(symbolKey(s)) !== -1; }
   function toggleFav(s) {
     const k = symbolKey(s);
     const i = favorites.indexOf(k);
     if (i === -1) favorites.push(k); else favorites.splice(i, 1);
     saveFavorites(favorites);
+    schedulePut();
   }
   function moveFav(s, dir) {
     const k = symbolKey(s);
@@ -532,6 +578,7 @@ const CLIENT_SCRIPT = `
     favorites[i] = favorites[j];
     favorites[j] = tmp;
     saveFavorites(favorites);
+    schedulePut();
   }
 
   // fq_path の root segment (= crate / 最上位 module) で symbol を group する。
@@ -787,6 +834,7 @@ const CLIENT_SCRIPT = `
   favToggleEl && favToggleEl.addEventListener('click', function(){
     favOnly = !favOnly;
     saveFavOnly(favOnly);
+    schedulePut();
     renderFavToggle();
     render(input.value);
   });
@@ -817,6 +865,9 @@ const CLIENT_SCRIPT = `
   renderFilters();
   renderFavToggle();
   render(initQ);
+  // localStorage で先に paint してから server を確認する (= 初回 fetch を待たず
+  // 即表示)。server が新しければ上書き再描画。
+  hydrateFromServer();
 
   input.addEventListener('change', function() {
     const url = new URL(location.href);
