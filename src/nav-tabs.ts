@@ -12,7 +12,8 @@ export type TabKey =
   | "projects"
   | "releases"
   | "release-wave"
-  | "secret-gen";
+  | "secret-gen"
+  | "cap-catalog";
 
 interface TabDef {
   key: TabKey | "branch-protection" | "gcp-secrets" | "security-inventory" | "repo-maps";
@@ -38,6 +39,7 @@ const TABS: ReadonlyArray<TabDef> = [
   { key: "releases",   href: "/releases",   label: "🏷️ Releases" },
   { key: "release-wave", href: "/release-wave", label: "🌊 Release Waves" },
   { key: "secret-gen", href: "/secret-gen", label: "🔐 Secret Generator" },
+  { key: "cap-catalog", href: "/cap-catalog", label: "🗂️ Cap Catalog" },
   {
     key: "branch-protection",
     href: "https://auth-staging.ippoan.org/dashboard/branch-protection",

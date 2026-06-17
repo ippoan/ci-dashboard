@@ -15,6 +15,7 @@ import { handleReleaseClose } from "./release-close";
 import { handleReleaseCloseBatch } from "./release-close-batch";
 import { handleRecheck, recheckRun } from "./recheck";
 import { handleSecretGenPage } from "./secret-gen-page";
+import { handleCapCatalogPage } from "./cap-catalog-page";
 import { handleLaunch } from "./launch";
 import { handleTagRelease } from "./tag-release";
 import {
@@ -190,6 +191,7 @@ app.get("/projects", (c) => handleProjectsPage(c.env));
 // state). Operators paste the output into Cloudflare Secrets Store / wrangler
 // secret put / GitHub Actions secrets.
 app.get("/secret-gen", () => handleSecretGenPage());
+app.get("/cap-catalog", () => handleCapCatalogPage());
 
 // Launch redirect for the open-multirepo skill. Stateless: reconstructs the
 // long claude.ai/code URL from a compact `?i=<issue>` query and 302s to it, so
