@@ -57,6 +57,26 @@ const hubCalls: Array<{ path: string; body: unknown }> = [];
 function resetHubCalls() { hubCalls.length = 0; }
 
 // Mock Hub DO that performs KV operations like the real Hub
+// テスト用の KV backed BlobStore (Refs #409)。本番では Hub DO の
+// `this.ctx.storage` adapter が使われるが、test では cloudflare:test の KV を
+// SoT として簡単に共有できるためそちらに寄せる (strongly consistent な
+// in-memory KV)。`releases:index:test` を専用 key にしておく。
+const RELEASES_INDEX_TEST_KEY = "releases:index:test";
+function kvBlobStore(kv: KVNamespace) {
+  return {
+    read: async () => {
+      return await kv.get(RELEASES_INDEX_TEST_KEY, "json") as
+        | import("../src/releases-index-cache").ReleasesIndexBlob
+        | null;
+    },
+    write: async (blob: import("../src/releases-index-cache").ReleasesIndexBlob) => {
+      await kv.put(RELEASES_INDEX_TEST_KEY, JSON.stringify(blob), {
+        expirationTtl: 86400,
+      });
+    },
+  };
+}
+
 function mockHub(kv: KVNamespace): DurableObjectStub {
   return {
     fetch: async (req: Request) => {
@@ -70,18 +90,33 @@ function mockHub(kv: KVNamespace): DurableObjectStub {
         hubCalls.push({ path: url.pathname, body: parsed });
       } catch { /* ignore */ }
 
+      // /releases-index-read / -write の DO storage 模擬 (Refs #409)。test KV を
+      // backing にして強整合に振る舞う。
+      if (url.pathname === "/releases-index-read") {
+        const blob = await kv.get(RELEASES_INDEX_TEST_KEY, "json");
+        if (!blob) return new Response("", { status: 200 });
+        return Response.json(blob);
+      }
+      if (url.pathname === "/releases-index-write") {
+        const blob = await req.json();
+        await kv.put(RELEASES_INDEX_TEST_KEY, JSON.stringify(blob), {
+          expirationTtl: 86400,
+        });
+        return new Response("OK");
+      }
+
       // blob patch の DO 委譲 (Refs #341)。mock でも実 patch 関数を呼び、
       // 「consumer → hub 委譲 → blob 反映」を integration として検証する。
       if (url.pathname === "/releases-index-apply-issue") {
         const { applyIssueEventToReleasesIndex } = await import("../src/releases-index-patch");
         const payload = JSON.parse(await req.text());
-        const patched = await applyIssueEventToReleasesIndex(kv, payload);
+        const patched = await applyIssueEventToReleasesIndex(kvBlobStore(kv), payload);
         return Response.json({ patched });
       }
       if (url.pathname === "/releases-index-apply-refs") {
         const { applyRefsPatchToReleasesIndex } = await import("../src/releases-index-patch");
         const { repo, refs, headSha } = JSON.parse(await req.text());
-        const outcome = await applyRefsPatchToReleasesIndex(kv, repo, refs, headSha);
+        const outcome = await applyRefsPatchToReleasesIndex(kvBlobStore(kv), kv, repo, refs, headSha);
         return Response.json({ outcome });
       }
 
@@ -870,7 +905,7 @@ describe("POST /webhook", () => {
   // blob の storedAt:0 + staleRepos で検証する。
   it("issues event falls back to staling the index when the hub apply-issue is degraded", async () => {
     // 既存の fresh blob を仕込む (markReleasesIndexStale は blob 不在なら no-op)。
-    await writeReleasesIndexBlob(env.CI_STATUS, [
+    await writeReleasesIndexBlob(testEnv(), [
       {
         repo: "ippoan/foo",
         tagless: false,
@@ -884,17 +919,20 @@ describe("POST /webhook", () => {
         }],
       },
     ] satisfies RepoView[]);
-    const before = await readReleasesIndexBlob<RepoView[]>(env.CI_STATUS);
+    const before = await readReleasesIndexBlob<RepoView[]>(testEnv());
     expect(before!.storedAt).toBeGreaterThan(0);
 
-    // apply-issue だけ 500 を返す degraded hub。他経路は通常どおり。
+    // apply-issue だけ 500 を返す degraded hub。他経路 (#409 で追加された
+    // /releases-index-{read,write} 含む) は通常どおり mockHub に委譲し、
+    // markReleasesIndexStale が KV backed BlobStore を読み書きできるようにする。
+    const baseHub = mockHub(env.CI_STATUS);
     const degradedHub = {
       fetch: async (req: Request) => {
         const url = new URL(req.url);
         if (url.pathname === "/releases-index-apply-issue") {
           return new Response("boom", { status: 500 });
         }
-        return new Response("OK");
+        return baseHub.fetch(req);
       },
     } as unknown as DurableObjectStub;
     const degradedEnv: Env = {
@@ -928,7 +966,7 @@ describe("POST /webhook", () => {
     expect(res.status).toBe(200);
 
     // degraded fallback で blob が stale 化された (= 1h 安全網より早く再集計される)。
-    const after = await readReleasesIndexBlob<RepoView[]>(env.CI_STATUS);
+    const after = await readReleasesIndexBlob<RepoView[]>(testEnv());
     expect(after!.storedAt).toBe(0);
     expect(after!.staleRepos).toContain("ippoan/foo");
   });
@@ -1174,20 +1212,20 @@ describe("webhook queue ingest (Refs #318)", () => {
 describe("releases index blob (Refs #325)", () => {
   beforeEach(async () => {
     resetHubCalls();
-    await env.CI_STATUS.delete("releases:index:v3");
+    await env.CI_STATUS.delete("releases:index:test");
     await env.CI_STATUS.delete("releases:index:refreshing");
   });
   afterEach(() => { vi.restoreAllMocks(); });
 
   async function seedBlob(): Promise<void> {
     await env.CI_STATUS.put(
-      "releases:index:v3",
+      "releases:index:test",
       JSON.stringify({ storedAt: Date.now(), views: [] }),
     );
   }
 
   async function blobStoredAt(): Promise<number | null> {
-    const blob = await env.CI_STATUS.get("releases:index:v3", "json") as
+    const blob = await env.CI_STATUS.get("releases:index:test", "json") as
       { storedAt: number } | null;
     return blob ? blob.storedAt : null;
   }
@@ -1215,7 +1253,7 @@ describe("releases index blob (Refs #325)", () => {
     );
     await waitOnExecutionContext(ctx);
 
-    const blob = await env.CI_STATUS.get("releases:index:v3", "json") as
+    const blob = await env.CI_STATUS.get("releases:index:test", "json") as
       { storedAt: number; staleRepos?: string[] };
     expect(blob.storedAt).toBe(0);
     expect(blob.staleRepos).toContain("ippoan/foo");
@@ -1275,7 +1313,7 @@ describe("releases index blob (Refs #325)", () => {
 
   it("index に出ている issue の close は blob を直接 patch して broadcast する (Refs #339)", async () => {
     // blob に open 行を seed (synthetic block)
-    await env.CI_STATUS.put("releases:index:v3", JSON.stringify({
+    await env.CI_STATUS.put("releases:index:test", JSON.stringify({
       storedAt: 12345,
       views: [{
         repo: "ippoan/foo", tagless: true, olderTags: [],
@@ -1311,7 +1349,7 @@ describe("releases index blob (Refs #325)", () => {
     );
     await waitOnExecutionContext(ctx);
 
-    const blob = await env.CI_STATUS.get("releases:index:v3", "json") as {
+    const blob = await env.CI_STATUS.get("releases:index:test", "json") as {
       storedAt: number;
       views: Array<{ tagBlocks: Array<{ issues: Array<{ state: string; warnings: string[] }> }> }>;
     };
@@ -1332,7 +1370,7 @@ describe("releases index blob (Refs #325)", () => {
       url: "https://github.com/ippoan/foo/issues/9",
     }));
     // blob: 空の synthetic block を持つ tagless card
-    await env.CI_STATUS.put("releases:index:v3", JSON.stringify({
+    await env.CI_STATUS.put("releases:index:test", JSON.stringify({
       storedAt: 12345,
       views: [{
         repo: "ippoan/foo", tagless: true, olderTags: [],
@@ -1360,7 +1398,7 @@ describe("releases index blob (Refs #325)", () => {
     );
     await waitOnExecutionContext(ctx);
 
-    const blob = await env.CI_STATUS.get("releases:index:v3", "json") as {
+    const blob = await env.CI_STATUS.get("releases:index:test", "json") as {
       storedAt: number;
       staleRepos?: string[];
       views: Array<{ tagBlocks: Array<{ tag: string; issues: Array<{ number: number; title: string }> }> }>;
@@ -1378,7 +1416,7 @@ describe("releases index blob (Refs #325)", () => {
   });
 
   it("Refs 先が /issues KV に無い merge は全集計に fallback する (Refs #339)", async () => {
-    await env.CI_STATUS.put("releases:index:v3", JSON.stringify({
+    await env.CI_STATUS.put("releases:index:test", JSON.stringify({
       storedAt: 12345,
       views: [{
         repo: "ippoan/foo", tagless: true, olderTags: [],
@@ -1406,7 +1444,7 @@ describe("releases index blob (Refs #325)", () => {
     );
     await waitOnExecutionContext(ctx);
 
-    const blob = await env.CI_STATUS.get("releases:index:v3", "json") as
+    const blob = await env.CI_STATUS.get("releases:index:test", "json") as
       { storedAt: number; staleRepos?: string[] };
     expect(blob.storedAt).toBe(0);
     expect(blob.staleRepos).toContain("ippoan/foo");
@@ -1449,7 +1487,7 @@ describe("releases index blob (Refs #325)", () => {
     await consumeWebhookBatch(batch, testEnv());
 
     expect(acked).toEqual(["refresh"]);
-    expect(await env.CI_STATUS.get("releases:index:v3")).not.toBeNull();
+    expect(await env.CI_STATUS.get("releases:index:test")).not.toBeNull();
   });
 });
 
@@ -1457,7 +1495,7 @@ describe("releases index blob (Refs #325)", () => {
 describe("consumeWebhookBatch — event-first (Refs #335)", () => {
   beforeEach(async () => {
     resetHubCalls();
-    await env.CI_STATUS.delete("releases:index:v3");
+    await env.CI_STATUS.delete("releases:index:test");
     await env.CI_STATUS.delete("releases:index:refreshing");
     await env.CI_STATUS.delete("issue:ippoan/foo#88");
     await env.CI_STATUS.delete("github:rl-backoff");
@@ -1509,7 +1547,7 @@ describe("consumeWebhookBatch — event-first (Refs #335)", () => {
 describe("consumeWebhookBatch — refresh self-reschedule (Refs #337)", () => {
   beforeEach(async () => {
     resetHubCalls();
-    await env.CI_STATUS.delete("releases:index:v3");
+    await env.CI_STATUS.delete("releases:index:test");
     await env.CI_STATUS.delete("releases:index:refreshing");
     await env.CI_STATUS.delete("releases:index:rekick-scheduled");
     await env.CI_STATUS.delete("github:rl-backoff");
@@ -1530,7 +1568,7 @@ describe("consumeWebhookBatch — refresh self-reschedule (Refs #337)", () => {
   it("lock bail 時は 60s 遅延の refresh job を再投函してから ack する", async () => {
     // deploy に殺された compute の残 lock を再現
     await env.CI_STATUS.put("releases:index:refreshing", "1", { expirationTtl: 60 });
-    await env.CI_STATUS.put("releases:index:v3", JSON.stringify({ storedAt: 0, views: [] }));
+    await env.CI_STATUS.put("releases:index:test", JSON.stringify({ storedAt: 0, views: [] }));
 
     const sent: Array<{ msg: unknown; opts: unknown }> = [];
     const queueEnv = {
@@ -1553,7 +1591,7 @@ describe("consumeWebhookBatch — refresh self-reschedule (Refs #337)", () => {
   });
 
   it("fresh 時は再投函しない (停止条件)", async () => {
-    await env.CI_STATUS.put("releases:index:v3", JSON.stringify({ storedAt: Date.now(), views: [] }));
+    await env.CI_STATUS.put("releases:index:test", JSON.stringify({ storedAt: Date.now(), views: [] }));
     const sent: unknown[] = [];
     const queueEnv = {
       ...testEnv(),

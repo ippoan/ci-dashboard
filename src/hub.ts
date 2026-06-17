@@ -13,7 +13,14 @@ import {
   applyCloseToReleasesIndex,
   applyIssueEventToReleasesIndex,
   applyRefsPatchToReleasesIndex,
+  type BlobStore,
 } from "./releases-index-patch";
+import {
+  RELEASES_INDEX_DO_KEY,
+  RELEASES_INDEX_KEY,
+  RELEASES_INDEX_STORE_SECONDS,
+  type ReleasesIndexBlob,
+} from "./releases-index-cache";
 import type { IssueWebhookPayload } from "./issue-cache";
 
 // shape refresh の結果型 (ci-shape-refresh.ts と同形だが、循環 import を避けるため
@@ -120,6 +127,60 @@ export class CIDashboardHub extends DurableObject<Env> {
     // 後続は成功/失敗に関わらず続行 (失敗は caller に伝播)。
     this.releasesPatchChain = run.then(() => undefined, () => undefined);
     return run;
+  }
+
+  // /releases blob の SoT は本 DO の `this.ctx.storage` (#409、強整合)。
+  // 旧設計 (v3 以前) は CI_STATUS KV を SoT にしていたが、CF KV の global
+  // propagation lag (最大 60s) と WS auto-reload (~10s) が噛み合い、close
+  // 直後の reload で「復活」する事故 (#400) が確定したため SoT を DO に移した。
+  //
+  // bootstrap migration: DO storage が空 (deploy 直後 / 初回 access) なら
+  // 旧 key (`releases:index:v3`) を 1 回だけ seed として読み、DO に書き写す。
+  // それ以降は DO のみが読まれる (KV v4 は queue 経由の backup のみで、reader
+  // は最終 fallback でしか触らない)。
+  private async getReleasesIndexBlob<T = unknown>(): Promise<ReleasesIndexBlob<T> | null> {
+    const stored = await this.ctx.storage.get<ReleasesIndexBlob<T>>(RELEASES_INDEX_DO_KEY);
+    if (stored !== undefined && stored !== null) return stored;
+    // legacy v3 (#400 までの SoT) を seed として試す。
+    const legacy = await this.env.CI_STATUS.get(
+      "releases:index:v3",
+      "json",
+    ) as ReleasesIndexBlob<T> | null;
+    if (legacy) {
+      await this.ctx.storage.put(RELEASES_INDEX_DO_KEY, legacy);
+      return legacy;
+    }
+    // v4 backup (本 PR 以降の KV backup) も試す (disaster recovery 用)。
+    const backup = await this.env.CI_STATUS.get(
+      RELEASES_INDEX_KEY,
+      "json",
+    ) as ReleasesIndexBlob<T> | null;
+    if (backup) {
+      await this.ctx.storage.put(RELEASES_INDEX_DO_KEY, backup);
+      return backup;
+    }
+    return null;
+  }
+
+  private async putReleasesIndexBlob(blob: ReleasesIndexBlob): Promise<void> {
+    await this.ctx.storage.put(RELEASES_INDEX_DO_KEY, blob);
+    // KV backup を queue 経由で非同期に依頼する (best-effort、失敗は drop)。
+    // KV は disaster recovery / external dump 用の eventual mirror で、
+    // 読み手は基本 DO のみを見るため backup の lag や drop は許容できる。
+    if (this.env.WEBHOOK_QUEUE) {
+      try {
+        await this.env.WEBHOOK_QUEUE.send({ kind: "releases-index-kv-backup" });
+      } catch { /* fail-open */ }
+    }
+  }
+
+  /** apply-close/issue/refs が使う BlobStore adapter。direct DO storage IO で
+   *  read-modify-write を 1 つのトランザクション内で完結させる。 */
+  private blobStore(): BlobStore {
+    return {
+      read: <T = unknown>() => this.getReleasesIndexBlob<T>(),
+      write: (blob: ReleasesIndexBlob) => this.putReleasesIndexBlob(blob),
+    };
   }
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -501,13 +562,37 @@ export class CIDashboardHub extends DurableObject<Env> {
       return new Response("OK");
     }
 
+    // /releases index blob の read (Refs #409)。本 DO の `this.ctx.storage`
+    // から strongly consistent に返す。`releases-index-cache.ts` の
+    // `readReleasesIndexBlob(env)` (= worker fetch handler 側) がここを叩く。
+    // blob 不在は 200 空 body で返す (caller は parse 前に length チェック)。
+    if (url.pathname === "/releases-index-read") {
+      const blob = await this.getReleasesIndexBlob();
+      if (!blob) return new Response("", { status: 200 });
+      return new Response(JSON.stringify(blob), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    // /releases index blob の write (Refs #409)。任意の blob オブジェクト
+    // (storedAt / views / staleRepos) を受け取りそのまま DO storage に put。
+    // `writeReleasesIndexBlob` (refresh 経路) と
+    // `writePatchedReleasesIndexBlob` (webhook patch 後の再 fetch 経路) と
+    // `markReleasesIndexStale` の 3 つが叩く統合 endpoint。
+    if (url.pathname === "/releases-index-write") {
+      const blob = await request.json<ReleasesIndexBlob>();
+      await this.putReleasesIndexBlob(blob);
+      return new Response("OK");
+    }
+
     // /releases index blob への webhook 直接 patch (Refs #339/#341)。
     // consumer から委譲され、本 DO 内で直列実行する (lost update 防止)。
     // patch 成功時の WS broadcast もここで行う = patch → broadcast が原子的。
     if (url.pathname === "/releases-index-apply-issue") {
       const payload = await request.json<IssueWebhookPayload>();
       const patched = await this.serializeReleasesPatch(() =>
-        applyIssueEventToReleasesIndex(this.env.CI_STATUS, payload),
+        applyIssueEventToReleasesIndex(this.blobStore(), payload),
       );
       if (patched) {
         this.broadcastEnvelope({
@@ -525,7 +610,7 @@ export class CIDashboardHub extends DurableObject<Env> {
     if (url.pathname === "/releases-index-apply-close") {
       const { repo, urls } = await request.json<{ repo: string; urls: string[] }>();
       const patched = await this.serializeReleasesPatch(() =>
-        applyCloseToReleasesIndex(this.env.CI_STATUS, urls),
+        applyCloseToReleasesIndex(this.blobStore(), urls),
       );
       if (patched) {
         this.broadcastEnvelope({ type: "releases-updated", data: { repo } });
@@ -540,7 +625,7 @@ export class CIDashboardHub extends DurableObject<Env> {
         headSha: string | null;
       }>();
       const outcome = await this.serializeReleasesPatch(() =>
-        applyRefsPatchToReleasesIndex(this.env.CI_STATUS, repo, refs, headSha),
+        applyRefsPatchToReleasesIndex(this.blobStore(), this.env.CI_STATUS, repo, refs, headSha),
       );
       if (outcome === "patched") {
         this.broadcastEnvelope({ type: "releases-updated", data: { repo } });

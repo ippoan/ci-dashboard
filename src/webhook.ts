@@ -20,7 +20,11 @@ import {
   invalidateRepoCompare,
 } from "./release-cache";
 import { applyPullRequestEvent } from "./pr-map-cache";
-import { markReleasesIndexStale } from "./releases-index-cache";
+import {
+  markReleasesIndexStale,
+  RELEASES_INDEX_KEY,
+  RELEASES_INDEX_STORE_SECONDS,
+} from "./releases-index-cache";
 import { extractRefIssues } from "./release-helpers";
 import type { RefsPatchOutcome } from "./releases-index-patch";
 import { noteGitHubAuthBroken } from "./github-backoff";
@@ -41,7 +45,18 @@ export interface ReleasesIndexRefreshMessage {
   kind: "releases-index-refresh";
 }
 
-export type QueueMessage = WebhookQueueMessage | ReleasesIndexRefreshMessage;
+/** DO storage (SoT) → CI_STATUS KV (backup) の async mirror (Refs #409)。
+ *  Hub DO の `putReleasesIndexBlob` が write 後に enqueue する。consumer は
+ *  Hub から最新 blob を取得し KV に put — drop しても backup が古くなるだけで
+ *  reader (= DO 直叩き) には影響しないため best-effort で OK。 */
+export interface ReleasesIndexKvBackupMessage {
+  kind: "releases-index-kv-backup";
+}
+
+export type QueueMessage =
+  | WebhookQueueMessage
+  | ReleasesIndexRefreshMessage
+  | ReleasesIndexKvBackupMessage;
 
 // Self-reschedule の重複防止 marker (Refs #337)。60s 遅延 job が既に予約済み
 // なら積み増さない。KV expirationTtl の最小値 60s に合わせる。
@@ -125,7 +140,7 @@ async function applyIssuePatchViaHub(
  *  page view の waitUntil fallback が拾う)。enqueue の重複は refresh 側の
  *  lock / fresh recheck が無駄撃ちに落とす。 */
 async function staleAndKickReleasesIndex(env: Env, repo: string): Promise<void> {
-  await markReleasesIndexStale(env.CI_STATUS, repo);
+  await markReleasesIndexStale(env, repo);
   if (env.WEBHOOK_QUEUE) {
     try {
       await env.WEBHOOK_QUEUE.send({ kind: "releases-index-refresh" });
@@ -356,11 +371,20 @@ export async function consumeWebhookBatch(
   // 同 batch の webhook event (即時 KV write) を塞がないよう、event を先に
   // 全部処理してから refresh job を最後に 1 回だけ実行する。同 batch に
   // refresh message が複数あってもまとめて 1 回 (残りはまとめて ack)。
+  // KV backup (#409) も独立に処理する — DO から read して KV に put するだけで、
+  // 失敗しても backup が古くなるだけ (reader は DO のみ見る)。
   const eventMessages: Message<QueueMessage>[] = [];
   const refreshMessages: Message<QueueMessage>[] = [];
+  const kvBackupMessages: Message<QueueMessage>[] = [];
   for (const message of batch.messages) {
-    if ("kind" in message.body && message.body.kind === "releases-index-refresh") {
-      refreshMessages.push(message);
+    if ("kind" in message.body) {
+      if (message.body.kind === "releases-index-refresh") {
+        refreshMessages.push(message);
+      } else if (message.body.kind === "releases-index-kv-backup") {
+        kvBackupMessages.push(message);
+      } else {
+        eventMessages.push(message);
+      }
     } else {
       eventMessages.push(message);
     }
@@ -380,6 +404,32 @@ export async function consumeWebhookBatch(
         error: err instanceof Error ? err.message : String(err),
       }));
       message.retry();
+    }
+  }
+
+  // KV backup (#409): DO から read して KV に put。同 batch に複数積まれていても
+  // 最新値で 1 回書けば足り、残りは ack で畳む (debounce 的)。失敗は drop OK。
+  if (kvBackupMessages.length > 0) {
+    try {
+      const res = await hub.fetch(new Request("http://hub/releases-index-read"));
+      if (res.ok) {
+        const text = await res.text();
+        if (text) {
+          await env.CI_STATUS.put(RELEASES_INDEX_KEY, text, {
+            expirationTtl: RELEASES_INDEX_STORE_SECONDS,
+          });
+        }
+      }
+      for (const m of kvBackupMessages) m.ack();
+    } catch (err) {
+      console.log(JSON.stringify({
+        msg: "releases-index-kv-backup-failed",
+        attempts: kvBackupMessages[0]?.attempts,
+        error: err instanceof Error ? err.message : String(err),
+      }));
+      // backup は best-effort なので retry はせず ack。失敗が続いても
+      // reader (DO 直叩き) は影響を受けない。
+      for (const m of kvBackupMessages) m.ack();
     }
   }
 
