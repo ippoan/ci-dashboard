@@ -12,26 +12,35 @@
 //   更新中バッジも出ない)
 // - 行データは GitHub API を呼ばず /issues KV cache (`issue:repo#N`) から組む
 // - patch できない時は caller が従来の stale 化 + 全集計に fallback する
+//
+// #409 以降、blob の SoT は CIDashboardHub DO の `this.ctx.storage` (強整合)。
+// 本 module は **`BlobStore` interface 経由でしか blob に触らず**、KV 直叩きの
+// 経路は持たない。caller (= Hub DO) が `DoStorageBlobStore` を渡してくる。
 
 import type { OrgIssue } from "./mcp/tools/issues";
-import type { IssueRow, RepoView, TagBlock } from "./releases-page";
+import type { IssueRow, RepoView } from "./releases-page";
 import type { IssueWebhookPayload } from "./issue-cache";
 import { issueKey } from "./issue-cache";
 import { computeWarnings } from "./release-helpers";
-import {
-  readReleasesIndexBlob,
-  writePatchedReleasesIndexBlob,
-} from "./releases-index-cache";
+import type { ReleasesIndexBlob } from "./releases-index-cache";
+
+/** blob の read / write を抽象化する store interface。
+ *  - Hub DO 内: `DoStorageBlobStore` (= this.ctx.storage、強整合)
+ *  - 単体テスト: `InMemoryBlobStore` 等 */
+export interface BlobStore {
+  read<T = unknown>(): Promise<ReleasesIndexBlob<T> | null>;
+  write(blob: ReleasesIndexBlob): Promise<void>;
+}
 
 /** issues event (close / reopen / edit) を blob 内の該当行に反映する。
  *  行の特定は html_url 完全一致 (cross-repo 行も含めて全 card を走査)。
  *  @returns true = 1 行以上 patch して blob を書いた (= WS reload して良い)。
  *  false = 該当行なし or blob 不在 (= index 内容に影響なし、何もしない)。 */
 export async function applyIssueEventToReleasesIndex(
-  kv: KVNamespace,
+  store: BlobStore,
   payload: IssueWebhookPayload,
 ): Promise<boolean> {
-  const blob = await readReleasesIndexBlob<RepoView[]>(kv);
+  const blob = await store.read<RepoView[]>();
   if (!blob) {
     console.log(JSON.stringify({
       msg: "releases-index-apply-issue",
@@ -72,7 +81,7 @@ export async function applyIssueEventToReleasesIndex(
     written,
   }));
   if (!written) return false;
-  await writePatchedReleasesIndexBlob(kv, blob);
+  await store.write(blob);
   return true;
 }
 
@@ -92,11 +101,11 @@ export async function applyIssueEventToReleasesIndex(
  *  行の既存値を保持する — close は state しか変えないため。
  *  @returns true = 1 行以上 patch して blob を書いた (WS reload して良い)。 */
 export async function applyCloseToReleasesIndex(
-  kv: KVNamespace,
+  store: BlobStore,
   closedUrls: string[],
 ): Promise<boolean> {
   if (closedUrls.length === 0) return false;
-  const blob = await readReleasesIndexBlob<RepoView[]>(kv);
+  const blob = await store.read<RepoView[]>();
   if (!blob) {
     console.log(JSON.stringify({
       msg: "releases-index-apply-close",
@@ -140,7 +149,7 @@ export async function applyCloseToReleasesIndex(
     written,
   }));
   if (!written) return false;
-  await writePatchedReleasesIndexBlob(kv, blob);
+  await store.write(blob);
   return true;
 }
 
@@ -155,6 +164,7 @@ export type RefsPatchOutcome = "patched" | "noop" | "fallback";
  *           "fallback" = patch 不能 (blob/card 無し、KV に issue 無し等) —
  *                        caller が stale 化 + 全集計に fallback する */
 export async function applyRefsPatchToReleasesIndex(
+  store: BlobStore,
   kv: KVNamespace,
   repo: string,
   refs: number[],
@@ -168,7 +178,7 @@ export async function applyRefsPatchToReleasesIndex(
     return outcome;
   };
 
-  const blob = await readReleasesIndexBlob<RepoView[]>(kv);
+  const blob = await store.read<RepoView[]>();
   if (!blob) return logOutcome("fallback", { reason: "blob-missing" });
 
   const view = blob.views.find((v) => v.repo === repo);
@@ -223,6 +233,6 @@ export async function applyRefsPatchToReleasesIndex(
   }
 
   if (!changed) return logOutcome("noop", { reason: "no-change" });
-  await writePatchedReleasesIndexBlob(kv, blob);
+  await store.write(blob);
   return logOutcome("patched", { added: block.issues.length });
 }

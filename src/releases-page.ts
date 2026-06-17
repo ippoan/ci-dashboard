@@ -170,7 +170,7 @@ async function handleIndexPage(
   // 従来どおり同期生成する。
   const kv = env.CI_STATUS;
   const [blob, authBroken] = await Promise.all([
-    readReleasesIndexBlob<RepoView[]>(kv),
+    readReleasesIndexBlob<RepoView[]>(env),
     getGitHubAuthBroken(kv),
   ]);
   let views: RepoView[];
@@ -186,7 +186,7 @@ async function handleIndexPage(
     }
   } else {
     views = await computeIndexViews(env);
-    await writeReleasesIndexBlob(kv, views);
+    await writeReleasesIndexBlob(env, views);
   }
 
   // Flash 整合 (Refs #325): close 直後の redirect は blob がまだ古い可能性が
@@ -279,7 +279,7 @@ async function refreshReleasesIndexInner(
     expirationTtl: RELEASES_INDEX_REFRESH_LOCK_TTL,
   });
   try {
-    const recheck = await readReleasesIndexBlob<RepoView[]>(kv);
+    const recheck = await readReleasesIndexBlob<RepoView[]>(env);
     if (recheck && Date.now() - recheck.storedAt < RELEASES_INDEX_FRESH_SECONDS * 1000) {
       return "fresh";
     }
@@ -305,7 +305,7 @@ async function refreshReleasesIndexInner(
     // 一方向 (closed → open には戻さない) なら安全。逆方向 (refresh fresh fetch が
     // closed と判定 / blob が open) は patch 漏れケースで refresh の結果が正なので
     // そのまま使う。
-    const latest = await readReleasesIndexBlob<RepoView[]>(kv);
+    const latest = await readReleasesIndexBlob<RepoView[]>(env);
     let preserved = 0;
     if (latest) {
       const closedUrls = new Set<string>();
@@ -335,7 +335,7 @@ async function refreshReleasesIndexInner(
       preserved,
       latestExists: latest !== null,
     }));
-    await writeReleasesIndexBlob(kv, views);
+    await writeReleasesIndexBlob(env, views);
     // token 取得が成功した = 認証は生きている。失効 banner を自動回復 (Refs #334)。
     await clearGitHubAuthBroken(kv);
     return "done";

@@ -13,6 +13,7 @@ import { handleProjectsPage } from "./projects-page";
 import { handleReleasesPage } from "./releases-page";
 import { handleReleaseClose } from "./release-close";
 import { handleReleaseCloseBatch } from "./release-close-batch";
+import { readReleasesIndexBlob } from "./releases-index-cache";
 import { handleRecheck, recheckRun } from "./recheck";
 import { handleSecretGenPage } from "./secret-gen-page";
 import { handleCapCatalogPage } from "./cap-catalog-page";
@@ -230,10 +231,11 @@ app.post("/api/release-close",
 app.post("/api/release-close-batch",
   (c) => handleReleaseCloseBatch(c.req.raw, c.env, getHub(c.env), c.executionCtx));
 
-// /releases blob ダンプ (Refs #407, bug 1 診断用 — 確定後 revert する一時 endpoint)。
-// CF Access (zone-level) で gate。返却は CI_STATUS KV の `releases:index:v3` 生値。
+// /releases blob ダンプ (Refs #407 / #409, bug 1 診断用)。CF Access (zone-level)
+// で gate。Hub DO (`this.ctx.storage`) を直叩きするため strongly consistent。
+// KV backup (v4) ではなく SoT を返す。
 app.get("/admin/dump-releases-blob", async (c) => {
-  const blob = await c.env.CI_STATUS.get("releases:index:v3", "json");
+  const blob = await readReleasesIndexBlob(c.env);
   return Response.json(blob ?? null, {
     headers: { "cache-control": "no-store" },
   });
