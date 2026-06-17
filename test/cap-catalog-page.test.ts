@@ -200,4 +200,31 @@ describe("GET /cap-catalog", () => {
     expect(body).toContain('id="meta"');
     expect(body).toContain('id="list"');
   });
+
+  it("ships a module-filter chip area + localStorage-backed hide state (default-off for schema)", async () => {
+    // user 指示: schema vs cap で filter したい / localStorage で記憶 / schema 系は基本不要。
+    // SSR は chip を render しない (= 全 symbol を inline で持って client 側で
+    // root segment 毎に chip 化する設計) ので、container + client wiring を gate。
+    const { body } = await fetchPage();
+    expect(body).toContain('id="filters"');
+    // hide list を localStorage に保存する key (= ストレージレイアウト固定)
+    expect(body).toContain("'cap-catalog:hiddenModules'");
+    // 初回 default で /schema/ name の root を hide する (= 「基本的に schema は不要」)
+    expect(body).toContain("/schema/i.test(r)");
+    // chip の aria-pressed で visible/hidden 状態を表現する CSS rule
+    expect(body).toContain('aria-pressed="false"');
+    // show-all reset ボタン
+    expect(body).toContain('data-action="show-all"');
+  });
+
+  it("derives chip groups by fq_path root segment (`cap_catalog_schema::X` → `cap_catalog_schema`)", async () => {
+    // root segment = `::` の手前。実体は client JS の rootSegment() 内に
+    // 書かれている (= `fq.indexOf('::')` で分割)。SSR に embed されたコードを gate。
+    const { body } = await fetchPage();
+    expect(body).toContain("function rootSegment(fq)");
+    expect(body).toContain("fq.indexOf('::')");
+    // hidden set による filter は render() の queryFiltered 後に走る (= 検索結果と
+    // module 隠匿の独立性を gate)
+    expect(body).toContain("!hidden.has(rootSegment(s.fq_path))");
+  });
 });

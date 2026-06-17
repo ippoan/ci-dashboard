@@ -155,7 +155,7 @@ const PAGE_STYLES = `
     display: flex;
     gap: 10px;
     align-items: center;
-    margin-bottom: 16px;
+    margin-bottom: 12px;
   }
   .controls input[type="search"] {
     flex: 1;
@@ -171,6 +171,52 @@ const PAGE_STYLES = `
     border-color: #58a6ff;
     outline: none;
   }
+  /* fq_path root segment (= crate / 一番上の module) ごとの toggle chip。
+     state は localStorage(\`cap-catalog:hiddenModules\`) に保存。schema 系は
+     default-off (= user 指示: 基本的に schema は不要)。 */
+  .filters {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-bottom: 14px;
+    font-size: 12px;
+    color: #8b949e;
+  }
+  .filters .chip {
+    background: #21262d;
+    color: #c9d1d9;
+    border: 1px solid #30363d;
+    border-radius: 999px;
+    padding: 3px 10px;
+    font-family: ui-monospace, SFMono-Regular, monospace;
+    font-size: 12px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .filters .chip:hover { border-color: #58a6ff; }
+  .filters .chip[aria-pressed="false"] {
+    background: transparent;
+    color: #6e7681;
+    text-decoration: line-through;
+    text-decoration-color: #6e7681;
+  }
+  .filters .chip .chip-count {
+    color: #6e7681;
+    font-weight: normal;
+    margin-left: 4px;
+  }
+  .filters .chip[aria-pressed="true"] .chip-count { color: #8b949e; }
+  .filters .chip-reset {
+    background: transparent;
+    color: #58a6ff;
+    border: none;
+    cursor: pointer;
+    padding: 3px 4px;
+    font-size: 11px;
+    font-family: inherit;
+  }
+  .filters .chip-reset:hover { text-decoration: underline; }
   .meta {
     font-size: 12px;
     color: #8b949e;
@@ -381,7 +427,38 @@ const CLIENT_SCRIPT = `
   const input = document.getElementById('q');
   const list = document.getElementById('list');
   const meta = document.getElementById('meta');
+  const filtersEl = document.getElementById('filters');
   const data = JSON.parse(document.getElementById('catalog-data').textContent);
+
+  // fq_path の root segment (= crate / 最上位 module) で symbol を group する。
+  // "cap_catalog_schema::SCHEMA_VERSION" → "cap_catalog_schema"
+  // "cap" → "cap"
+  function rootSegment(fq) {
+    if (!fq) return '';
+    const i = fq.indexOf('::');
+    return i < 0 ? fq : fq.slice(0, i);
+  }
+
+  // localStorage の hide list を読む。schema は default-off (user 指示)。
+  // 初回 (= 保存値が無い) は、現データから "name に schema を含む root segment"
+  // を hidden として埋める。以降は明示的に user が toggle した状態を尊重する。
+  const LS_KEY = 'cap-catalog:hiddenModules';
+  function loadHidden(roots) {
+    try {
+      const raw = localStorage.getItem(LS_KEY);
+      if (raw != null) {
+        const arr = JSON.parse(raw);
+        if (Array.isArray(arr)) return new Set(arr.filter(function(x){ return typeof x === 'string'; }));
+      }
+    } catch (_) {}
+    // 初回 default: schema を含む root segment を hide
+    const def = new Set();
+    roots.forEach(function(r){ if (/schema/i.test(r)) def.add(r); });
+    return def;
+  }
+  function saveHidden(set) {
+    try { localStorage.setItem(LS_KEY, JSON.stringify(Array.from(set))); } catch (_) {}
+  }
 
   function escape(s) {
     return String(s)
@@ -412,7 +489,7 @@ const CLIENT_SCRIPT = `
 
   function render(q) {
     const needle = (q || '').toLowerCase().trim();
-    const matched = needle === ''
+    const queryFiltered = needle === ''
       ? data
       : data.filter(function(s) {
           if (s.fq_path.toLowerCase().includes(needle)) return true;
@@ -421,8 +498,11 @@ const CLIENT_SCRIPT = `
           if (s.features && s.features.some(function(f){ return f.toLowerCase().includes(needle); })) return true;
           return false;
         });
+    const matched = queryFiltered.filter(function(s){ return !hidden.has(rootSegment(s.fq_path)); });
+    const hiddenCount = queryFiltered.length - matched.length;
 
-    meta.textContent = matched.length + ' / ' + data.length + ' symbol(s)';
+    meta.textContent = matched.length + ' / ' + data.length + ' symbol(s)'
+      + (hiddenCount > 0 ? ' (' + hiddenCount + ' hidden by filter)' : '');
     if (matched.length === 0) {
       list.innerHTML = '<div class="empty">no match</div>';
       return;
@@ -480,12 +560,50 @@ const CLIENT_SCRIPT = `
     }).join('');
   }
 
+  // root segment 一覧 (data 全体での出現回数つき)。chip render に使う。
+  const rootCounts = {};
+  data.forEach(function(s){
+    const r = rootSegment(s.fq_path);
+    rootCounts[r] = (rootCounts[r] || 0) + 1;
+  });
+  const allRoots = Object.keys(rootCounts).sort();
+  const hidden = loadHidden(allRoots);
+
+  function renderFilters() {
+    if (!filtersEl) return;
+    if (allRoots.length === 0) { filtersEl.innerHTML = ''; return; }
+    const chips = allRoots.map(function(r){
+      const visible = !hidden.has(r);
+      return '<button type="button" class="chip" data-root="' + escape(r) + '" aria-pressed="' + visible + '" title="' + (visible ? 'click to hide' : 'click to show') + '">'
+        + escape(r)
+        + '<span class="chip-count">' + rootCounts[r] + '</span>'
+        + '</button>';
+    }).join('');
+    filtersEl.innerHTML = '<span>module:</span>' + chips
+      + '<button type="button" class="chip-reset" data-action="show-all">show all</button>';
+  }
+
+  filtersEl && filtersEl.addEventListener('click', function(ev){
+    const t = ev.target.closest('[data-root], [data-action]');
+    if (!t) return;
+    if (t.dataset.action === 'show-all') {
+      hidden.clear();
+    } else if (t.dataset.root) {
+      const r = t.dataset.root;
+      if (hidden.has(r)) hidden.delete(r); else hidden.add(r);
+    }
+    saveHidden(hidden);
+    renderFilters();
+    render(input.value);
+  });
+
   input.addEventListener('input', function(){ render(input.value); });
 
   // URL param ?q=foo は初期 query
   const url = new URL(location.href);
   const initQ = url.searchParams.get('q') || '';
   if (initQ) input.value = initQ;
+  renderFilters();
   render(initQ);
 
   input.addEventListener('change', function() {
@@ -529,6 +647,7 @@ export async function handleCapCatalogPage(env: Env, _ctx?: ExecutionContext): P
   <div class="controls">
     <input id="q" type="search" placeholder="fq_path / name / doc / feature で検索…" autocomplete="off">
   </div>
+  <div id="filters" class="filters"></div>
   <div id="meta" class="meta"></div>
   <div id="list"></div>
 
