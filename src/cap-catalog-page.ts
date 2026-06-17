@@ -179,9 +179,21 @@ const PAGE_STYLES = `
     gap: 6px;
     align-items: center;
     flex-wrap: wrap;
-    margin-bottom: 14px;
+    margin-bottom: 8px;
     font-size: 12px;
     color: #8b949e;
+  }
+  .filters-row { align-items: baseline; }
+  .filters-row .axis-label {
+    flex: 0 0 auto;
+    color: #6e7681;
+    min-width: 60px;
+  }
+  .filters-axis {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    align-items: center;
   }
   .filters .chip {
     background: #21262d;
@@ -427,7 +439,8 @@ const CLIENT_SCRIPT = `
   const input = document.getElementById('q');
   const list = document.getElementById('list');
   const meta = document.getElementById('meta');
-  const filtersEl = document.getElementById('filters');
+  const moduleFiltersEl = document.getElementById('module-filters');
+  const featureFiltersEl = document.getElementById('feature-filters');
   const data = JSON.parse(document.getElementById('catalog-data').textContent);
 
   // fq_path の root segment (= crate / 最上位 module) で symbol を group する。
@@ -439,25 +452,34 @@ const CLIENT_SCRIPT = `
     return i < 0 ? fq : fq.slice(0, i);
   }
 
-  // localStorage の hide list を読む。schema は default-off (user 指示)。
-  // 初回 (= 保存値が無い) は、現データから "name に schema を含む root segment"
-  // を hidden として埋める。以降は明示的に user が toggle した状態を尊重する。
-  const LS_KEY = 'cap-catalog:hiddenModules';
-  function loadHidden(roots) {
-    try {
-      const raw = localStorage.getItem(LS_KEY);
-      if (raw != null) {
-        const arr = JSON.parse(raw);
-        if (Array.isArray(arr)) return new Set(arr.filter(function(x){ return typeof x === 'string'; }));
-      }
-    } catch (_) {}
-    // 初回 default: schema を含む root segment を hide
-    const def = new Set();
-    roots.forEach(function(r){ if (/schema/i.test(r)) def.add(r); });
-    return def;
+  // 「feature 軸」(= @feature: tag) の集約。symbol が feature を 1 つも持たない
+  // 場合は専用 sentinel '(unfeatured)' に集める (= annotation 漏れ可視化、Refs cap-catalog#24)。
+  const UNFEATURED = '(unfeatured)';
+  function symbolFeatures(s) {
+    if (!s.features || s.features.length === 0) return [UNFEATURED];
+    return s.features;
   }
-  function saveHidden(set) {
-    try { localStorage.setItem(LS_KEY, JSON.stringify(Array.from(set))); } catch (_) {}
+
+  // 軸毎に localStorage key を分けて hide set を持つ。default-off は軸毎に判定:
+  //   - module: name に /schema/i を含む root を hide (user 指示「schema は基本不要」)
+  //   - feature: 「(unfeatured)」を default-off (annotation 漏れ item を default で隠す)
+  function makeAxis(lsKey, allKeys, defaultHideFn) {
+    function load() {
+      try {
+        const raw = localStorage.getItem(lsKey);
+        if (raw != null) {
+          const arr = JSON.parse(raw);
+          if (Array.isArray(arr)) return new Set(arr.filter(function(x){ return typeof x === 'string'; }));
+        }
+      } catch (_) {}
+      const def = new Set();
+      allKeys.forEach(function(k){ if (defaultHideFn(k)) def.add(k); });
+      return def;
+    }
+    function save(set) {
+      try { localStorage.setItem(lsKey, JSON.stringify(Array.from(set))); } catch (_) {}
+    }
+    return { lsKey: lsKey, allKeys: allKeys, hidden: load(), save: save };
   }
 
   function escape(s) {
@@ -498,7 +520,14 @@ const CLIENT_SCRIPT = `
           if (s.features && s.features.some(function(f){ return f.toLowerCase().includes(needle); })) return true;
           return false;
         });
-    const matched = queryFiltered.filter(function(s){ return !hidden.has(rootSegment(s.fq_path)); });
+    // 2 軸 hide を AND で適用: module が hide ∨ 所属 feature が全部 hide なら drop。
+    // 「feature が全部 hide」= 表示すべき feature が 1 つも残らない (= 全 tag が消されてる)。
+    const matched = queryFiltered.filter(function(s){
+      if (moduleAxis.hidden.has(rootSegment(s.fq_path))) return false;
+      const feats = symbolFeatures(s);
+      const visibleFeats = feats.filter(function(f){ return !featureAxis.hidden.has(f); });
+      return visibleFeats.length > 0;
+    });
     const hiddenCount = queryFiltered.length - matched.length;
 
     meta.textContent = matched.length + ' / ' + data.length + ' symbol(s)'
@@ -560,42 +589,74 @@ const CLIENT_SCRIPT = `
     }).join('');
   }
 
-  // root segment 一覧 (data 全体での出現回数つき)。chip render に使う。
-  const rootCounts = {};
-  data.forEach(function(s){
-    const r = rootSegment(s.fq_path);
-    rootCounts[r] = (rootCounts[r] || 0) + 1;
+  // 軸毎の集計: data 全体での key → 出現回数。chip render に使う。
+  function tally(keyExtractor) {
+    const counts = {};
+    data.forEach(function(s){
+      const keys = keyExtractor(s);
+      const list = Array.isArray(keys) ? keys : [keys];
+      list.forEach(function(k){
+        if (k === '' || k == null) return;
+        counts[k] = (counts[k] || 0) + 1;
+      });
+    });
+    return counts;
+  }
+  const moduleCounts = tally(function(s){ return rootSegment(s.fq_path); });
+  const featureCounts = tally(symbolFeatures);
+  const allModules = Object.keys(moduleCounts).sort();
+  const allFeatures = Object.keys(featureCounts).sort(function(a, b){
+    // (unfeatured) は末尾に固定 (= 通常 feature の検索 UX を邪魔しない)
+    if (a === UNFEATURED) return 1;
+    if (b === UNFEATURED) return -1;
+    return a.localeCompare(b);
   });
-  const allRoots = Object.keys(rootCounts).sort();
-  const hidden = loadHidden(allRoots);
 
-  function renderFilters() {
-    if (!filtersEl) return;
-    if (allRoots.length === 0) { filtersEl.innerHTML = ''; return; }
-    const chips = allRoots.map(function(r){
-      const visible = !hidden.has(r);
-      return '<button type="button" class="chip" data-root="' + escape(r) + '" aria-pressed="' + visible + '" title="' + (visible ? 'click to hide' : 'click to show') + '">'
-        + escape(r)
-        + '<span class="chip-count">' + rootCounts[r] + '</span>'
+  const moduleAxis = makeAxis('cap-catalog:hiddenModules', allModules,
+    function(k){ return /schema/i.test(k); });
+  const featureAxis = makeAxis('cap-catalog:hiddenFeatures', allFeatures,
+    function(k){ return k === UNFEATURED; });
+
+  function renderChips(el, axis, counts) {
+    if (!el) return;
+    if (axis.allKeys.length === 0) { el.innerHTML = ''; return; }
+    const chips = axis.allKeys.map(function(k){
+      const visible = !axis.hidden.has(k);
+      return '<button type="button" class="chip" data-axis="' + escape(axis.lsKey) + '" data-key="' + escape(k) + '" aria-pressed="' + visible + '" title="' + (visible ? 'click to hide' : 'click to show') + '">'
+        + escape(k)
+        + '<span class="chip-count">' + counts[k] + '</span>'
         + '</button>';
     }).join('');
-    filtersEl.innerHTML = '<span>module:</span>' + chips
-      + '<button type="button" class="chip-reset" data-action="show-all">show all</button>';
+    el.innerHTML = chips
+      + '<button type="button" class="chip-reset" data-axis="' + escape(axis.lsKey) + '" data-action="show-all">show all</button>';
+  }
+  function renderFilters() {
+    renderChips(moduleFiltersEl, moduleAxis, moduleCounts);
+    renderChips(featureFiltersEl, featureAxis, featureCounts);
   }
 
-  filtersEl && filtersEl.addEventListener('click', function(ev){
-    const t = ev.target.closest('[data-root], [data-action]');
-    if (!t) return;
-    if (t.dataset.action === 'show-all') {
-      hidden.clear();
-    } else if (t.dataset.root) {
-      const r = t.dataset.root;
-      if (hidden.has(r)) hidden.delete(r); else hidden.add(r);
-    }
-    saveHidden(hidden);
-    renderFilters();
-    render(input.value);
-  });
+  function bindAxisClick(el) {
+    if (!el) return;
+    el.addEventListener('click', function(ev){
+      const t = ev.target.closest('[data-axis]');
+      if (!t) return;
+      const axisKey = t.dataset.axis;
+      const axis = axisKey === moduleAxis.lsKey ? moduleAxis
+                 : axisKey === featureAxis.lsKey ? featureAxis : null;
+      if (!axis) return;
+      if (t.dataset.action === 'show-all') {
+        axis.hidden.clear();
+      } else if (t.dataset.key) {
+        const k = t.dataset.key;
+        if (axis.hidden.has(k)) axis.hidden.delete(k); else axis.hidden.add(k);
+      }
+      axis.save(axis.hidden);
+      renderFilters();
+      render(input.value);
+    });
+  }
+  bindAxisClick(moduleFiltersEl);
+  bindAxisClick(featureFiltersEl);
 
   input.addEventListener('input', function(){ render(input.value); });
 
@@ -647,7 +708,8 @@ export async function handleCapCatalogPage(env: Env, _ctx?: ExecutionContext): P
   <div class="controls">
     <input id="q" type="search" placeholder="fq_path / name / doc / feature で検索…" autocomplete="off">
   </div>
-  <div id="filters" class="filters"></div>
+  <div class="filters filters-row"><span class="axis-label">feature:</span><div id="feature-filters" class="filters-axis"></div></div>
+  <div class="filters filters-row"><span class="axis-label">module:</span><div id="module-filters" class="filters-axis"></div></div>
   <div id="meta" class="meta"></div>
   <div id="list"></div>
 
