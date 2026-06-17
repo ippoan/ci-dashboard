@@ -12,7 +12,15 @@
 // これを capture するため owner/name 部分を optional として match する。
 // caller が `currentRepo` を渡すと、その repo に属する ref のみ返す
 // (= 真の cross-repo ref を誤って同 repo issue として混入させない)。
-const REF_PATTERN = /(?:Refs|Related to|Part of)\s+([\w.-]+\/[\w.-]+)?#(\d+)/gi;
+//
+// 複数列挙 (`Refs #400 #411 #415` / `Refs #400, #411` 等) も全部拾う (Refs
+// #419)。旧 pattern は 1 keyword につき 1 issue しか取らず、残りが /releases
+// に出ない bug があった。keyword 検出と issue 列挙を 2 段に分解し、keyword
+// 直後の連続した `#N` token を全部 sweep する。
+const REF_KEYWORD = /(?:Refs|Related to|Part of)/gi;
+// 1 つの issue ref token: optional `<owner>/<name>` + `#<digits>`。先頭の
+// 区切り (空白 / カンマ / セミコロン / スラッシュ) を消費しながら順次 match。
+const ISSUE_TOKEN = /^[\s,;/]+([\w.-]+\/[\w.-]+)?#(\d+)/;
 
 export function extractRefIssues(
   text: string,
@@ -22,55 +30,37 @@ export function extractRefIssues(
   const out = new Set<number>();
   const wantOwner = currentRepo?.owner.toLowerCase();
   const wantName = currentRepo?.name.toLowerCase();
-  for (const m of text.matchAll(REF_PATTERN)) {
-    const crossRepo = m[1]; // optional `<owner>/<name>`
-    const num = Number(m[2]);
-    if (crossRepo) {
-      // currentRepo 未指定なら cross-repo ref は除外 (= 別 repo の issue
-      // 番号を本 repo のものと誤って混ぜないよう conservative に skip)。
-      if (!wantOwner || !wantName) continue;
-      const slash = crossRepo.indexOf("/");
-      const o = crossRepo.slice(0, slash).toLowerCase();
-      const n = crossRepo.slice(slash + 1).toLowerCase();
-      if (o !== wantOwner || n !== wantName) continue;
+  for (const km of text.matchAll(REF_KEYWORD)) {
+    const start = (km.index ?? 0) + km[0].length;
+    let tail = text.slice(start);
+    // keyword 直後の連続した issue token を順次消費する。各 iter で 1 つの
+    // `#N` を取り、それを tail から削って次の token を試す。区切りでない文字
+    // (アルファベットや別 keyword) が来たら止める。
+    while (true) {
+      const im = tail.match(ISSUE_TOKEN);
+      if (!im) break;
+      const crossRepo = im[1];
+      const num = Number(im[2]);
+      let accept = true;
+      if (crossRepo) {
+        if (!wantOwner || !wantName) {
+          accept = false;
+        } else {
+          const slash = crossRepo.indexOf("/");
+          const o = crossRepo.slice(0, slash).toLowerCase();
+          const n = crossRepo.slice(slash + 1).toLowerCase();
+          if (o !== wantOwner || n !== wantName) accept = false;
+        }
+      }
+      if (accept) out.add(num);
+      tail = tail.slice(im[0].length);
     }
-    out.add(num);
   }
   return [...out];
 }
 
-// Cross-repo refs: `Refs <owner>/<name>#N` where `<owner>/<name>` is a DIFFERENT
-// repo than `currentRepo`. extractRefIssues drops these (to avoid mixing another
-// repo's issue numbers into the current card); this returns exactly those dropped
-// refs so the /releases index can surface an issue under the repo whose PR shipped
-// the work even though the issue lives elsewhere (e.g. a cdp-relay PR carrying
-// `Refs ippoan/mcp-cf-workers#28`). Refs ippoan/ci-dashboard#292.
-export function extractCrossRepoRefs(
-  text: string,
-  currentRepo: { owner: string; name: string },
-): Array<{ owner: string; name: string; number: number }> {
-  if (!text) return [];
-  const wantOwner = currentRepo.owner.toLowerCase();
-  const wantName = currentRepo.name.toLowerCase();
-  const seen = new Set<string>();
-  const out: Array<{ owner: string; name: string; number: number }> = [];
-  for (const m of text.matchAll(REF_PATTERN)) {
-    const crossRepo = m[1]; // optional `<owner>/<name>`
-    if (!crossRepo) continue; // bare `#N` = same repo, not a cross-repo ref
-    const slash = crossRepo.indexOf("/");
-    const owner = crossRepo.slice(0, slash);
-    const name = crossRepo.slice(slash + 1);
-    if (owner.toLowerCase() === wantOwner && name.toLowerCase() === wantName) {
-      continue; // owner/name spelled out but it IS the current repo
-    }
-    const number = Number(m[2]);
-    const key = `${owner.toLowerCase()}/${name.toLowerCase()}#${number}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push({ owner, name, number });
-  }
-  return out;
-}
+// `extractCrossRepoRefs` は #292 で導入し #417 で release page から callers を
+// 全削除済。関数本体も #419 で削除 (REF_PATTERN refactor で参照が残るのを防ぐ)。
 
 // Squash-merge commits land on main with their PR number trailing the subject,
 // e.g. "feat(x): do thing (#42)". Pull that out so we can re-fetch the PR for

@@ -21,6 +21,40 @@ describe("extractRefIssues", () => {
     expect(extractRefIssues("Refs #1 and Refs #1 again")).toEqual([1]);
   });
 
+  // 旧 pattern は `Refs #400 #411 #415` のような複数列挙の **最初の 1 つ** しか
+  // 取らず、PR body の Refs が release page に欠落していた (#419 で確定)。
+  // 新 pattern は keyword 直後の連続した `#N` token を全部 sweep する。
+  describe("multi-issue enumeration after one Refs keyword (Refs #419)", () => {
+    it("picks all space-separated refs (`Refs #400 #411 #415`)", () => {
+      expect(extractRefIssues("Refs #400 #411 #415").sort((a, b) => a - b))
+        .toEqual([400, 411, 415]);
+    });
+
+    it("picks all comma-separated refs (`Refs #400, #411, #415`)", () => {
+      expect(extractRefIssues("Refs #400, #411, #415").sort((a, b) => a - b))
+        .toEqual([400, 411, 415]);
+    });
+
+    it("picks slash-separated refs (`Refs #400 / #411 / #415`)", () => {
+      expect(extractRefIssues("Refs #400 / #411 / #415").sort((a, b) => a - b))
+        .toEqual([400, 411, 415]);
+    });
+
+    it("stops the sweep at a non-issue-like token", () => {
+      // `Refs #1 #2 then some prose Refs #3` → first keyword captures #1 #2,
+      // "then" stops the sweep, second `Refs` captures #3.
+      expect(extractRefIssues("Refs #1 #2 then some prose Refs #3").sort((a, b) => a - b))
+        .toEqual([1, 2, 3]);
+    });
+
+    it("mixes cross-repo and same-repo tokens correctly", () => {
+      const msg = "Refs ippoan/auth-worker#176 #177 #178";
+      // currentRepo を ippoan/auth-worker にすれば全部拾う。
+      expect(extractRefIssues(msg, { owner: "ippoan", name: "auth-worker" }).sort((a, b) => a - b))
+        .toEqual([176, 177, 178]);
+    });
+  });
+
   it("ignores Closes / Fixes / Resolves (those would auto-close)", () => {
     // CLAUDE.md forbids these keywords; the regex must not match them so the
     // release confirmation flow stays the source of truth.
