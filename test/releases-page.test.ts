@@ -687,30 +687,27 @@ describe("GET /releases", () => {
 
   // cross-repo ref: 実装は cdp-relay (本 repo) の PR、issue は別 repo
   // (mcp-cf-workers) に居る。`Refs ippoan/mcp-cf-workers#28` を本 repo の card に
-  // surface し、close は mcp-cf-workers に対して行えるよう pair に repo を埋める。
-  // Refs ippoan/ci-dashboard#292。
-  it("surfaces a cross-repo issue on the shipping repo's card with repo-tagged pair", async () => {
+  // #292 で導入した cross-repo refs surfacing は #417 で廃止 (別 repo の release
+  // context から close できる UX が誤操作を招く)。home repo の card だけが
+  // close ボタンを持つ規約を維持する。
+  it("does not surface cross-repo refs on the shipping repo's card (Refs #417)", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (req) => {
       const url = typeof req === "string" ? req : (req as Request).url;
 
       if (url.includes("/contents/wt-direct-push/config/direct-push-ok.txt")) {
         return Response.json({ content: btoa(""), encoding: "base64" });
       }
-
-      // 本 repo (relay-repo) は tag 無し → no-sinceTag synthetic パス
       if (url.includes("/repos/ippoan/relay-repo/tags")) {
         return Response.json([]);
       }
       if (url.match(/\/repos\/ippoan\/relay-repo(\?|$)/)) {
         return Response.json({ default_branch: "main" });
       }
-      // commit は PR 番号のみ
       if (url.includes("/repos/ippoan/relay-repo/commits")) {
         return Response.json([
           { sha: "c0ffee00000000000", commit: { message: "feat: cdp-relay 初回実装 (#1)" } },
         ]);
       }
-      // PR 本文に cross-repo ref
       if (url.endsWith("/repos/ippoan/relay-repo/pulls/1")) {
         return Response.json({
           number: 1,
@@ -718,16 +715,10 @@ describe("GET /releases", () => {
           body: "初回実装。\n\nRefs ippoan/mcp-cf-workers#28\n",
         });
       }
-      // cross-repo issue を home repo から hydrate
+      // cross-repo issue は hydrate しに来てはいけない (= drop されている)。
       if (url.endsWith("/repos/ippoan/mcp-cf-workers/issues/28")) {
-        return Response.json({
-          number: 28, title: "[引継ぎ] cdp-relay 設計", state: "open",
-          labels: [], assignees: [],
-          html_url: "https://github.com/ippoan/mcp-cf-workers/issues/28",
-          updated_at: "2026-06-05T00:19:48Z",
-        });
+        throw new Error("unexpected fetch: cross-repo issue should be dropped");
       }
-
       return new Response(`not stubbed: ${url}`, { status: 500 });
     });
 
@@ -740,12 +731,9 @@ describe("GET /releases", () => {
     expect(res.status).toBe(200);
     const html = await res.text();
 
-    // cross-repo issue が relay-repo の card に出る
-    expect(html).toContain("ippoan/mcp-cf-workers#28");
-    expect(html).toContain("[引継ぎ] cdp-relay 設計");
-    expect(html).toContain("cross-repo");
-    // checkbox の pair が home repo を埋め込んでいる (close が mcp-cf-workers を叩く)
-    expect(html).toContain("main@c0ffee0:ippoan/mcp-cf-workers#28");
+    // cross-repo の痕跡が出ない (#417)。
+    expect(html).not.toContain("mcp-cf-workers#28");
+    expect(html).not.toContain("cross-repo");
   });
 
   // archived repo は GitHub API で issue close ができない (403 read-only) ため、
@@ -906,10 +894,10 @@ describe("GET /releases", () => {
     expect(html).not.toContain("#999");
   });
 
-  // cross-repo scope filter (Refs #400): home repo が MAIN_ORGS + YHONDA_REPOS
-  // の scope 外 (archived / 削除 / 別 owner) なら cross-repo ref を drop する。
-  // close を試みても home 側に権限 / 存在が無く 403/404 で必ず失敗するため。
-  it("drops cross-repo refs whose home repo is outside MAIN_ORGS + YHONDA_REPOS", async () => {
+  // #400 で入れた cross-repo scope filter (MAIN_ORGS + YHONDA_REPOS 外を drop)
+  // は #417 の「cross-repo refs を一律 drop」によって全包含される。in-scope か
+  // どうかに関わらず cross-repo refs は hydrate されないことを確認する。
+  it("does not hydrate cross-repo refs regardless of home repo scope (Refs #417)", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (req) => {
       const url = typeof req === "string" ? req : (req as Request).url;
 
@@ -922,9 +910,6 @@ describe("GET /releases", () => {
       if (url.includes("/repos/ippoan/shipping-repo/tags")) {
         return Response.json([]);
       }
-      // PR #1 の body に 2 種類の cross-repo ref:
-      //   - ippoan/in-scope-repo#10 (ippoan org 内 → keep)
-      //   - random-org/out-of-scope-repo#99 (scope 外 → drop)
       if (url.includes("/repos/ippoan/shipping-repo/commits")) {
         return Response.json([
           { sha: "abc1234", commit: { message: "feat: ship things (#1)" } },
@@ -937,18 +922,12 @@ describe("GET /releases", () => {
           body: "Refs ippoan/in-scope-repo#10\nRefs random-org/out-of-scope-repo#99",
         });
       }
-      // in-scope cross-repo issue は hydrate される
+      // in-scope / out-of-scope どちらも hydrate しに来てはいけない (= drop)。
       if (url.endsWith("/repos/ippoan/in-scope-repo/issues/10")) {
-        return Response.json({
-          number: 10, title: "in-scope issue", state: "open",
-          labels: [], assignees: [],
-          html_url: "https://github.com/ippoan/in-scope-repo/issues/10",
-          updated_at: "2026-06-10T00:00:00Z",
-        });
+        throw new Error("unexpected fetch: cross-repo (in-scope) should be dropped");
       }
-      // out-of-scope は filter で drop されるので fetch しに来てはいけない
       if (url.includes("random-org/out-of-scope-repo")) {
-        throw new Error("unexpected fetch: scope filter let out-of-scope ref through");
+        throw new Error("unexpected fetch: cross-repo (out-of-scope) should be dropped");
       }
       return new Response(`not stubbed: ${url}`, { status: 500 });
     });
@@ -961,7 +940,7 @@ describe("GET /releases", () => {
 
     expect(res.status).toBe(200);
     const html = await res.text();
-    expect(html).toContain("in-scope issue");
+    expect(html).not.toContain("in-scope-repo#10");
     expect(html).not.toContain("out-of-scope-repo");
   });
 });

@@ -2,7 +2,6 @@ import { parseRepo, tokenForOrg, GitHubApiError } from "./github-api";
 import type { AuthClientWorkerEnv } from "@ippoan/auth-client-worker";
 import {
   extractRefIssues,
-  extractCrossRepoRefs,
   extractPrNumber,
   extractBranchIssue,
   sortSemverDesc,
@@ -545,19 +544,12 @@ async function loadSyntheticBlock(
 
   const repoCtx = { owner, name };
   const refs = new Set<number>();
-  // Cross-repo refs (`Refs <otherOwner>/<otherName>#N`): the issue lives in a
-  // different repo but the work shipped via THIS repo's PR/commit. extractRefIssues
-  // drops them; we collect them separately and surface them on this card, closable
-  // against their home repo. Keyed by `owner/name#n` for dedupe. Refs #292.
-  const crossRefs = new Map<string, { owner: string; name: string; number: number }>();
-  const addCross = (text: string) => {
-    for (const x of extractCrossRepoRefs(text, repoCtx)) {
-      crossRefs.set(`${x.owner.toLowerCase()}/${x.name.toLowerCase()}#${x.number}`, x);
-    }
-  };
+  // 以前 (#292) は cross-repo refs (`Refs <otherOwner>/<otherName>#N`) を集めて
+  // 同じ card に並べていたが、別 repo の release context から close できる UX が
+  // 誤操作を招くため #417 で **同 repo refs のみ surface** に変更。cross-repo
+  // dependency は home repo 自身の card で確認する。
   for (const c of commits) {
     for (const n of extractRefIssues(c.commit.message, repoCtx)) refs.add(n);
-    addCross(c.commit.message);
   }
 
   // PR follow-up pass. A squash-merge subject keeps only the `(#PR)` suffix and
@@ -592,32 +584,10 @@ async function loadSyntheticBlock(
       if (fromBranch !== null) refs.add(fromBranch);
       if (pr.body) {
         for (const ref of extractRefIssues(pr.body, repoCtx)) refs.add(ref);
-        // Cross-repo refs most often live in the PR body (squash drops them from
-        // the merge subject) — e.g. cdp-relay PRs carrying
-        // `Refs ippoan/mcp-cf-workers#28`. Collect them here too. Refs #292.
-        addCross(pr.body);
+        // #292 で cross-repo refs を PR body から拾っていたが #417 で廃止。
       }
     } catch { /* ignore per-PR failure — best-effort enrichment */ }
   }));
-
-  // scope filter (Refs #400): cross-repo refs の home repo が `/issues` page の
-  // scope (MAIN_ORGS + YHONDA_REPOS) に含まれない場合は drop する。scope 外 repo
-  // (archived / renamed / 別 owner) は home 側に close 権限が無く、operator が
-  // close を試みても 403/404 で失敗する。/issues page でも追跡されない issue を
-  // shipping repo の card に残す価値が無いため除外。同 repo refs (`refs` Set) は
-  // 影響しない (常に owner/name = card の repo = 暗黙に scope 内)。
-  const mainOrgsLower = MAIN_ORGS.map((o) => o.toLowerCase());
-  const yhondaReposLower = YHONDA_REPOS.map((r) => r.toLowerCase());
-  for (const [key, x] of [...crossRefs]) {
-    const ownerLower = x.owner.toLowerCase();
-    const repoLower = `${ownerLower}/${x.name.toLowerCase()}`;
-    if (
-      !mainOrgsLower.includes(ownerLower) &&
-      !yhondaReposLower.includes(repoLower)
-    ) {
-      crossRefs.delete(key);
-    }
-  }
 
   // pr-map gate (Refs #400): `Refs #N` を含む commit/PR は集めたが、その issue
   // を実際に解決する `state:"merged"` な PR が無いものは close 候補から落とす。
@@ -635,49 +605,20 @@ async function loadSyntheticBlock(
     for (const n of [...refs]) {
       if (!hasMergedPr(sameRepoOwnerRepo, n)) refs.delete(n);
     }
-    for (const [key, x] of [...crossRefs]) {
-      if (!hasMergedPr(`${x.owner}/${x.name}`, x.number)) crossRefs.delete(key);
-    }
   }
 
-  // Hydrate cross-repo issues from their home repo (own token + cache), capped
-  // like the PR pass. Built into rows tagged with `repo` so render + close target
-  // the right repo. Refs #292.
-  const crossRows: IssueRow[] = [];
-  await Promise.all([...crossRefs.values()].slice(0, MAX_PR_FOLLOWUP).map(async (x) => {
-    try {
-      const xToken = await tokenForOrg(env, x.owner);
-      const issue = await cachedIssue(xToken, kv, x.owner, x.name, x.number);
-      if (issue.pull_request) return; // a PR, not an issue
-      const labels = issue.labels.map((l) => l.name);
-      crossRows.push({
-        number: issue.number,
-        title: issue.title,
-        state: issue.state,
-        labels,
-        assignees: issue.assignees.map((a) => a.login),
-        url: issue.html_url,
-        updated_at: issue.updated_at,
-        warnings: computeWarnings({ state: issue.state, labels }),
-        repo: `${x.owner}/${x.name}`,
-      });
-    } catch { /* ignore per-issue failure — best-effort cross-repo enrichment */ }
-  }));
-
-  if (refs.size === 0 && crossRows.length === 0) {
+  if (refs.size === 0) {
     // No referenced issues in the recent window — nothing to confirm. Skipping
     // the block (vs. returning an empty one) keeps the repo off the landing
     // page entirely, matching the tag path's behavior.
     return null;
   }
 
-  const issues = refs.size > 0
-    ? await fetchIssuesByNumbers(token, owner, name, refs, kv)
-    : [];
+  const issues = await fetchIssuesByNumbers(token, owner, name, refs, kv);
   // Keep both open and closed referenced issues (was open-only): a tag-less /
   // direct-push repo whose refs are all closed should still surface its card
   // with the closed history collapsed into a <details>. Refs #224.
-  const sameRepoRows: IssueRow[] = issues
+  const rows: IssueRow[] = issues
     .filter((i) => !i.pull_request)
     .map((i) => {
       const labels = i.labels.map((l) => l.name);
@@ -693,11 +634,6 @@ async function loadSyntheticBlock(
       };
     })
     .sort((a, b) => a.number - b.number);
-
-  // Same-repo rows first (by number), then cross-repo rows (by repo, then number)
-  // so a card reads "own issues, then issues this release closed elsewhere".
-  crossRows.sort((a, b) => a.repo!.localeCompare(b.repo!) || a.number - b.number);
-  const rows = [...sameRepoRows, ...crossRows];
 
   if (rows.length === 0) return null;
 
@@ -1031,6 +967,9 @@ const FLASH_CLEANUP_SCRIPT = `<script>
     // restoration が無効化されて結局 top に飛ぶ。form POST → GET redirect は
     // 新規 navigation 扱いなので scrollRestoration の影響を受けず、
     // save/restore script だけで足りる。
+    // toast の開始時刻を sessionStorage に記録 (#417)。直後の WS auto-reload は
+    // この marker を見て CSS animation の終わりまで postpone される。
+    sessionStorage.setItem("releases-toast-startat", String(Date.now()));
   } catch { /* URL/History API 非対応環境では従来挙動のまま */ }
 })();
 </script>`;
@@ -1187,8 +1126,31 @@ const RELEASES_LIVE_RELOAD_SCRIPT = `
     (() => {
       let pending = false;
       let timer = null;
+      // toast が表示中なら reload を postpone する (#417)。CSS animation 6s で
+      // 自然消滅 するまで reload を待たせ、close 操作の確認 UI を毎回 ~1.5s で
+      // 食い殺される不安定さを解消する。toast の開始時刻は close 直後の form
+      // POST→GET landing で renderFlash が sessionStorage に書き込む。
+      const TOAST_DURATION_MS = 6000;
+      const TOAST_GRACE_MS = 500;
       const doReload = () => {
         if (document.visibilityState !== "visible") { pending = true; return; }
+        try {
+          const raw = sessionStorage.getItem("releases-toast-startat");
+          if (raw !== null) {
+            const startAt = parseInt(raw, 10);
+            if (Number.isFinite(startAt)) {
+              const elapsed = Date.now() - startAt;
+              const remaining = TOAST_DURATION_MS + TOAST_GRACE_MS - elapsed;
+              if (remaining > 0) {
+                if (timer) clearTimeout(timer);
+                timer = setTimeout(doReload, remaining);
+                return;
+              }
+              // 終了済 → marker を消して reload に進む。
+              sessionStorage.removeItem("releases-toast-startat");
+            }
+          }
+        } catch {}
         // close 押下直後の reload で scroll が top に飛ばないよう、現在の
         // scrollY を保存してから reload する。次の load で
         // RELEASES_SCROLL_RESTORE_SCRIPT が同 key を読んで復元する (#415)。
