@@ -328,6 +328,22 @@ const PAGE_STYLES = `
   }
   .sidebar-item .badge-sym { background: #21262d; color: #d29922; }
   .sidebar-item .badge-feat { background: #1f2d3d; color: #79c0ff; }
+  .sidebar-feats {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+    margin-top: 4px;
+  }
+  .sidebar-feats .feat {
+    background: #1f2d3d;
+    color: #79c0ff;
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 8px;
+    font-family: ui-monospace, SFMono-Regular, monospace;
+    cursor: pointer;
+  }
+  .sidebar-feats .feat:hover { background: #2a3f5a; }
   .filters .chip-reset {
     background: transparent;
     color: #58a6ff;
@@ -915,9 +931,19 @@ const CLIENT_SCRIPT = `
           + '<div class="repo"><span class="badge badge-sym">symbol</span></div>'
           + '</div>';
       }
+      // sidebar entry にも feature tag を出す (= sidebar から「この symbol は
+      // 何の能力か」一目で分かる)。tag を click で「その feature を持つ最初の
+      // card に jump」できるようにすると、symbol ↔ feature の関連 navigation が
+      // sidebar 内で完結する (Refs ippoan/cap-catalog#1)。
+      const feats = (s.features || []).length
+        ? '<div class="sidebar-feats">' + (s.features || []).map(function(f){
+            return '<span class="feat" data-jump-feat="' + escape(f) + '" title="この feature を持つ最初の card へ scroll">' + escape(f) + '</span>';
+          }).join('') + '</div>'
+        : '';
       return '<div class="sidebar-item">'
         + '<div class="row"><span class="name" data-jump-key="' + escape(k) + '" title="main list へ scroll">' + escape(s.name) + '</span>' + controls + '</div>'
         + '<div class="repo"><span class="badge badge-sym">' + escape(s.kind) + '</span> ' + escape(s.repo) + '</div>'
+        + feats
         + '</div>';
     }).join('');
     sidebarEl.innerHTML = '<h3>★ Favorites <span class="count">(' + favorites.length + ')</span></h3>' + items;
