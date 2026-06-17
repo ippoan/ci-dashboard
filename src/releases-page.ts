@@ -1264,6 +1264,9 @@ function renderIndexRepo(view: RepoView, updating = false): string {
   // <details>. The repo stays on the roster (#224) but reads as one row:
   // either a deduped closed-issue count ("released") or a no-refs note.
   // No <form> / table / older-tags strip — the point is one line. Refs #226.
+  const refreshHref = `/admin/force-refresh-releases?repo=${encodeURIComponent(view.repo)}`;
+  const refreshLink = `<a class="repo-refresh" href="${refreshHref}" target="_blank" rel="noopener" title="この repo の view を即時再計算 (loadRepoView)">🔄</a>`;
+
   if (openBlocks.length === 0) {
     const closed = new Set<number>();
     for (const b of view.tagBlocks) {
@@ -1276,6 +1279,7 @@ function renderIndexRepo(view: RepoView, updating = false): string {
       <a class="repo-link" href="https://github.com/${escapeHtml(view.repo)}/releases" target="_blank" rel="noopener">${escapeHtml(view.repo)}</a>
       ${renderModeBadge(view.tagless)}${updatingBadge}
       ${summary}
+      ${refreshLink}
     </section>`;
   }
 
@@ -1301,11 +1305,8 @@ function renderIndexRepo(view: RepoView, updating = false): string {
   // Whole repo card is one form so the operator can tick across tags and
   // close them in one shot; the POST handler groups by tag for comment
   // attribution.
-  // per-repo force-refresh link (Refs #421)。/admin/force-refresh-releases?repo=
-  // を新タブで開き、その repo の view だけ即時 recompute する (~3-15s)。
-  const refreshHref = `/admin/force-refresh-releases?repo=${encodeURIComponent(view.repo)}`;
   return `<section class="repo-card">
-    <h2><a href="https://github.com/${escapeHtml(view.repo)}/releases" target="_blank" rel="noopener">${escapeHtml(view.repo)}</a>${renderModeBadge(view.tagless)}${updatingBadge}<a class="repo-refresh" href="${refreshHref}" target="_blank" rel="noopener" title="この repo の view を即時再計算 (loadRepoView)">🔄</a></h2>
+    <h2><a href="https://github.com/${escapeHtml(view.repo)}/releases" target="_blank" rel="noopener">${escapeHtml(view.repo)}</a>${renderModeBadge(view.tagless)}${updatingBadge}${refreshLink}</h2>
     <form method="POST" action="/api/release-close-batch" class="batch-close-form">
       <input type="hidden" name="repo" value="${escapeHtml(view.repo)}">
       ${tagSections}
