@@ -201,17 +201,22 @@ describe("GET /cap-catalog", () => {
     expect(body).toContain('id="list"');
   });
 
-  it("ships a module-filter container + localStorage key + reset button (wire contract)", async () => {
-    // user 指示: schema vs cap で filter したい / localStorage で記憶 / schema 系は基本不要。
-    // ここで gate するのは **DOM contract + 保存 key** だけ (= 関数名や正規表現を
-    // 文字列マッチする「コメント頼み」テストは脆いので入れない。client JS の挙動
-    // 自体は別途 happy-dom / playwright で gate する方向、Refs ippoan/cap-catalog#1 の
-    // doc-comment gate plan)。
+  it("ships dual-axis (feature + module) filter containers + localStorage keys + reset (wire contract)", async () => {
+    // 想定運用: 「どの feature を拡張するか」「どの module を変更するか」両軸で
+    // navigation する (Refs ippoan/cap-catalog#1)。container と保存 key を gate。
+    // client JS の関数名 / 正規表現を文字列マッチする「コメント頼み」テストは
+    // 入れない (= 脆さの予防、ippoan/cap-catalog#24 で doc-comment / behavior gate
+    // の本流 plan あり)。
     const { body } = await fetchPage();
-    expect(body).toContain('id="filters"');
-    // localStorage key (= UI と他 consumer の合意点なので contract として固定)
+    // 2 軸 container (= DOM contract)
+    expect(body).toContain('id="feature-filters"');
+    expect(body).toContain('id="module-filters"');
+    // 軸毎の localStorage key (= UI と他 consumer 間の合意点として固定)
+    expect(body).toContain("'cap-catalog:hiddenFeatures'");
     expect(body).toContain("'cap-catalog:hiddenModules'");
-    // show-all reset ボタンは UI affordance として固定 (= chip 押し過ぎ救済用)
+    // feature 0 件 symbol を集める専用 sentinel (= annotation 漏れ可視化、#24 と連動)
+    expect(body).toContain("'(unfeatured)'");
+    // 軸毎に show-all reset ボタン (= chip 押し過ぎ救済用 affordance)
     expect(body).toContain('data-action="show-all"');
   });
 });
