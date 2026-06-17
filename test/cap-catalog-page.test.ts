@@ -129,6 +129,37 @@ describe("GET /cap-catalog", () => {
     expect(body).toContain('"features":["auth-fetch"]');
   });
 
+  it("escapes `<` in embedded JSON to prevent </script> break-out (XSS gate)", async () => {
+    // Rust doc-comment 等に意図せず `</script>` / `<!--` / `<img>` が
+    // 混入していても、HTML tokenizer に script close tag と認識されない
+    // こと (= `<` → `<` の escape を gate)。
+    const jsonl = JSON.stringify({
+      repo: "ippoan/x",
+      language: "rust",
+      kind: "fn",
+      name: "evil",
+      fq_path: "x::evil",
+      doc: "</script><img src=x onerror=alert(1)><!-- foo",
+    });
+    const r2 = makeR2({
+      "v1/latest.jsonl": { body: jsonl },
+    });
+    const { body } = await fetchPage({ CAP_CATALOG_R2: r2 });
+    // 攻撃文字列の raw `<img` / raw `<!--` は body 内に literally 出ない
+    // (= HTML tokenizer から見えない)。
+    expect(body).not.toContain("<img src=x onerror=");
+    expect(body).not.toContain("<!-- foo");
+    // doc から発生した raw `</script>` は body 中に出ない (page 自身の
+    // closing tag は別物。攻撃 doc 由来の raw が無ければ XSS は不可)。
+    expect(body).not.toContain("</script><img");
+    // escaped 形が JSON literal 内に存在する (= client `JSON.parse` で
+    // `<` に正しく戻る)。`>` は escape 不要 (= HTML tokenizer は `<` を
+    // 見ないと tag を start しない)。
+    expect(body).toContain("\\u003c/script>");
+    expect(body).toContain("\\u003cimg src=x");
+    expect(body).toContain("\\u003c!-- foo");
+  });
+
   it("falls back when JSONL has only invalid rows", async () => {
     // 必須 field (repo) 欠落 + invalid JSON の混合 → 0 valid rows → sample fallback
     const jsonl = ["not json at all", JSON.stringify({ name: "x" })].join("\n");
