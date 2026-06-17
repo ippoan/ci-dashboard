@@ -218,6 +218,20 @@ const PAGE_STYLES = `
     font-size: 13px;
     font-weight: 600;
   }
+  .sym a.fq-link {
+    text-decoration: none;
+    color: inherit;
+    border-bottom: 1px dotted #6e7681;
+  }
+  .sym a.fq-link:hover {
+    color: #58a6ff;
+    border-bottom-color: #58a6ff;
+  }
+  .sym a.fq-link:hover::after {
+    content: ' ↗';
+    font-weight: 400;
+    color: #58a6ff;
+  }
   .sym .file {
     font-size: 11px;
     color: #6e7681;
@@ -446,10 +460,14 @@ const CLIENT_SCRIPT = `
         const feats = s.features && s.features.length
           ? '<div class="features">' + s.features.map(function(f){ return '<span class="feat">' + highlight(f, needle) + '</span>'; }).join('') + '</div>'
           : '';
+        const fqInner = highlight(s.fq_path, needle);
+        const fqHtml = ghLink
+          ? '<a href="' + escape(ghLink) + '" class="fq-link" target="_blank" rel="noopener" title="Open ' + escape(s.fq_path) + ' on GitHub">' + fqInner + '</a>'
+          : fqInner;
         return '<div class="sym">'
           + '<div class="header">'
           +   '<span class="kind">' + escape(s.kind) + '</span>'
-          +   '<span class="fq">' + highlight(s.fq_path, needle) + '</span>'
+          +   '<span class="fq">' + fqHtml + '</span>'
           +   fileBit
           + '</div>'
           + sig + doc + feats
