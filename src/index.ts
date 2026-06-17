@@ -16,6 +16,7 @@ import { handleReleaseCloseBatch } from "./release-close-batch";
 import { handleRecheck, recheckRun } from "./recheck";
 import { handleSecretGenPage } from "./secret-gen-page";
 import { handleCapCatalogPage } from "./cap-catalog-page";
+import { handleFavoritesGet, handleFavoritesPut } from "./cap-catalog-favorites";
 import { handleLaunch } from "./launch";
 import { handleTagRelease } from "./tag-release";
 import {
@@ -199,6 +200,10 @@ app.get("/projects", (c) => handleProjectsPage(c.env));
 // secret put / GitHub Actions secrets.
 app.get("/secret-gen", () => handleSecretGenPage());
 app.get("/cap-catalog", (c) => handleCapCatalogPage(c.env, c.executionCtx));
+// お気に入り server-side 永続 (CF Access email で per-user)。未認証は 401 で
+// client は localStorage fallback。Refs ippoan/cap-catalog#1。
+app.get("/api/cap-catalog/favorites", (c) => handleFavoritesGet(c.req.raw, c.env));
+app.put("/api/cap-catalog/favorites", (c) => handleFavoritesPut(c.req.raw, c.env));
 
 // Launch redirect for the open-multirepo skill. Stateless: reconstructs the
 // long claude.ai/code URL from a compact `?i=<issue>` query and 302s to it, so
