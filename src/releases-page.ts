@@ -1013,11 +1013,11 @@ function renderRow(r: IssueRow): string {
 // (Refs #411 / #413)。close form の submit 直前に scrollY を sessionStorage に
 // 保存し、landing 時に `?closed=` フラッシュ params があれば復元する。
 //
-// FLASH_CLEANUP_SCRIPT は `${flash}` 直後 (= cards より前) で URL cleanup と
-// `scrollRestoration: "manual"` だけを早期実行する。実際の scroll restore は
-// 全 card render 完了後 (body 末尾) でないと document height が足りず top に
-// 丸められる (#412 でこれを踏んだ) ため、別 script (RELEASES_SCROLL_RESTORE_SCRIPT)
-// に切り出し body 最後で `requestAnimationFrame` 経由で実行する。
+// FLASH_CLEANUP_SCRIPT は `${flash}` 直後 (= cards より前) で URL cleanup
+// だけを早期実行する。実際の scroll restore は全 card render 完了後 (body
+// 末尾) でないと document height が足りず top に丸められる (#412 でこれを
+// 踏んだ) ため、別 script (RELEASES_SCROLL_RESTORE_SCRIPT) に切り出し body
+// 最後で `requestAnimationFrame` 経由で実行する。
 const FLASH_CLEANUP_SCRIPT = `<script>
 (() => {
   try {
@@ -1026,9 +1026,11 @@ const FLASH_CLEANUP_SCRIPT = `<script>
     if (!u.searchParams.get("tag")) u.searchParams.delete("repo");
     const qs = u.searchParams.toString();
     history.replaceState(null, "", u.pathname + (qs ? "?" + qs : ""));
-    // browser native の scroll restoration が auto だと history navigation で
-    // top に飛んでから restore が上書きされる。manual に倒して top jump を抑止。
-    if ("scrollRestoration" in history) history.scrollRestoration = "manual";
+    // 注: scrollRestoration は **触らない** (#415)。"manual" に倒すと
+    // location.reload() (WS auto-reload) で browser native の scroll
+    // restoration が無効化されて結局 top に飛ぶ。form POST → GET redirect は
+    // 新規 navigation 扱いなので scrollRestoration の影響を受けず、
+    // save/restore script だけで足りる。
   } catch { /* URL/History API 非対応環境では従来挙動のまま */ }
 })();
 </script>`;
@@ -1187,6 +1189,10 @@ const RELEASES_LIVE_RELOAD_SCRIPT = `
       let timer = null;
       const doReload = () => {
         if (document.visibilityState !== "visible") { pending = true; return; }
+        // close 押下直後の reload で scroll が top に飛ばないよう、現在の
+        // scrollY を保存してから reload する。次の load で
+        // RELEASES_SCROLL_RESTORE_SCRIPT が同 key を読んで復元する (#415)。
+        try { sessionStorage.setItem("releases-scroll", String(window.scrollY)); } catch {}
         location.reload();
       };
       document.addEventListener("visibilitychange", () => {
