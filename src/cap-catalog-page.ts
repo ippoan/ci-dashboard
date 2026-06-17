@@ -252,6 +252,14 @@ const PAGE_STYLES = `
     border-radius: 8px;
     font-family: ui-monospace, SFMono-Regular, monospace;
   }
+  /* 検索 query と一致する部分の highlight。dark theme に合わせて琥珀色。 */
+  mark.hit {
+    background: #ffd33d;
+    color: #0d1117;
+    padding: 0 1px;
+    border-radius: 2px;
+    font-weight: 600;
+  }
   .empty {
     text-align: center;
     color: #6e7681;
@@ -367,6 +375,20 @@ const CLIENT_SCRIPT = `
       .replaceAll('"','&quot;').replaceAll("'", '&#39;');
   }
 
+  // 検索 query (= needle) と一致する substring を <mark> で囲んで返す。
+  // 1. raw → escape() で HTML 化
+  // 2. needle も同じく escape (= DOM 上で実際に出る形と合致)
+  // 3. 正規表現特殊文字を backslash escape
+  // 4. case-insensitive 置換、マッチ箇所は <mark class="hit">…</mark>
+  // needle が空なら escape() のみ (= 通常表示)。
+  function highlight(raw, needle) {
+    const safe = escape(raw);
+    if (!needle) return safe;
+    const needleEsc = escape(needle);
+    const reSafe = needleEsc.replace(/[.*+?^\${}()|[\\]\\\\]/g, '\\\\$&');
+    return safe.replace(new RegExp(reSafe, 'gi'), function(m){ return '<mark class="hit">' + m + '</mark>'; });
+  }
+
   function buildGitHubLink(repo, file, line) {
     if (!repo || !file) return '';
     const path = encodeURI(file);
@@ -420,14 +442,14 @@ const CLIENT_SCRIPT = `
             docLineRaw = lines[0];
           }
         }
-        const doc = docLineRaw ? '<div class="doc">' + escape(docLineRaw) + '</div>' : '';
+        const doc = docLineRaw ? '<div class="doc">' + highlight(docLineRaw, needle) + '</div>' : '';
         const feats = s.features && s.features.length
-          ? '<div class="features">' + s.features.map(function(f){ return '<span class="feat">' + escape(f) + '</span>'; }).join('') + '</div>'
+          ? '<div class="features">' + s.features.map(function(f){ return '<span class="feat">' + highlight(f, needle) + '</span>'; }).join('') + '</div>'
           : '';
         return '<div class="sym">'
           + '<div class="header">'
           +   '<span class="kind">' + escape(s.kind) + '</span>'
-          +   '<span class="fq">' + escape(s.fq_path) + '</span>'
+          +   '<span class="fq">' + highlight(s.fq_path, needle) + '</span>'
           +   fileBit
           + '</div>'
           + sig + doc + feats

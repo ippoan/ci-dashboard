@@ -171,6 +171,18 @@ describe("GET /cap-catalog", () => {
     expect(body).toContain("0 valid rows");
   });
 
+  it("ships a `highlight()` client helper + `mark.hit` style for query matching", async () => {
+    // CSS rule + JS helper の存在を gate (client-side 動的 highlight は SSR
+    // テストでは run できないが、HTML に embedded されているコードのシェイプは固定)。
+    const { body } = await fetchPage();
+    expect(body).toContain("mark.hit");
+    expect(body).toContain("function highlight(raw, needle)");
+    expect(body).toContain("<mark class=\"hit\">");
+    // raw is escape()'d, then needle is regex-applied — XSS safe (= needle が
+    // どんな regex meta char を含んでも injection は不可、escape() が先に走る)
+    expect(body).toContain("const needleEsc = escape(needle);");
+  });
+
   it("includes search input + result list containers", async () => {
     const { body } = await fetchPage();
     expect(body).toMatch(/<input[^>]+id="q"[^>]+type="search"/);
