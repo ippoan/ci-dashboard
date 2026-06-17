@@ -3,6 +3,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import worker from "../src/index";
 import type { Env } from "../src/index";
 import { clearReleaseCache } from "../src/release-cache";
+import { PR_MAP_CACHE_KEY } from "../src/pr-map-cache";
 
 // `watched` populates the Hub `/statuses` response so the no-params index
 // page can enumerate repos. Defaults to empty so existing tests keep their
@@ -117,6 +118,7 @@ describe("GET /releases", () => {
     // /releases index の SWR blob (Refs #325) もテスト間で leak しないよう flush。
     await env.CI_STATUS.delete("releases:index:v1");
     await env.CI_STATUS.delete("releases:index:refreshing");
+    await env.CI_STATUS.delete(PR_MAP_CACHE_KEY);
   });
 
   it("renders the empty-state landing page when nothing is watched yet", async () => {
@@ -810,6 +812,80 @@ describe("GET /releases", () => {
     expect(html).not.toContain("direct push");
     expect(html).not.toMatch(/name="pair"/);
   });
+
+  // pr-map gate (Refs #400): `Refs #N` を commit message から拾えても、
+  // その issue を解決する `state:"merged"` PR が pr-map に無ければ close 候補
+  // から外す。tag-release commit / direct-push commit が「PR 不在の checked
+  // 候補」として並ぶ bug の修正。
+  it("drops `Refs #N` whose issue has no merged PR in the pr-map", async () => {
+    // pr-map cache を seed: #555 だけ merged PR (#42) が紐付き、#999 は無し。
+    await env.CI_STATUS.put(
+      PR_MAP_CACHE_KEY,
+      JSON.stringify({
+        storedAt: Date.now(),
+        data: {
+          "ippoan/gated-repo#555": [{
+            repo: "ippoan/gated-repo",
+            number: 42,
+            title: "feat: thing",
+            url: "https://github.com/ippoan/gated-repo/pull/42",
+            draft: false,
+            updated_at: "2026-06-10T00:00:00Z",
+            state: "merged",
+          }],
+        },
+      }),
+    );
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (req) => {
+      const url = typeof req === "string" ? req : (req as Request).url;
+
+      if (url.includes("/contents/wt-direct-push/config/direct-push-ok.txt")) {
+        return Response.json({ content: btoa(""), encoding: "base64" });
+      }
+
+      if (url.match(/\/repos\/ippoan\/gated-repo(\?|$)/)) {
+        return Response.json({ default_branch: "main" });
+      }
+      if (url.includes("/repos/ippoan/gated-repo/tags")) {
+        return Response.json([]);
+      }
+      // 直 push commit 2 本 (どちらも `Refs #N` 持ち、PR 経由ではない):
+      //   - #555 → pr-map に merged PR が居る (keep)
+      //   - #999 → pr-map に存在しない (drop)
+      if (url.includes("/repos/ippoan/gated-repo/commits")) {
+        return Response.json([
+          { sha: "1111111", commit: { message: "chore: tag-release v1\n\nRefs #999" } },
+          { sha: "2222222", commit: { message: "feat: ship thing\n\nRefs #555" } },
+        ]);
+      }
+      // #555 だけ hydrate される想定 (#999 は drop されているので fetch 不要)
+      if (url.endsWith("/repos/ippoan/gated-repo/issues/555")) {
+        return Response.json({
+          number: 555, title: "kept issue", state: "open",
+          labels: [], assignees: [],
+          html_url: "https://github.com/ippoan/gated-repo/issues/555",
+          updated_at: "2026-06-10T00:00:00Z",
+        });
+      }
+      // #999 を fetch しに来たら test fail (filter 漏れ)
+      if (url.endsWith("/repos/ippoan/gated-repo/issues/999")) {
+        throw new Error("unexpected fetch: pr-map gate let #999 through");
+      }
+      return new Response(`not stubbed: ${url}`, { status: 500 });
+    });
+
+    const e = testEnv({ tagless: ["ippoan/gated-repo"] });
+    const req = new Request("http://localhost/releases");
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(req, e, ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain("kept issue");
+    expect(html).not.toContain("#999");
+  });
 });
 
 // ───── /releases index SWR blob (Refs #325) ─────
@@ -820,6 +896,7 @@ describe("GET /releases — index SWR blob (Refs #325)", () => {
     await env.CI_STATUS.delete("direct-push-allowlist:v1");
     await env.CI_STATUS.delete("releases:index:v1");
     await env.CI_STATUS.delete("releases:index:refreshing");
+    await env.CI_STATUS.delete(PR_MAP_CACHE_KEY);
   });
 
   function seedIndexBlob(storedAt: number, views: unknown[]): Promise<void> {
@@ -941,6 +1018,7 @@ describe("GET /releases — 更新中バッジ + live reload (Refs #327)", () =>
     await env.CI_STATUS.delete("direct-push-allowlist:v1");
     await env.CI_STATUS.delete("releases:index:v1");
     await env.CI_STATUS.delete("releases:index:refreshing");
+    await env.CI_STATUS.delete(PR_MAP_CACHE_KEY);
   });
 
   const view = (repo: string) => ({
