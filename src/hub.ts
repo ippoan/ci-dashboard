@@ -16,6 +16,15 @@ import {
 } from "./releases-index-patch";
 import type { IssueWebhookPayload } from "./issue-cache";
 
+// shape refresh の結果型 (ci-shape-refresh.ts と同形だが、循環 import を避けるため
+// 本ファイル内に再宣言する)。
+export interface ShapeRefreshResult {
+  scanned: number;
+  ok: number;
+  failed: number;
+  errors: string[];
+}
+
 // WebSocket message envelope. All broadcasts now share `{ type, data }` so
 // the dashboard JS can dispatch by type. Two channels currently:
 //   - "ci-statuses"     → CIStatus[] (workflow run grid)
@@ -45,6 +54,16 @@ export const HUB_STALE_IN_PROGRESS_MS = 60 * 60 * 1000;
 // net として、CIDashboardHub DO が自前で 10 分毎に in-memory cache を walk し、
 // stale な in_progress run を recheck する。
 export const STALE_RECHECK_ALARM_MS = 10 * 60 * 1000;
+
+// ci-shape KV の scheduled refresh interval (Refs #402)。
+// `ci-shape-report.yml` caller は repo の workflow event でしか fire しないため、
+// `push:main` を切った repo (例: mcp-relay-rs#21) は caller workflow file を
+// 変更しても次の PR まで KV に反映されない。alarm() が 10 分毎に走るので、
+// その中で「最後の shape refresh から 6h 経過」をチェックして refresh する。
+export const SHAPE_REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
+// DO storage key: 最後に shape refresh を完了した unix ms。
+const SHAPE_REFRESH_KEY = "shape_refresh_last_at";
 
 /** in-memory cache から stale な in_progress run を抽出する pure helper。
  *  - `status === "completed"` は除外
@@ -122,17 +141,50 @@ export class CIDashboardHub extends DurableObject<Env> {
   // 10 分毎に in-memory cache を walk し、1h 以上 in_progress に居座っている
   // run を GitHub API で recheck → cache / KV / WS broadcast を update する。
   // snapshot 経路の `autoRecheckStale` (index.ts) と相補的な safety net。
-  // Refs #384。
+  // Refs #384。同 alarm() で 6h 毎の ci-shape KV refresh も走らせる (Refs #402)。
   async alarm(): Promise<void> {
+    const now = Date.now();
     try {
-      await this.runStaleRecheck(Date.now());
+      await this.runStaleRecheck(now);
     } catch (err) {
       console.warn("hub alarm runStaleRecheck failed", {
         err: err instanceof Error ? err.message : String(err),
       });
     }
+    try {
+      await this.maybeRunShapeRefresh(now);
+    } catch (err) {
+      console.warn("hub alarm maybeRunShapeRefresh failed", {
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
     // 次の tick を必ず chain する。失敗時も chain しないと recheck が永久停止する。
     await this.ctx.storage.setAlarm(Date.now() + STALE_RECHECK_ALARM_MS);
+  }
+
+  /** 6h 毎の ci-shape KV refresh。最後の完了 timestamp が `SHAPE_REFRESH_INTERVAL_MS`
+   *  以上前なら refreshAllShapes() を走らせて timestamp を更新する。テストから直接
+   *  呼べるよう public。 */
+  async maybeRunShapeRefresh(now: number): Promise<{ ran: boolean; result?: ShapeRefreshResult }> {
+    const last = (await this.ctx.storage.get<number>(SHAPE_REFRESH_KEY)) ?? 0;
+    if (now - last < SHAPE_REFRESH_INTERVAL_MS) {
+      return { ran: false };
+    }
+    // 遅延 import (test pool で循環参照を避ける + bootstrap cost を払わない)
+    const { refreshAllShapes } = await import("./ci-shape-refresh");
+    const result = await refreshAllShapes(this.env);
+    await this.ctx.storage.put(SHAPE_REFRESH_KEY, now);
+    if (result.failed > 0) {
+      console.warn("hub shape refresh had failures", {
+        scanned: result.scanned,
+        ok: result.ok,
+        failed: result.failed,
+        errors: result.errors.slice(0, 5),
+      });
+    } else {
+      console.log("hub shape refresh ok", { scanned: result.scanned });
+    }
+    return { ran: true, result };
   }
 
   /** alarm() の本体。テストから直接呼べるよう public にしている。 */
