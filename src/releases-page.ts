@@ -1010,33 +1010,25 @@ function renderRow(r: IssueRow): string {
 // fall through する flash 添付用 param なので一緒に消す。
 // close 後の UX: flash banner を `position: fixed` の toast として浮かべるため
 // inline には DOM を増やさず、scroll 位置・周辺 card layout を一切ずらさない
-// (Refs #411)。close form の submit 直前に scrollY を sessionStorage に保存し、
-// landing 時に `?closed=` フラッシュ params があれば即復元する。toast 自身は
-// 数秒で fade out (auto-cleanup)。
+// (Refs #411 / #413)。close form の submit 直前に scrollY を sessionStorage に
+// 保存し、landing 時に `?closed=` フラッシュ params があれば復元する。
+//
+// FLASH_CLEANUP_SCRIPT は `${flash}` 直後 (= cards より前) で URL cleanup と
+// `scrollRestoration: "manual"` だけを早期実行する。実際の scroll restore は
+// 全 card render 完了後 (body 末尾) でないと document height が足りず top に
+// 丸められる (#412 でこれを踏んだ) ため、別 script (RELEASES_SCROLL_RESTORE_SCRIPT)
+// に切り出し body 最後で `requestAnimationFrame` 経由で実行する。
 const FLASH_CLEANUP_SCRIPT = `<script>
 (() => {
   try {
     const u = new URL(location.href);
-    const hadFlash = ["closed", "failed", "failed_reasons"].some((k) => u.searchParams.has(k));
     for (const k of ["closed", "failed", "failed_reasons"]) u.searchParams.delete(k);
     if (!u.searchParams.get("tag")) u.searchParams.delete("repo");
     const qs = u.searchParams.toString();
     history.replaceState(null, "", u.pathname + (qs ? "?" + qs : ""));
-    // close 直前に保存した scroll 位置を即復元 (= form POST→GET redirect の
-    // top jump を相殺、card は元の viewport 位置に戻る)。
-    if (hadFlash) {
-      const raw = sessionStorage.getItem("releases-scroll");
-      if (raw !== null) {
-        const y = parseInt(raw, 10);
-        if (Number.isFinite(y)) {
-          // history.scrollRestoration が auto だと browser が上書きする可能性
-          // があるので manual に倒した上で scroll する。
-          if ("scrollRestoration" in history) history.scrollRestoration = "manual";
-          window.scrollTo(0, y);
-        }
-        sessionStorage.removeItem("releases-scroll");
-      }
-    }
+    // browser native の scroll restoration が auto だと history navigation で
+    // top に飛んでから restore が上書きされる。manual に倒して top jump を抑止。
+    if ("scrollRestoration" in history) history.scrollRestoration = "manual";
   } catch { /* URL/History API 非対応環境では従来挙動のまま */ }
 })();
 </script>`;
@@ -1054,6 +1046,32 @@ const RELEASES_SCROLL_SAVE_SCRIPT = `<script>
         sessionStorage.setItem("releases-scroll", String(window.scrollY));
       }
     }, true);
+  } catch { /* ignore */ }
+})();
+</script>`;
+
+// 保存済 scroll 位置を全 card render 完了後に復元する (Refs #413)。
+// FLASH_CLEANUP_SCRIPT 内で scroll する版は cards より前に実行されるため
+// document height が足りず top に丸められていた (#412 の残り bug)。本 script は
+// body 末尾に置き、さらに requestAnimationFrame で 1 frame ずらしてレイアウト
+// 計算後に scroll する。URL から flash params は既に消えているので、保存値の
+// 有無だけで判定する (= 通常 navigation で誤発火する事は無い、submit listener
+// が close ボタン経由でしか書かないため)。
+const RELEASES_SCROLL_RESTORE_SCRIPT = `<script>
+(() => {
+  try {
+    const raw = sessionStorage.getItem("releases-scroll");
+    if (raw === null) return;
+    sessionStorage.removeItem("releases-scroll");
+    const y = parseInt(raw, 10);
+    if (!Number.isFinite(y)) return;
+    const restore = () => {
+      // 1 度 raf してから scrollTo (= layout pass 後)。
+      // それでも届かない (super-long page で <img> reflow 等) なら load イベントで再試行。
+      window.scrollTo(0, y);
+    };
+    requestAnimationFrame(() => requestAnimationFrame(restore));
+    window.addEventListener("load", restore, { once: true });
   } catch { /* ignore */ }
 })();
 </script>`;
@@ -1154,6 +1172,7 @@ ${renderLookupForm(null, null)}
 ${PWA_REGISTER_SCRIPT}
 ${RELEASES_LIVE_RELOAD_SCRIPT}
 ${RELEASES_SCROLL_SAVE_SCRIPT}
+${RELEASES_SCROLL_RESTORE_SCRIPT}
 </body></html>`;
 }
 
