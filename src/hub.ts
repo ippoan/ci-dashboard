@@ -34,6 +34,39 @@ type WsEnvelope =
 const ALERT_KEY_PREFIX = "release-alert:";
 const ALERT_TTL_SECONDS = 7 * 86400;
 
+// in_progress のまま留まる run を recheck の対象にするまでの age。index.ts の
+// `STALE_IN_PROGRESS_MS` (snapshot 経路の reconcile) と同値で揃える。
+// 値変更時は両方とも合わせる。Refs #366 / #384。
+export const HUB_STALE_IN_PROGRESS_MS = 60 * 60 * 1000;
+
+// DO alarm() の interval。snapshot 経路 (`autoRecheckStale`) は client が
+// `/snapshot` を叩いた時にしか発火しないため、WS 接続のままタブが開きっぱなしの
+// dashboard では stale recheck が実質起動しない (Refs #384)。これを補う safety
+// net として、CIDashboardHub DO が自前で 10 分毎に in-memory cache を walk し、
+// stale な in_progress run を recheck する。
+export const STALE_RECHECK_ALARM_MS = 10 * 60 * 1000;
+
+/** in-memory cache から stale な in_progress run を抽出する pure helper。
+ *  - `status === "completed"` は除外
+ *  - `updated_at` が parse 不能 (NaN) は除外
+ *  - `updated_at` が `now - staleMs` より新しいものは除外
+ *  alarm() と test の両方から呼ぶ。 */
+export function pickStaleInProgressRuns(
+  statuses: Iterable<CIStatus>,
+  now: number,
+  staleMs: number,
+): CIStatus[] {
+  const stale: CIStatus[] = [];
+  for (const s of statuses) {
+    if (s.status === "completed") continue;
+    const updatedMs = new Date(s.updated_at).getTime();
+    if (!Number.isFinite(updatedMs)) continue;
+    if (now - updatedMs < staleMs) continue;
+    stale.push(s);
+  }
+  return stale;
+}
+
 function tagAlertKey(repo: string): string {
   return `${ALERT_KEY_PREFIX}${repo}`;
 }
@@ -75,6 +108,141 @@ export class CIDashboardHub extends DurableObject<Env> {
     this.ctx.setWebSocketAutoResponse(
       new WebSocketRequestResponsePair("ping", "pong")
     );
+    // DO が wake する度に alarm を ensure する (idempotent: 既存があれば no-op)。
+    // これで stale recheck の chain が一度途切れても次の wake で復活する。
+    // Refs #384。
+    this.ctx.blockConcurrencyWhile(async () => {
+      const existing = await this.ctx.storage.getAlarm();
+      if (existing === null) {
+        await this.ctx.storage.setAlarm(Date.now() + STALE_RECHECK_ALARM_MS);
+      }
+    });
+  }
+
+  // 10 分毎に in-memory cache を walk し、1h 以上 in_progress に居座っている
+  // run を GitHub API で recheck → cache / KV / WS broadcast を update する。
+  // snapshot 経路の `autoRecheckStale` (index.ts) と相補的な safety net。
+  // Refs #384。
+  async alarm(): Promise<void> {
+    try {
+      await this.runStaleRecheck(Date.now());
+    } catch (err) {
+      console.warn("hub alarm runStaleRecheck failed", {
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+    // 次の tick を必ず chain する。失敗時も chain しないと recheck が永久停止する。
+    await this.ctx.storage.setAlarm(Date.now() + STALE_RECHECK_ALARM_MS);
+  }
+
+  /** alarm() の本体。テストから直接呼べるよう public にしている。 */
+  async runStaleRecheck(now: number): Promise<void> {
+    await this.ensureCache();
+    const stale = pickStaleInProgressRuns(
+      this.cache.values(),
+      now,
+      HUB_STALE_IN_PROGRESS_MS,
+    );
+    let anyUpdated = false;
+    for (const s of stale) {
+      try {
+        await this.recheckRunFromGitHub(s.run_id, s.repo);
+        anyUpdated = true;
+      } catch (err) {
+        // best-effort: 個別 run の失敗で全体を止めない。次の alarm で再試行。
+        console.warn("hub alarm recheck failed", {
+          run_id: s.run_id,
+          repo: s.repo,
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    // updateRun / updateJob は cache + KV だけ更新するので、WS subscriber に
+    // 反映するため明示的に broadcast する (fetch route 側と同じ pattern)。
+    if (anyUpdated) this.broadcastFromCache();
+  }
+
+  /** GitHub API を直叩きして run + jobs を取り直し、内部 update メソッドで
+   *  cache / KV / WS broadcast を更新する。`recheck.ts` の `recheckRun` は
+   *  DO stub 経由で動く設計なので、alarm() からは DO 内部で完結する本関数を使う。 */
+  private async recheckRunFromGitHub(
+    run_id: number,
+    repo: string,
+  ): Promise<void> {
+    const slashIdx = repo.indexOf("/");
+    if (slashIdx <= 0) return;
+    const owner = repo.slice(0, slashIdx);
+
+    const token = await tokenForOrg(this.env, owner);
+    const headers = {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+      "User-Agent": "ci-dashboard",
+    };
+
+    const runRes = await fetch(
+      `https://api.github.com/repos/${repo}/actions/runs/${run_id}`,
+      { headers },
+    );
+    if (!runRes.ok) {
+      throw new Error(`GitHub API ${runRes.status}`);
+    }
+    const run = (await runRes.json()) as {
+      id: number;
+      name: string;
+      head_branch: string;
+      status: string;
+      conclusion: string | null;
+      html_url: string;
+      actor: { login: string };
+      updated_at: string;
+      run_started_at: string;
+    };
+    await this.updateRun({
+      run: {
+        id: run.id,
+        name: run.name,
+        head_branch: run.head_branch,
+        status: run.status,
+        conclusion: run.conclusion,
+        html_url: run.html_url,
+        actor: { login: run.actor.login },
+        updated_at: run.updated_at,
+        run_started_at: run.run_started_at,
+      },
+      repo,
+    });
+
+    const jobsRes = await fetch(
+      `https://api.github.com/repos/${repo}/actions/runs/${run_id}/jobs`,
+      { headers },
+    );
+    if (jobsRes.ok) {
+      const { jobs } = (await jobsRes.json()) as {
+        jobs: Array<{
+          run_id: number;
+          name: string;
+          status: string;
+          conclusion: string | null;
+          html_url: string;
+          started_at: string | null;
+          completed_at: string | null;
+        }>;
+      };
+      for (const job of jobs) {
+        await this.updateJob({
+          job: {
+            run_id: job.run_id,
+            name: job.name,
+            status: job.status,
+            conclusion: job.conclusion,
+            html_url: job.html_url,
+            started_at: job.started_at,
+            completed_at: job.completed_at,
+          },
+        });
+      }
+    }
   }
 
   private async ensureCache(): Promise<void> {
