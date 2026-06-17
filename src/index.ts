@@ -13,7 +13,7 @@ import { handleProjectsPage } from "./projects-page";
 import { handleReleasesPage } from "./releases-page";
 import { handleReleaseClose } from "./release-close";
 import { handleReleaseCloseBatch } from "./release-close-batch";
-import { handleRecheck } from "./recheck";
+import { handleRecheck, recheckRun } from "./recheck";
 import { handleSecretGenPage } from "./secret-gen-page";
 import { handleLaunch } from "./launch";
 import { handleTagRelease } from "./tag-release";
@@ -122,6 +122,57 @@ function getReleaseWaveHub(env: Env): DurableObjectStub {
   return env.RELEASE_WAVE_HUB.get(id);
 }
 
+// `workflow_run.completed` webhook を取りこぼした run が in-memory hub cache に
+// in_progress のまま残るのを救う。/snapshot 取得の度に背景で発火し、status が
+// completed でなく updated_at が 1h 以上前の run を GitHub API から取り直す
+// (recheck と等価)。GitHub API 連打防止のため per-run 10 分 cooldown を持つ。
+// dedupe は isolate-local なので跨ぐと重複が起き得るが、recheck は idempotent
+// なので許容する。Refs ippoan/ci-dashboard#366
+export const STALE_IN_PROGRESS_MS = 60 * 60 * 1000;
+export const RECHECK_COOLDOWN_MS = 10 * 60 * 1000;
+const lastAutoRecheck = new Map<number, number>();
+
+/** test 用: isolate-local cooldown Map を初期化する。 */
+export function _resetAutoRecheckState(): void {
+  lastAutoRecheck.clear();
+}
+
+export async function autoRecheckStale(
+  env: Env,
+  hub: DurableObjectStub,
+  snapshotBody: string,
+  now: number = Date.now(),
+): Promise<void> {
+  let parsed: {
+    statuses?: Array<{
+      run_id: number;
+      repo: string;
+      status: string;
+      updated_at: string;
+    }>;
+  };
+  try {
+    parsed = JSON.parse(snapshotBody);
+  } catch {
+    return;
+  }
+  const statuses = parsed.statuses ?? [];
+  for (const s of statuses) {
+    if (s.status === "completed") continue;
+    const updatedMs = new Date(s.updated_at).getTime();
+    if (!Number.isFinite(updatedMs)) continue;
+    if (now - updatedMs < STALE_IN_PROGRESS_MS) continue;
+    const last = lastAutoRecheck.get(s.run_id) ?? 0;
+    if (now - last < RECHECK_COOLDOWN_MS) continue;
+    lastAutoRecheck.set(s.run_id, now);
+    try {
+      await recheckRun(env, hub, s.run_id, s.repo);
+    } catch {
+      // best-effort: cooldown gates the next retry
+    }
+  }
+}
+
 // Dashboard
 app.get("/", () => handleDashboard());
 
@@ -196,9 +247,16 @@ app.get("/release-alerts", async (c) => {
 // Dashboard UI fetches this on WS connect / reconnect (1 Worker request
 // per page load + reconnect), eliminating the previous 30s polling of
 // /status + /release-alerts (2 req/30s × visible tab). Refs #64.
+//
+// Background: webhook lost で in_progress に居座った run を 1h 超で自動
+// recheck する (Refs #366)。レスポンス自体はその場で返し、recheck は
+// waitUntil で発火するので latency に乗らない。
 app.get("/snapshot", async (c) => {
   const res = await getHub(c.env).fetch(new Request("http://hub/snapshot"));
   const body = await res.text();
+  c.executionCtx.waitUntil(
+    autoRecheckStale(c.env, getHub(c.env), body),
+  );
   return new Response(body, {
     headers: {
       "Content-Type": "application/json",
