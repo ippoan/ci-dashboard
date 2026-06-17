@@ -95,6 +95,13 @@ export interface Env extends AuthClientWorkerEnv {
    * 環境 (wrangler dev / test) は waitUntil fallback で inline 処理される。
    */
   WEBHOOK_QUEUE?: Queue<QueueMessage>;
+  /**
+   * cap-catalog の R2 bucket (`cap-catalog`)。`catalog-build-upload.yml` が
+   * 定期 push する `v1/latest.sqlite` + `v1/latest.jsonl` を /cap-catalog
+   * page が read-only fetch する。binding 未設定 (= ローカル dev / test) の
+   * 場合は inline sample fallback で動く。Refs ippoan/cap-catalog#1 #10。
+   */
+  CAP_CATALOG_R2?: R2Bucket;
 }
 
 // OAuth flow config — shared between /oauth/login, /oauth/callback, and the
@@ -191,7 +198,7 @@ app.get("/projects", (c) => handleProjectsPage(c.env));
 // state). Operators paste the output into Cloudflare Secrets Store / wrangler
 // secret put / GitHub Actions secrets.
 app.get("/secret-gen", () => handleSecretGenPage());
-app.get("/cap-catalog", () => handleCapCatalogPage());
+app.get("/cap-catalog", (c) => handleCapCatalogPage(c.env, c.executionCtx));
 
 // Launch redirect for the open-multirepo skill. Stateless: reconstructs the
 // long claude.ai/code URL from a compact `?i=<issue>` query and 302s to it, so

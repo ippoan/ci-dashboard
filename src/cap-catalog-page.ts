@@ -1,15 +1,18 @@
 // cap-catalog viewer (Refs ippoan/cap-catalog#1 #10).
 //
-// SSR + client-side filter. データは現状 ippoan/cap-catalog の self-dogfood
-// extract (PR #17/#18 run) からインライン保持。R2 upload (cap-catalog 後段 PR)
-// が landed したら fetch に置き換える前提で、本 page は表示骨格を確定させる役割。
+// SSR + client-side filter. データは R2 binding (`CAP_CATALOG_R2`) から
+// `v1/latest.jsonl` を fetch し、JSONL 1 行 = symbol として parse する。
+// R2 が空 / unreachable / binding 未設定なら inline SAMPLE_SYMBOLS に fallback
+// (= ローカル dev、staging 初期投入前、または upload pipeline 障害時)。
 //
-// Catalog の symbols 1 件 = SSR ページに `<script type="application/json">` で
+// Catalog の symbols は SSR ページに `<script type="application/json">` で
 // 全部埋め込み、`?q=` の query は JS で in-memory filter する (= 1 req で完結、
-// extra fetch なし)。data set は MVP として ~10 行、scale すれば paging を追加。
+// extra fetch なし)。jsonl size が現状 ~数 KB なので問題ない。scale すれば
+// `?q=` を server-side 引きにする (FTS5 trigram + porter)。
 
 import { renderTabs, TAB_STYLES } from "./nav-tabs";
 import { PWA_HEAD_TAGS, PWA_REGISTER_SCRIPT } from "./pwa";
+import type { Env } from "./index";
 
 // catalog-extract.jsonl の 1 行に対応 (schema/catalog.sql の symbols + features)
 interface CatalogSymbol {
@@ -24,6 +27,21 @@ interface CatalogSymbol {
   line?: number | null;
   commit_sha?: string | null;
   features?: string[];
+}
+
+// R2 key (cap-catalog#7 の catalog-build-upload.yml が push する path と
+// 一致)。schema_version=1 を前提に `v1/` prefix を付ける。CLI は同じ key を
+// download する。
+const R2_KEY_LATEST_JSONL = "v1/latest.jsonl";
+
+interface CatalogSource {
+  symbols: ReadonlyArray<CatalogSymbol>;
+  /** "r2" = R2 fetch 成功、"sample" = fallback (binding 無し or fetch fail) */
+  origin: "r2" | "sample";
+  /** R2 origin 時の last_modified (UTC ISO)、debug 表示用。 */
+  lastModified?: string;
+  /** fallback 理由 (warn 表示用)。 */
+  fallbackReason?: string;
 }
 
 // ippoan/cap-catalog の PR #17 dogfood + #18 fix 後にローカル extract した実
@@ -127,6 +145,10 @@ const PAGE_STYLES = `
     margin-bottom: 18px;
     font-size: 13px;
     color: #d29922;
+  }
+  .banner.banner-ok {
+    border-left-color: #3fb950;
+    color: #3fb950;
   }
   .banner code { background: rgba(0,0,0,.25); padding: 1px 5px; border-radius: 3px; }
   .controls {
@@ -238,10 +260,98 @@ const PAGE_STYLES = `
   }
 `;
 
-function renderSampleData(): string {
-  return SAMPLE_SYMBOLS
-    .map((s) => JSON.stringify(s))
-    .join(",\n");
+/**
+ * R2 から `v1/latest.jsonl` を fetch して symbols 配列に parse する。
+ * fail (binding 無し / object 無し / parse error) なら sample fallback。
+ *
+ * いずれの経路でも throw しない (= UI page の SSR を壊さない)。
+ */
+async function fetchCatalogSource(env: Env): Promise<CatalogSource> {
+  if (!env.CAP_CATALOG_R2) {
+    return {
+      symbols: SAMPLE_SYMBOLS,
+      origin: "sample",
+      fallbackReason: "CAP_CATALOG_R2 binding not configured",
+    };
+  }
+  let obj: R2ObjectBody | null;
+  try {
+    obj = await env.CAP_CATALOG_R2.get(R2_KEY_LATEST_JSONL);
+  } catch (e: unknown) {
+    return {
+      symbols: SAMPLE_SYMBOLS,
+      origin: "sample",
+      fallbackReason: `R2 get failed: ${e instanceof Error ? e.message : String(e)}`,
+    };
+  }
+  if (!obj) {
+    return {
+      symbols: SAMPLE_SYMBOLS,
+      origin: "sample",
+      fallbackReason: `R2 object ${R2_KEY_LATEST_JSONL} not found`,
+    };
+  }
+  let body: string;
+  try {
+    body = await obj.text();
+  } catch (e: unknown) {
+    return {
+      symbols: SAMPLE_SYMBOLS,
+      origin: "sample",
+      fallbackReason: `R2 body read failed: ${e instanceof Error ? e.message : String(e)}`,
+    };
+  }
+  const symbols: CatalogSymbol[] = [];
+  let parseErrors = 0;
+  for (const line of body.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const row = JSON.parse(trimmed) as CatalogSymbol;
+      // 必須 field の最低限の shape check (= upload pipeline からの想定外 row を弾く)
+      if (
+        typeof row.repo === "string" &&
+        typeof row.language === "string" &&
+        typeof row.kind === "string" &&
+        typeof row.name === "string" &&
+        typeof row.fq_path === "string"
+      ) {
+        symbols.push(row);
+      } else {
+        parseErrors++;
+      }
+    } catch {
+      parseErrors++;
+    }
+  }
+  if (symbols.length === 0) {
+    return {
+      symbols: SAMPLE_SYMBOLS,
+      origin: "sample",
+      fallbackReason: `R2 jsonl had 0 valid rows (parse errors: ${parseErrors})`,
+    };
+  }
+  return {
+    symbols,
+    origin: "r2",
+    lastModified: obj.uploaded.toISOString(),
+  };
+}
+
+function renderBanner(source: CatalogSource): string {
+  if (source.origin === "r2") {
+    const ts = source.lastModified ? ` <code>${escapeHtml(source.lastModified)}</code>` : "";
+    return `
+      <div class="banner banner-ok">
+        ✅ <strong>R2 live</strong>: <code>cap-catalog/v1/latest.jsonl</code> から ${source.symbols.length} symbol を fetch。${ts}
+      </div>`;
+  }
+  const reason = source.fallbackReason ? escapeHtml(source.fallbackReason) : "unknown";
+  return `
+    <div class="banner">
+      ⚠️ <strong>Sample fallback</strong>: ${source.symbols.length} symbol を inline 表示中
+      (理由: <code>${reason}</code>)。
+    </div>`;
 }
 
 const CLIENT_SCRIPT = `
@@ -334,36 +444,36 @@ const CLIENT_SCRIPT = `
 })();
 `;
 
-export function handleCapCatalogPage(): Response {
+export async function handleCapCatalogPage(env: Env, _ctx?: ExecutionContext): Promise<Response> {
+  const source = await fetchCatalogSource(env);
+  const dataJson = source.symbols.map((s) => JSON.stringify(s)).join(",\n");
+  const banner = renderBanner(source);
+
   const html = `<!DOCTYPE html>
 <html lang="ja">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Cap Catalog (Preview) — ci-dashboard</title>
+  <title>Cap Catalog — ci-dashboard</title>
   ${PWA_HEAD_TAGS}
   <style>${TAB_STYLES}${PAGE_STYLES}</style>
 </head>
 <body>
   ${renderTabs("cap-catalog" as never)}
-  <h1>🗂️ Cap Catalog (Preview)</h1>
+  <h1>🗂️ Cap Catalog</h1>
   <p class="lede">
     機能単位の横断シンボル検索。<a href="https://github.com/ippoan/cap-catalog/issues/1" target="_blank" rel="noopener">cap-catalog#1</a>
-    で進めているカタログ基盤の display-only consumer (issue #10)。FTS5 検索 / R2 配布まで来たら
-    server-side クエリに切り替える。
+    で進めているカタログ基盤の display-only consumer (issue #10)。R2 binding
+    <code>CAP_CATALOG_R2</code> 経由で <code>v1/latest.jsonl</code> を fetch して表示。
   </p>
-  <div class="banner">
-    ⚠️ <strong>Preview</strong>: 表示データは ippoan/cap-catalog 自身の self-dogfood 実 extract
-    (5 symbol) を inline 保持。R2 upload workflow (<code>#7</code> 後段) が landed したら
-    catalog.sqlite を fetch して全 repo の symbol を出す。client filter は実装済み。
-  </div>
+  ${banner}
   <div class="controls">
     <input id="q" type="search" placeholder="fq_path / name / doc / feature で検索…" autocomplete="off">
   </div>
   <div id="meta" class="meta"></div>
   <div id="list"></div>
 
-  <script type="application/json" id="catalog-data">[${renderSampleData()}]</script>
+  <script type="application/json" id="catalog-data">[${dataJson}]</script>
   <script>${CLIENT_SCRIPT}</script>
   ${PWA_REGISTER_SCRIPT}
 </body>
