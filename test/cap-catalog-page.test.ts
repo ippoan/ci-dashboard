@@ -201,6 +201,20 @@ describe("GET /cap-catalog", () => {
     expect(body).toContain('id="list"');
   });
 
+  it("ships favorites button + ordered storage + favOnly toggle (wire contract)", async () => {
+    // お気に入り: 順序付き Array で保存 (= 順位 ↑↓ 変更可)、favOnly モードで
+    // ★ つきだけ表示。fq_path 変更時の追従性のため key は repo|language|fq_path。
+    const { body } = await fetchPage();
+    // toggle button (= UI affordance、page header に居る)
+    expect(body).toContain('id="fav-only-toggle"');
+    // 保存 key 2 つ (順序付き list + on/off)
+    expect(body).toContain("'cap-catalog:favorites'");
+    expect(body).toContain("'cap-catalog:favOnly'");
+    // 各 card に出る fav 操作の data 属性 (star toggle + 順位 up/down)
+    expect(body).toContain('data-fav-toggle');
+    expect(body).toContain('data-fav-move');
+  });
+
   it("ships dual-axis (feature + module) filter containers + localStorage keys + reset (wire contract)", async () => {
     // 想定運用: 「どの feature を拡張するか」「どの module を変更するか」両軸で
     // navigation する (Refs ippoan/cap-catalog#1)。container と保存 key を gate。

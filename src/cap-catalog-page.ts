@@ -324,6 +324,49 @@ const PAGE_STYLES = `
     border-radius: 8px;
     font-family: ui-monospace, SFMono-Regular, monospace;
   }
+  /* お気に入り ★ button (card header 右端)。localStorage 永続。 */
+  .sym .star {
+    background: transparent;
+    border: none;
+    color: #6e7681;
+    cursor: pointer;
+    font-size: 16px;
+    padding: 0 2px;
+    line-height: 1;
+    margin-left: 6px;
+  }
+  .sym .star:hover { color: #ffd33d; }
+  .sym .star[aria-pressed="true"] { color: #ffd33d; }
+  /* 上部 fav-only toggle (★ 付きだけ表示モード)。 */
+  .fav-bar {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 8px;
+    font-size: 12px;
+    color: #8b949e;
+  }
+  .fav-toggle {
+    background: #21262d;
+    color: #c9d1d9;
+    border: 1px solid #30363d;
+    border-radius: 999px;
+    padding: 3px 12px;
+    cursor: pointer;
+    font: inherit;
+    font-size: 12px;
+  }
+  .fav-toggle:hover { border-color: #ffd33d; }
+  .fav-toggle[aria-pressed="true"] {
+    background: #3a2f0d;
+    border-color: #ffd33d;
+    color: #ffd33d;
+  }
+  .fav-toggle .fav-count {
+    margin-left: 4px;
+    color: #6e7681;
+  }
+  .fav-toggle[aria-pressed="true"] .fav-count { color: #ffd33d; }
   /* 検索 query と一致する部分の highlight。dark theme に合わせて琥珀色。 */
   mark.hit {
     background: #ffd33d;
@@ -441,7 +484,55 @@ const CLIENT_SCRIPT = `
   const meta = document.getElementById('meta');
   const moduleFiltersEl = document.getElementById('module-filters');
   const featureFiltersEl = document.getElementById('feature-filters');
+  const favToggleEl = document.getElementById('fav-only-toggle');
   const data = JSON.parse(document.getElementById('catalog-data').textContent);
+
+  // お気に入り: 順序付き fq_path key Array で保持 (= 順位変更可能)。
+  // key は 'repo|language|fq_path' (= extract-rust.py の dedupe key と同じ)。
+  function symbolKey(s) {
+    return s.repo + '|' + s.language + '|' + s.fq_path;
+  }
+  const FAV_LS = 'cap-catalog:favorites';
+  const FAV_ONLY_LS = 'cap-catalog:favOnly';
+  function loadFavorites() {
+    try {
+      const raw = localStorage.getItem(FAV_LS);
+      if (raw != null) {
+        const arr = JSON.parse(raw);
+        if (Array.isArray(arr)) return arr.filter(function(x){ return typeof x === 'string'; });
+      }
+    } catch (_) {}
+    return [];
+  }
+  function saveFavorites(arr) {
+    try { localStorage.setItem(FAV_LS, JSON.stringify(arr)); } catch (_) {}
+  }
+  function loadFavOnly() {
+    try { return localStorage.getItem(FAV_ONLY_LS) === '1'; } catch (_) { return false; }
+  }
+  function saveFavOnly(on) {
+    try { localStorage.setItem(FAV_ONLY_LS, on ? '1' : '0'); } catch (_) {}
+  }
+  let favorites = loadFavorites();
+  let favOnly = loadFavOnly();
+  function isFav(s) { return favorites.indexOf(symbolKey(s)) !== -1; }
+  function toggleFav(s) {
+    const k = symbolKey(s);
+    const i = favorites.indexOf(k);
+    if (i === -1) favorites.push(k); else favorites.splice(i, 1);
+    saveFavorites(favorites);
+  }
+  function moveFav(s, dir) {
+    const k = symbolKey(s);
+    const i = favorites.indexOf(k);
+    if (i === -1) return;
+    const j = i + dir;
+    if (j < 0 || j >= favorites.length) return;
+    const tmp = favorites[i];
+    favorites[i] = favorites[j];
+    favorites[j] = tmp;
+    saveFavorites(favorites);
+  }
 
   // fq_path の root segment (= crate / 最上位 module) で symbol を group する。
   // "cap_catalog_schema::SCHEMA_VERSION" → "cap_catalog_schema"
@@ -520,20 +611,37 @@ const CLIENT_SCRIPT = `
           if (s.features && s.features.some(function(f){ return f.toLowerCase().includes(needle); })) return true;
           return false;
         });
-    // 2 軸 hide を AND で適用: module が hide ∨ 所属 feature が全部 hide なら drop。
-    // 「feature が全部 hide」= 表示すべき feature が 1 つも残らない (= 全 tag が消されてる)。
-    const matched = queryFiltered.filter(function(s){
-      if (moduleAxis.hidden.has(rootSegment(s.fq_path))) return false;
-      const feats = symbolFeatures(s);
-      const visibleFeats = feats.filter(function(f){ return !featureAxis.hidden.has(f); });
-      return visibleFeats.length > 0;
-    });
+    // favOnly モードは module/feature filter を **bypass** し ★ symbol だけ表示。
+    // 通常モードは 2 軸 hide を AND で適用 (module hide ∨ 全 feature hide → drop)。
+    const matched = favOnly
+      ? queryFiltered.filter(isFav)
+      : queryFiltered.filter(function(s){
+          if (moduleAxis.hidden.has(rootSegment(s.fq_path))) return false;
+          const feats = symbolFeatures(s);
+          const visibleFeats = feats.filter(function(f){ return !featureAxis.hidden.has(f); });
+          return visibleFeats.length > 0;
+        });
     const hiddenCount = queryFiltered.length - matched.length;
 
     meta.textContent = matched.length + ' / ' + data.length + ' symbol(s)'
-      + (hiddenCount > 0 ? ' (' + hiddenCount + ' hidden by filter)' : '');
+      + (favOnly ? ' (★ favorites only)' : (hiddenCount > 0 ? ' (' + hiddenCount + ' hidden by filter)' : ''));
     if (matched.length === 0) {
-      list.innerHTML = '<div class="empty">no match</div>';
+      list.innerHTML = '<div class="empty">' + (favOnly ? '★ お気に入りはありません。各 symbol の ★ ボタンで追加してください。' : 'no match') + '</div>';
+      return;
+    }
+
+    // favOnly モードは保存順 (= 順位) を尊重して repo を跨いで 1 list に並べる。
+    // 通常モードは従来通り repo 単位で group。
+    if (favOnly) {
+      const ordered = [];
+      const seen = new Set();
+      favorites.forEach(function(k){
+        const s = matched.find(function(x){ return symbolKey(x) === k; });
+        if (s && !seen.has(k)) { ordered.push(s); seen.add(k); }
+      });
+      list.innerHTML = '<div class="repo-group"><h2>★ Favorites (順位は ↑↓ で変更)</h2>'
+        + ordered.map(function(s, idx){ return renderSymbol(s, needle, idx, ordered.length); }).join('')
+        + '</div>';
       return;
     }
 
@@ -543,50 +651,62 @@ const CLIENT_SCRIPT = `
     });
 
     list.innerHTML = Object.keys(groups).sort().map(function(repo) {
-      const items = groups[repo].map(function(s) {
-        const ghLink = buildGitHubLink(s.repo, s.file, s.line);
-        const fileBit = s.file
-          ? '<span class="file">' + (ghLink
-              ? '<a href="' + escape(ghLink) + '" target="_blank" rel="noopener">' + escape(s.file) + (s.line != null ? ':' + s.line : '') + '</a>'
-              : escape(s.file) + (s.line != null ? ':' + s.line : '')
-            ) + '</span>'
-          : '';
-        const sig = s.signature ? '<div class="sig">' + escape(s.signature) + '</div>' : '';
-        // 検索 query が doc に match している時は、その match を含む行を
-        // 1 行目の代わりに表示する (= なぜ hit したか視覚的に分かる)。
-        // query 無し or 1 行目に match があれば従来通り 1 行目を出す。
-        let docLineRaw = '';
-        if (s.doc) {
-          const lines = s.doc.split('\\n');
-          if (needle && !lines[0].toLowerCase().includes(needle)) {
-            const hit = lines.find(function(l){ return l.toLowerCase().includes(needle); });
-            docLineRaw = hit || lines[0];
-          } else {
-            docLineRaw = lines[0];
-          }
-        }
-        const doc = docLineRaw ? '<div class="doc">' + highlight(docLineRaw, needle) + '</div>' : '';
-        const feats = s.features && s.features.length
-          ? '<div class="features">' + s.features.map(function(f){ return '<span class="feat">' + highlight(f, needle) + '</span>'; }).join('') + '</div>'
-          : '';
-        const fqInner = highlight(s.fq_path, needle);
-        const fqHtml = ghLink
-          ? '<a href="' + escape(ghLink) + '" class="fq-link" target="_blank" rel="noopener" title="Open ' + escape(s.fq_path) + ' on GitHub">' + fqInner + '</a>'
-          : fqInner;
-        return '<div class="sym">'
-          + '<div class="header">'
-          +   '<span class="kind">' + escape(s.kind) + '</span>'
-          +   '<span class="fq">' + fqHtml + '</span>'
-          +   fileBit
-          + '</div>'
-          + sig + doc + feats
-          + '</div>';
-      }).join('');
+      const items = groups[repo].map(function(s) { return renderSymbol(s, needle, -1, 0); }).join('');
       return '<div class="repo-group">'
         + '<h2><a href="https://github.com/' + escape(repo) + '" target="_blank" rel="noopener">' + escape(repo) + '</a></h2>'
         + items
         + '</div>';
     }).join('');
+  }
+
+  // symbol 1 件を card HTML に。favOnly モード (idx >= 0) なら ↑↓ button も
+  // 出して順位変更可能にする。それ以外は ★ button のみ。
+  function renderSymbol(s, needle, idx, total) {
+    const ghLink = buildGitHubLink(s.repo, s.file, s.line);
+    const fileBit = s.file
+      ? '<span class="file">' + (ghLink
+          ? '<a href="' + escape(ghLink) + '" target="_blank" rel="noopener">' + escape(s.file) + (s.line != null ? ':' + s.line : '') + '</a>'
+          : escape(s.file) + (s.line != null ? ':' + s.line : '')
+        ) + '</span>'
+      : '';
+    const sig = s.signature ? '<div class="sig">' + escape(s.signature) + '</div>' : '';
+    // 検索 query が doc に match している時は、その match を含む行を 1 行目の
+    // 代わりに表示する (= なぜ hit したか視覚的に分かる)。
+    let docLineRaw = '';
+    if (s.doc) {
+      const lines = s.doc.split('\\n');
+      if (needle && !lines[0].toLowerCase().includes(needle)) {
+        const hit = lines.find(function(l){ return l.toLowerCase().includes(needle); });
+        docLineRaw = hit || lines[0];
+      } else {
+        docLineRaw = lines[0];
+      }
+    }
+    const doc = docLineRaw ? '<div class="doc">' + highlight(docLineRaw, needle) + '</div>' : '';
+    const feats = s.features && s.features.length
+      ? '<div class="features">' + s.features.map(function(f){ return '<span class="feat">' + highlight(f, needle) + '</span>'; }).join('') + '</div>'
+      : '';
+    const fqInner = highlight(s.fq_path, needle);
+    const fqHtml = ghLink
+      ? '<a href="' + escape(ghLink) + '" class="fq-link" target="_blank" rel="noopener" title="Open ' + escape(s.fq_path) + ' on GitHub">' + fqInner + '</a>'
+      : fqInner;
+    const starred = isFav(s);
+    const k = symbolKey(s);
+    const reorder = (idx >= 0 && total > 0)
+      ? '<button type="button" class="star" data-fav-move="up" data-key="' + escape(k) + '" title="上へ"' + (idx === 0 ? ' disabled' : '') + '>↑</button>'
+        + '<button type="button" class="star" data-fav-move="down" data-key="' + escape(k) + '" title="下へ"' + (idx === total - 1 ? ' disabled' : '') + '>↓</button>'
+      : '';
+    const starBtn = '<button type="button" class="star" data-fav-toggle="1" data-key="' + escape(k) + '" aria-pressed="' + starred + '" title="' + (starred ? 'お気に入りから外す' : 'お気に入りに追加') + '">' + (starred ? '★' : '☆') + '</button>';
+    return '<div class="sym">'
+      + '<div class="header">'
+      +   '<span class="kind">' + escape(s.kind) + '</span>'
+      +   '<span class="fq">' + fqHtml + '</span>'
+      +   fileBit
+      +   reorder
+      +   starBtn
+      + '</div>'
+      + sig + doc + feats
+      + '</div>';
   }
 
   // 軸毎の集計: data 全体での key → 出現回数。chip render に使う。
@@ -658,6 +778,36 @@ const CLIENT_SCRIPT = `
   bindAxisClick(moduleFiltersEl);
   bindAxisClick(featureFiltersEl);
 
+  function renderFavToggle() {
+    if (!favToggleEl) return;
+    favToggleEl.setAttribute('aria-pressed', favOnly ? 'true' : 'false');
+    favToggleEl.innerHTML = (favOnly ? '★ Favorites only' : '☆ Show favorites only')
+      + '<span class="fav-count">(' + favorites.length + ')</span>';
+  }
+  favToggleEl && favToggleEl.addEventListener('click', function(){
+    favOnly = !favOnly;
+    saveFavOnly(favOnly);
+    renderFavToggle();
+    render(input.value);
+  });
+
+  // ★ toggle / ↑↓ 順位変更は list 側の click delegation で処理。
+  list && list.addEventListener('click', function(ev){
+    const t = ev.target.closest('[data-fav-toggle], [data-fav-move]');
+    if (!t) return;
+    const k = t.dataset.key;
+    if (!k) return;
+    const s = data.find(function(x){ return symbolKey(x) === k; });
+    if (!s) return;
+    if (t.dataset.favToggle) {
+      toggleFav(s);
+    } else if (t.dataset.favMove) {
+      moveFav(s, t.dataset.favMove === 'up' ? -1 : 1);
+    }
+    renderFavToggle();
+    render(input.value);
+  });
+
   input.addEventListener('input', function(){ render(input.value); });
 
   // URL param ?q=foo は初期 query
@@ -665,6 +815,7 @@ const CLIENT_SCRIPT = `
   const initQ = url.searchParams.get('q') || '';
   if (initQ) input.value = initQ;
   renderFilters();
+  renderFavToggle();
   render(initQ);
 
   input.addEventListener('change', function() {
@@ -707,6 +858,9 @@ export async function handleCapCatalogPage(env: Env, _ctx?: ExecutionContext): P
   ${banner}
   <div class="controls">
     <input id="q" type="search" placeholder="fq_path / name / doc / feature で検索…" autocomplete="off">
+  </div>
+  <div class="fav-bar">
+    <button id="fav-only-toggle" type="button" class="fav-toggle" aria-pressed="false">☆ Show favorites only<span class="fav-count">(0)</span></button>
   </div>
   <div class="filters filters-row"><span class="axis-label">feature:</span><div id="feature-filters" class="filters-axis"></div></div>
   <div class="filters filters-row"><span class="axis-label">module:</span><div id="module-filters" class="filters-axis"></div></div>
