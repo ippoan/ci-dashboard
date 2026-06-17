@@ -547,11 +547,13 @@ export const CAP_CATALOG_EXCLUSIONS: Record<string, CapCatalogExclusionReason> =
   "ippoan/HealthConnectReader": "android",
   "ippoan/AlcoholChecker": "android",
   "ippoan/ShakenApp": "android",
-  // 実コード無し (shell / yaml / md のみ)
+  // 実コード無し (shell / yaml / md / Python scripts のみ)
   "ippoan/claude-md": "no-code",
   "ippoan/claude-skills": "no-code",
   "ippoan/claude-hooks": "no-code",
   "ippoan/ci-workflows": "no-code",
+  // freee MCP 利用 workspace (CLAUDE.md + scripts/*.py のみ、実プロダクトコード無し)
+  "yhonda-ohishi/freee": "no-code",
   // self (dogfood)
   "ippoan/cap-catalog": "self",
   // repo 削除
