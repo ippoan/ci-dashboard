@@ -157,9 +157,9 @@ describe("analyzeMatrix", () => {
 
 describe("renderMatrixPage", () => {
   it("payload null + error msg なら 警告 banner を出す", () => {
-    const html = renderMatrixPage(null, "raw fetch 404");
-    expect(html).toContain("scanner JSON が読めません");
-    expect(html).toContain("raw fetch 404");
+    const html = renderMatrixPage(null, "kv get failed");
+    expect(html).toContain("KV からの shape 読み込みに失敗");
+    expect(html).toContain("kv get failed");
   });
 
   it("ci-matrix tab が active", () => {
@@ -190,54 +190,98 @@ describe("renderMatrixPage", () => {
   });
 });
 
+/** in-memory KV with two `ci-shape:` entries seeded. */
+function envWithShapes(): import("../src/index").Env {
+  const store = new Map<string, string>();
+  store.set(
+    "ci-shape:ippoan/auth-worker",
+    JSON.stringify({
+      schema_version: 1,
+      owner: "ippoan",
+      repo: "auth-worker",
+      scanned_at: "2026-06-17T00:00:00Z",
+      workflows: [
+        {
+          file: ".github/workflows/test.yml",
+          name: "CI",
+          triggers: ["pull_request"],
+          permissions: { contents: "write", "pull-requests": "write" },
+          reusable_calls: [
+            {
+              job_id: "ci",
+              target_owner: "ippoan",
+              target_repo: "ci-workflows",
+              target_file: ".github/workflows/frontend-ci.yml",
+              reusable_name: "frontend-ci.yml",
+              ref: "main",
+              pinned_sha: false,
+              secrets_inherit: true,
+            },
+          ],
+          self_jobs: [],
+          deviations: ["unpinned-ref-main"],
+        },
+      ],
+    }),
+  );
+  const kv = {
+    async get(key: string) {
+      return store.get(key) ?? null;
+    },
+    async put(key: string, value: string) {
+      store.set(key, value);
+    },
+    async list({ prefix }: { prefix?: string } = {}) {
+      const keys = [...store.keys()]
+        .filter((k) => !prefix || k.startsWith(prefix))
+        .map((name) => ({ name }));
+      return { keys, list_complete: true, cursor: "" };
+    },
+  } as unknown as KVNamespace;
+  return { CI_STATUS: kv } as unknown as import("../src/index").Env;
+}
+
 describe("handleCiMatrixPage", () => {
   beforeEach(() => {
     _resetMatrixCacheForTest();
     vi.restoreAllMocks();
   });
 
-  it("raw fetch fail → 503 + X-CI-Matrix-Source: error", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        new Response("not found", { status: 404 }),
-      ),
+  it("KV から shape を読んで 200 + X-CI-Matrix-Source: live", async () => {
+    const env = envWithShapes();
+    const res = await handleCiMatrixPage(new Request("https://example.com/ci-matrix"), env);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("X-CI-Matrix-Source")).toBe("live");
+    expect(res.headers.get("Cache-Control")).toContain("public");
+    const html = await res.text();
+    expect(html).toContain("ippoan/auth-worker");
+  });
+
+  it("KV list throw → 503 + X-CI-Matrix-Source: error", async () => {
+    const broken = {
+      CI_STATUS: {
+        async list() {
+          throw new Error("kv broken");
+        },
+      },
+    } as unknown as import("../src/index").Env;
+    const res = await handleCiMatrixPage(
+      new Request("https://example.com/ci-matrix"),
+      broken,
     );
-    const req = new Request("https://example.com/ci-matrix");
-    const res = await handleCiMatrixPage(req);
     expect(res.status).toBe(503);
     expect(res.headers.get("X-CI-Matrix-Source")).toBe("error");
   });
 
-  it("raw fetch success → 200 + Cache-Control public", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        new Response(JSON.stringify(fixturePayload()), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
-      ),
-    );
-    const req = new Request("https://example.com/ci-matrix");
-    const res = await handleCiMatrixPage(req);
-    expect(res.status).toBe(200);
-    expect(res.headers.get("X-CI-Matrix-Source")).toBe("live");
-    expect(res.headers.get("Cache-Control")).toContain("public");
-  });
-
-  it("?refresh=1 はキャッシュをバイパスする", async () => {
-    const stub = vi.fn(async () =>
-      new Response(JSON.stringify(fixturePayload()), { status: 200 }),
-    );
-    vi.stubGlobal("fetch", stub);
-    const r1 = new Request("https://example.com/ci-matrix");
-    await handleCiMatrixPage(r1);
-    // 2 回目はキャッシュヒットで fetch 呼ばれない
-    await handleCiMatrixPage(new Request("https://example.com/ci-matrix"));
-    expect(stub).toHaveBeenCalledTimes(1);
-    // refresh=1 で再 fetch される
-    await handleCiMatrixPage(new Request("https://example.com/ci-matrix?refresh=1"));
-    expect(stub).toHaveBeenCalledTimes(2);
+  it("?refresh=1 で memCache を bypass", async () => {
+    const env = envWithShapes();
+    const spy = vi.spyOn(env.CI_STATUS, "list");
+    await handleCiMatrixPage(new Request("https://example.com/ci-matrix"), env);
+    await handleCiMatrixPage(new Request("https://example.com/ci-matrix"), env);
+    // 2 回目はキャッシュヒットで list 呼ばれない
+    expect(spy).toHaveBeenCalledTimes(1);
+    // refresh=1 で再 list される
+    await handleCiMatrixPage(new Request("https://example.com/ci-matrix?refresh=1"), env);
+    expect(spy).toHaveBeenCalledTimes(2);
   });
 });

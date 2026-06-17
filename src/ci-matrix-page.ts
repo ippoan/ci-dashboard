@@ -1,24 +1,42 @@
-// `/ci-matrix` SSR ページ。Refs ippoan/ci-dashboard#377.
+// `/ci-matrix` SSR ページ。Refs ippoan/ci-dashboard#377 #378.
 //
-// データは `data/ci-matrix.json` (scanner workflow が main に commit-back) を
-// `raw.githubusercontent.com` 経由で fetch する。Worker 内で短期 cache。
-// `?refresh=1` を付けるとキャッシュを bypass。
+// データは各 repo の CI が `ci-shape-report.yml` reusable 経由で
+// `/webhooks/ci-shape` に POST してきた shape を CI_STATUS KV (`ci-shape:`
+// prefix) から list して読む。Worker 内で短期 cache、`?refresh=1` で bypass。
 //
 // 設計分離:
 // - `analyzeMatrix(...)` は pure。jsonl payload → cell matrix + deviation list
 //   を返す。worker / vitest 双方からテストする
-// - `handleCiMatrixPage` は I/O (fetch + HTML 組み立て + Response)
+// - `handleCiMatrixPage` は I/O (KV list + HTML 組み立て + Response)
 // - 表示前提のスタイルは inline (= cap-catalog と同じ self-contained 方針)
 
 import { renderTabs, TAB_STYLES } from "./nav-tabs";
 import { PWA_HEAD_TAGS, PWA_REGISTER_SCRIPT } from "./pwa";
-
-const SOURCE_REPO = "ippoan/ci-dashboard";
-const SOURCE_BRANCH = "main";
-const SOURCE_PATH = "data/ci-matrix.json";
-const RAW_URL = `https://raw.githubusercontent.com/${SOURCE_REPO}/${SOURCE_BRANCH}/${SOURCE_PATH}`;
+import { listCiShapes, type CiShapePayload } from "./ci-shape-webhook";
+import type { Env } from "./index";
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
+
+// scanner と同じ reusable_name → category mapping を UI 側でも保持。新 reusable
+// を増やしたら ci-workflows の ci-shape-report.yml (= reusable 名 → category
+// 変換) と本 mapping を同時に更新する。
+const REUSABLE_CATEGORIES: Record<string, string> = {
+  "frontend-ci.yml": "frontend-ci",
+  "go-ci.yml": "go-ci",
+  "lib-ci.yml": "lib-ci",
+  "rust-ci.yml": "rust-ci",
+  "auto-merge.yml": "auto-merge",
+  "secret-verify-gcp.yml": "secret-verify",
+  "skills-check.yml": "skills-check",
+  "catalog-extract.yml": "cap-catalog-extract",
+  "release-wave-handler.yml": "release-wave",
+  "cloud-run-deploy.yml": "cloud-run-deploy",
+  "lib-publish.yml": "lib-publish",
+  "rust-binary-release.yml": "rust-binary-release",
+  "tag-release.yml": "tag-release",
+  "dev-tag-release.yml": "dev-tag-release",
+  "ci-shape-report.yml": "ci-shape-report",
+};
 
 // scanner と同じカテゴリ順を UI 側でも保持。新 reusable を増やしたら
 // scanner 側 (`REUSABLE_CATEGORIES`) と本 array を同時に更新する。
@@ -281,7 +299,57 @@ interface CacheEntry {
 }
 let memCache: CacheEntry | null = null;
 
-async function loadPayload(refresh: boolean): Promise<{
+/** Per-repo webhook 報告 (`CiShapePayload[]`) を analyzeMatrix が食う
+ *  ScannerPayload 形に揃える。逸脱検出 (`unpinned-ref-main` 等) は caller
+ *  reusable 側で済んでいて payload.workflows[].deviations に乗ってくる。 */
+export function shapesToScannerPayload(
+  shapes: CiShapePayload[],
+  generatedAt: string,
+): ScannerPayload {
+  return {
+    schema_version: 1,
+    generated_at: generatedAt,
+    scan_source: "webhook",
+    orgs: [...new Set(shapes.map((s) => s.owner))].sort(),
+    reusable_categories: REUSABLE_CATEGORIES,
+    repos: shapes.map((s) => {
+      const workflows = s.workflows.map((wf) => ({
+        ...wf,
+      }));
+      let reusableCallerCount = 0;
+      const usedReusables = new Set<string>();
+      const deviationFlagUnion = new Set<string>();
+      for (const wf of workflows) {
+        const calls = wf.reusable_calls ?? [];
+        if (calls.length > 0) {
+          reusableCallerCount += 1;
+          for (const c of calls) {
+            const cat = REUSABLE_CATEGORIES[c.reusable_name];
+            if (cat) usedReusables.add(cat);
+          }
+        }
+        for (const d of wf.deviations ?? []) deviationFlagUnion.add(d);
+      }
+      return {
+        owner: s.owner,
+        repo: s.repo,
+        scanned_at: s.scanned_at,
+        workflows,
+        summary: {
+          total_workflows: workflows.length,
+          reusable_caller_workflows: reusableCallerCount,
+          used_reusable_categories: [...usedReusables].sort(),
+          deviation_flags: [...deviationFlagUnion].sort(),
+        },
+      };
+    }),
+  };
+}
+
+async function loadPayload(
+  env: Env,
+  refresh: boolean,
+): Promise<{
   payload: ScannerPayload | null;
   source: "cache" | "live" | "error";
   error?: string;
@@ -290,15 +358,8 @@ async function loadPayload(refresh: boolean): Promise<{
     return { payload: memCache.payload, source: "cache" };
   }
   try {
-    const res = await fetch(RAW_URL, {
-      headers: { "User-Agent": "ci-dashboard-matrix" },
-      // Cloudflare Workers の fetch cache を 5 分に。
-      cf: { cacheTtl: 300, cacheEverything: true } as never,
-    });
-    if (!res.ok) {
-      return { payload: null, source: "error", error: `raw fetch ${res.status}` };
-    }
-    const payload = (await res.json()) as ScannerPayload;
+    const shapes = await listCiShapes(env);
+    const payload = shapesToScannerPayload(shapes, new Date().toISOString());
     memCache = { payload, fetched_at: Date.now() };
     return { payload, source: "live" };
   } catch (e: unknown) {
@@ -323,16 +384,16 @@ ${tabs}
 <h1>🧩 CI Matrix</h1>
 <p class="lede">
   どの repo が <a href="https://github.com/ippoan/ci-workflows" target="_blank" rel="noopener"><code>ippoan/ci-workflows</code></a>
-  の reusable workflow を使ってるかの一覧。データは
-  <a href="https://github.com/ippoan/ci-dashboard/blob/main/data/ci-matrix.json" target="_blank" rel="noopener"><code>data/ci-matrix.json</code></a>
-  (6 時間ごとの scanner workflow が更新)。
+  の reusable workflow を使ってるかの一覧。データは各 repo の CI が
+  <a href="https://github.com/ippoan/ci-workflows/blob/main/.github/workflows/ci-shape-report.yml" target="_blank" rel="noopener"><code>ci-shape-report.yml</code></a>
+  reusable 経由で push したもの (KV 保存)。caller 未追加 repo は表示されません。
   <a href="?refresh=1">[キャッシュを破棄して再 fetch]</a>
 </p>`;
 
   if (!payload) {
     return (
       head +
-      `<div class="banner">⚠️ scanner JSON が読めません: ${escapeHtml(errorMsg ?? "unknown")}</div></body></html>`
+      `<div class="banner">⚠️ KV からの shape 読み込みに失敗: ${escapeHtml(errorMsg ?? "unknown")}</div></body></html>`
     );
   }
 
@@ -443,10 +504,10 @@ ${PWA_REGISTER_SCRIPT}
   return head + body;
 }
 
-export async function handleCiMatrixPage(req: Request): Promise<Response> {
+export async function handleCiMatrixPage(req: Request, env: Env): Promise<Response> {
   const url = new URL(req.url);
   const refresh = url.searchParams.get("refresh") === "1";
-  const { payload, source, error } = await loadPayload(refresh);
+  const { payload, source, error } = await loadPayload(env, refresh);
   const html = renderMatrixPage(payload, error);
   return new Response(html, {
     status: payload ? 200 : 503,

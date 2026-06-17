@@ -18,6 +18,7 @@ import { handleSecretGenPage } from "./secret-gen-page";
 import { handleCapCatalogPage } from "./cap-catalog-page";
 import { handleFavoritesGet, handleFavoritesPut } from "./cap-catalog-favorites";
 import { handleCiMatrixPage } from "./ci-matrix-page";
+import { handleCiShapeWebhook } from "./ci-shape-webhook";
 import { handleLaunch } from "./launch";
 import { handleTagRelease } from "./tag-release";
 import {
@@ -205,8 +206,11 @@ app.get("/cap-catalog", (c) => handleCapCatalogPage(c.env, c.executionCtx));
 // client は localStorage fallback。Refs ippoan/cap-catalog#1。
 app.get("/api/cap-catalog/favorites", (c) => handleFavoritesGet(c.req.raw, c.env));
 app.put("/api/cap-catalog/favorites", (c) => handleFavoritesPut(c.req.raw, c.env));
-// Reusable workflow 採用状況の 1 ページマトリクス。Refs #377。
-app.get("/ci-matrix", (c) => handleCiMatrixPage(c.req.raw));
+// Reusable workflow 採用状況の 1 ページマトリクス。Refs #377 #378。
+app.get("/ci-matrix", (c) => handleCiMatrixPage(c.req.raw, c.env));
+// 各 repo の CI から ci-shape-report.yml reusable 経由で薄められた shape JSON
+// を受ける。X-CI-Shape-Secret = RELEASE_WAVE_WEBHOOK_SECRET。Refs #378。
+app.post("/webhooks/ci-shape", (c) => handleCiShapeWebhook(c.req.raw, c.env));
 
 // Launch redirect for the open-multirepo skill. Stateless: reconstructs the
 // long claude.ai/code URL from a compact `?i=<issue>` query and 302s to it, so
