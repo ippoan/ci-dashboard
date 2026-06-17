@@ -122,9 +122,96 @@ const PAGE_STYLES = `
     background: #0d1117;
     color: #c9d1d9;
     padding: 24px;
-    max-width: 1080px;
+    max-width: 1400px;
     margin: 0 auto;
     line-height: 1.5;
+  }
+  /* 全体を 2 column に: 左 sidebar (★ list) + 右 main (filter + list)。
+     幅 < 900px ではモバイル想定で縦積み。 */
+  .layout {
+    display: flex;
+    gap: 20px;
+    align-items: flex-start;
+  }
+  .layout > .main { flex: 1; min-width: 0; }
+  .layout > .sidebar {
+    flex: 0 0 280px;
+    position: sticky;
+    top: 24px;
+    max-height: calc(100vh - 48px);
+    overflow-y: auto;
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    padding: 12px;
+  }
+  .sidebar h3 {
+    margin: 0 0 10px 0;
+    font-size: 13px;
+    color: #ffd33d;
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+  }
+  .sidebar h3 .count {
+    color: #6e7681;
+    font-size: 11px;
+    font-weight: normal;
+  }
+  .sidebar .empty {
+    padding: 12px 0;
+    text-align: left;
+    color: #6e7681;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  .sidebar-item {
+    padding: 6px 4px 6px 0;
+    border-top: 1px solid #21262d;
+    font-size: 12px;
+  }
+  .sidebar-item:first-of-type { border-top: none; }
+  .sidebar-item .row {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+  }
+  .sidebar-item .name {
+    flex: 1;
+    min-width: 0;
+    color: #c9d1d9;
+    font-family: ui-monospace, SFMono-Regular, monospace;
+    word-break: break-all;
+  }
+  .sidebar-item .name:hover { color: #58a6ff; cursor: pointer; }
+  .sidebar-item .repo {
+    color: #6e7681;
+    font-size: 10px;
+    margin-top: 2px;
+    font-family: ui-monospace, SFMono-Regular, monospace;
+  }
+  .sidebar-item .ctl {
+    background: transparent;
+    border: none;
+    color: #6e7681;
+    cursor: pointer;
+    padding: 0 2px;
+    font-size: 13px;
+    line-height: 1;
+  }
+  .sidebar-item .ctl:hover { color: #ffd33d; }
+  .sidebar-item .ctl[disabled] { opacity: 0.3; cursor: default; }
+  /* main column 内の symbol card が ★ 状態の時、左 border を黄色に */
+  .sym.is-fav { border-left: 3px solid #ffd33d; }
+  /* 検索 hit → 該当 card を 1.5s だけ flash */
+  .sym.flash { animation: flash-bg 1.5s ease-out; }
+  @keyframes flash-bg {
+    0%   { background: #3a2f0d; }
+    100% { background: #161b22; }
+  }
+  @media (max-width: 900px) {
+    .layout { flex-direction: column-reverse; }
+    .layout > .sidebar { flex: 1 1 auto; position: static; max-height: none; width: 100%; box-sizing: border-box; }
   }
   h1 { font-size: 22px; margin-bottom: 8px; color: #58a6ff; }
   p.lede { font-size: 13px; color: #8b949e; margin-bottom: 16px; }
@@ -485,6 +572,7 @@ const CLIENT_SCRIPT = `
   const moduleFiltersEl = document.getElementById('module-filters');
   const featureFiltersEl = document.getElementById('feature-filters');
   const favToggleEl = document.getElementById('fav-only-toggle');
+  const sidebarEl = document.getElementById('favorites-sidebar');
   const data = JSON.parse(document.getElementById('catalog-data').textContent);
 
   // お気に入り: 順序付き fq_path key Array で保持 (= 順位変更可能)。
@@ -555,6 +643,7 @@ const CLIENT_SCRIPT = `
         saveFavorites(favorites);
         saveFavOnly(favOnly);
         renderFavToggle();
+        renderSidebar();
         render(input.value);
       })
       .catch(function(){ /* network failure: localStorage で続行 */ });
@@ -744,7 +833,7 @@ const CLIENT_SCRIPT = `
         + '<button type="button" class="star" data-fav-move="down" data-key="' + escape(k) + '" title="下へ"' + (idx === total - 1 ? ' disabled' : '') + '>↓</button>'
       : '';
     const starBtn = '<button type="button" class="star" data-fav-toggle="1" data-key="' + escape(k) + '" aria-pressed="' + starred + '" title="' + (starred ? 'お気に入りから外す' : 'お気に入りに追加') + '">' + (starred ? '★' : '☆') + '</button>';
-    return '<div class="sym">'
+    return '<div class="sym' + (starred ? ' is-fav' : '') + '" data-symkey="' + escape(k) + '">'
       + '<div class="header">'
       +   '<span class="kind">' + escape(s.kind) + '</span>'
       +   '<span class="fq">' + fqHtml + '</span>'
@@ -754,6 +843,39 @@ const CLIENT_SCRIPT = `
       + '</div>'
       + sig + doc + feats
       + '</div>';
+  }
+
+  // 左 sidebar の ★ list (保存順)。data に該当 symbol が無い key も "stale"
+  // として表示し、削除手段 (✕) を残す (= R2 jsonl が refresh されてない時の救済)。
+  function renderSidebar() {
+    if (!sidebarEl) return;
+    if (favorites.length === 0) {
+      sidebarEl.innerHTML = '<h3>★ Favorites <span class="count">(0)</span></h3>'
+        + '<div class="empty">各 symbol の ★ で追加。ここで ↑↓ 順位変更、✕ で削除。</div>';
+      return;
+    }
+    const byKey = {};
+    data.forEach(function(s){ byKey[symbolKey(s)] = s; });
+    const items = favorites.map(function(k, idx){
+      const s = byKey[k];
+      const upDisabled = idx === 0 ? ' disabled' : '';
+      const downDisabled = idx === favorites.length - 1 ? ' disabled' : '';
+      const controls =
+          '<button type="button" class="ctl" data-fav-move="up" data-key="' + escape(k) + '" title="上へ"' + upDisabled + '>↑</button>'
+        + '<button type="button" class="ctl" data-fav-move="down" data-key="' + escape(k) + '" title="下へ"' + downDisabled + '>↓</button>'
+        + '<button type="button" class="ctl" data-fav-toggle="1" data-key="' + escape(k) + '" title="お気に入りから削除">✕</button>';
+      if (!s) {
+        // stale: data に存在しない key (= R2 上で消えた / repo 変わった等)
+        return '<div class="sidebar-item">'
+          + '<div class="row"><span class="name" style="color:#6e7681">(missing) ' + escape(k) + '</span>' + controls + '</div>'
+          + '</div>';
+      }
+      return '<div class="sidebar-item">'
+        + '<div class="row"><span class="name" data-jump-key="' + escape(k) + '" title="main list へ scroll">' + escape(s.name) + '</span>' + controls + '</div>'
+        + '<div class="repo">' + escape(s.repo) + ' · ' + escape(s.kind) + '</div>'
+        + '</div>';
+    }).join('');
+    sidebarEl.innerHTML = '<h3>★ Favorites <span class="count">(' + favorites.length + ')</span></h3>' + items;
   }
 
   // 軸毎の集計: data 全体での key → 出現回数。chip render に使う。
@@ -836,25 +958,60 @@ const CLIENT_SCRIPT = `
     saveFavOnly(favOnly);
     schedulePut();
     renderFavToggle();
+    renderSidebar();
     render(input.value);
   });
 
-  // ★ toggle / ↑↓ 順位変更は list 側の click delegation で処理。
-  list && list.addEventListener('click', function(ev){
-    const t = ev.target.closest('[data-fav-toggle], [data-fav-move]');
+  // ★ toggle / ↑↓ 順位変更は main list + sidebar 共通の click delegation。
+  // sidebar の name click は main list 内の該当 card へ scroll + flash。
+  function handleFavClick(ev) {
+    const target = ev.target;
+    const jump = target.closest('[data-jump-key]');
+    if (jump) {
+      const card = document.querySelector('.sym[data-symkey="' + (window.CSS && CSS.escape ? CSS.escape(jump.dataset.jumpKey) : jump.dataset.jumpKey.replace(/"/g,'\\\\"')) + '"]');
+      if (card) {
+        card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        card.classList.add('flash');
+        setTimeout(function(){ card.classList.remove('flash'); }, 1500);
+      }
+      return;
+    }
+    const t = target.closest('[data-fav-toggle], [data-fav-move]');
     if (!t) return;
     const k = t.dataset.key;
     if (!k) return;
+    // sidebar 由来の stale key (= data に該当無し) でも toggle (削除) は通す。
+    // move は data 不要なので key だけで動く。
     const s = data.find(function(x){ return symbolKey(x) === k; });
-    if (!s) return;
     if (t.dataset.favToggle) {
-      toggleFav(s);
+      if (s) {
+        toggleFav(s);
+      } else {
+        // 直接 favorites を編集 (stale 削除)
+        const i = favorites.indexOf(k);
+        if (i !== -1) { favorites.splice(i, 1); saveFavorites(favorites); schedulePut(); }
+      }
     } else if (t.dataset.favMove) {
-      moveFav(s, t.dataset.favMove === 'up' ? -1 : 1);
+      const dir = t.dataset.favMove === 'up' ? -1 : 1;
+      if (s) {
+        moveFav(s, dir);
+      } else {
+        const i = favorites.indexOf(k);
+        if (i !== -1) {
+          const j = i + dir;
+          if (j >= 0 && j < favorites.length) {
+            const tmp = favorites[i]; favorites[i] = favorites[j]; favorites[j] = tmp;
+            saveFavorites(favorites); schedulePut();
+          }
+        }
+      }
     }
     renderFavToggle();
+    renderSidebar();
     render(input.value);
-  });
+  }
+  list && list.addEventListener('click', handleFavClick);
+  sidebarEl && sidebarEl.addEventListener('click', handleFavClick);
 
   input.addEventListener('input', function(){ render(input.value); });
 
@@ -864,6 +1021,7 @@ const CLIENT_SCRIPT = `
   if (initQ) input.value = initQ;
   renderFilters();
   renderFavToggle();
+  renderSidebar();
   render(initQ);
   // localStorage で先に paint してから server を確認する (= 初回 fetch を待たず
   // 即表示)。server が新しければ上書き再描画。
@@ -907,16 +1065,21 @@ export async function handleCapCatalogPage(env: Env, _ctx?: ExecutionContext): P
     <code>CAP_CATALOG_R2</code> 経由で <code>v1/latest.jsonl</code> を fetch して表示。
   </p>
   ${banner}
-  <div class="controls">
-    <input id="q" type="search" placeholder="fq_path / name / doc / feature で検索…" autocomplete="off">
+  <div class="layout">
+    <aside id="favorites-sidebar" class="sidebar"></aside>
+    <div class="main">
+      <div class="controls">
+        <input id="q" type="search" placeholder="fq_path / name / doc / feature で検索…" autocomplete="off">
+      </div>
+      <div class="fav-bar">
+        <button id="fav-only-toggle" type="button" class="fav-toggle" aria-pressed="false">☆ Show favorites only<span class="fav-count">(0)</span></button>
+      </div>
+      <div class="filters filters-row"><span class="axis-label">feature:</span><div id="feature-filters" class="filters-axis"></div></div>
+      <div class="filters filters-row"><span class="axis-label">module:</span><div id="module-filters" class="filters-axis"></div></div>
+      <div id="meta" class="meta"></div>
+      <div id="list"></div>
+    </div>
   </div>
-  <div class="fav-bar">
-    <button id="fav-only-toggle" type="button" class="fav-toggle" aria-pressed="false">☆ Show favorites only<span class="fav-count">(0)</span></button>
-  </div>
-  <div class="filters filters-row"><span class="axis-label">feature:</span><div id="feature-filters" class="filters-axis"></div></div>
-  <div class="filters filters-row"><span class="axis-label">module:</span><div id="module-filters" class="filters-axis"></div></div>
-  <div id="meta" class="meta"></div>
-  <div id="list"></div>
 
   <script type="application/json" id="catalog-data">[${dataJson}]</script>
   <script>${CLIENT_SCRIPT}</script>
