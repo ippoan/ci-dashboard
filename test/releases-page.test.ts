@@ -116,7 +116,7 @@ describe("GET /releases", () => {
     await clearReleaseCache(env.CI_STATUS);
     await env.CI_STATUS.delete("direct-push-allowlist:v1");
     // /releases index の SWR blob (Refs #325) もテスト間で leak しないよう flush。
-    await env.CI_STATUS.delete("releases:index:v2");
+    await env.CI_STATUS.delete("releases:index:v3");
     await env.CI_STATUS.delete("releases:index:refreshing");
     await env.CI_STATUS.delete(PR_MAP_CACHE_KEY);
   });
@@ -886,6 +886,65 @@ describe("GET /releases", () => {
     expect(html).toContain("kept issue");
     expect(html).not.toContain("#999");
   });
+
+  // cross-repo scope filter (Refs #400): home repo が MAIN_ORGS + YHONDA_REPOS
+  // の scope 外 (archived / 削除 / 別 owner) なら cross-repo ref を drop する。
+  // close を試みても home 側に権限 / 存在が無く 403/404 で必ず失敗するため。
+  it("drops cross-repo refs whose home repo is outside MAIN_ORGS + YHONDA_REPOS", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (req) => {
+      const url = typeof req === "string" ? req : (req as Request).url;
+
+      if (url.includes("/contents/wt-direct-push/config/direct-push-ok.txt")) {
+        return Response.json({ content: btoa(""), encoding: "base64" });
+      }
+      if (url.match(/\/repos\/ippoan\/shipping-repo(\?|$)/)) {
+        return Response.json({ default_branch: "main" });
+      }
+      if (url.includes("/repos/ippoan/shipping-repo/tags")) {
+        return Response.json([]);
+      }
+      // PR #1 の body に 2 種類の cross-repo ref:
+      //   - ippoan/in-scope-repo#10 (ippoan org 内 → keep)
+      //   - random-org/out-of-scope-repo#99 (scope 外 → drop)
+      if (url.includes("/repos/ippoan/shipping-repo/commits")) {
+        return Response.json([
+          { sha: "abc1234", commit: { message: "feat: ship things (#1)" } },
+        ]);
+      }
+      if (url.endsWith("/repos/ippoan/shipping-repo/pulls/1")) {
+        return Response.json({
+          number: 1,
+          head: { ref: "claude/ship" },
+          body: "Refs ippoan/in-scope-repo#10\nRefs random-org/out-of-scope-repo#99",
+        });
+      }
+      // in-scope cross-repo issue は hydrate される
+      if (url.endsWith("/repos/ippoan/in-scope-repo/issues/10")) {
+        return Response.json({
+          number: 10, title: "in-scope issue", state: "open",
+          labels: [], assignees: [],
+          html_url: "https://github.com/ippoan/in-scope-repo/issues/10",
+          updated_at: "2026-06-10T00:00:00Z",
+        });
+      }
+      // out-of-scope は filter で drop されるので fetch しに来てはいけない
+      if (url.includes("random-org/out-of-scope-repo")) {
+        throw new Error("unexpected fetch: scope filter let out-of-scope ref through");
+      }
+      return new Response(`not stubbed: ${url}`, { status: 500 });
+    });
+
+    const e = testEnv({ tagless: ["ippoan/shipping-repo"] });
+    const req = new Request("http://localhost/releases");
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(req, e, ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain("in-scope issue");
+    expect(html).not.toContain("out-of-scope-repo");
+  });
 });
 
 // ───── /releases index SWR blob (Refs #325) ─────
@@ -894,14 +953,14 @@ describe("GET /releases — index SWR blob (Refs #325)", () => {
     vi.restoreAllMocks();
     await clearReleaseCache(env.CI_STATUS);
     await env.CI_STATUS.delete("direct-push-allowlist:v1");
-    await env.CI_STATUS.delete("releases:index:v2");
+    await env.CI_STATUS.delete("releases:index:v3");
     await env.CI_STATUS.delete("releases:index:refreshing");
     await env.CI_STATUS.delete(PR_MAP_CACHE_KEY);
   });
 
   function seedIndexBlob(storedAt: number, views: unknown[]): Promise<void> {
     return env.CI_STATUS.put(
-      "releases:index:v2",
+      "releases:index:v3",
       JSON.stringify({ storedAt, views }),
     );
   }
@@ -958,7 +1017,7 @@ describe("GET /releases — index SWR blob (Refs #325)", () => {
 
     // waitUntil の背景 refresh が blob を書き直す (空 → 空なので invariant 非該当)
     await waitOnExecutionContext(ctx);
-    const blob = await env.CI_STATUS.get("releases:index:v2", "json") as
+    const blob = await env.CI_STATUS.get("releases:index:v3", "json") as
       { storedAt: number; views: unknown[] };
     expect(blob.storedAt).toBeGreaterThan(oldStoredAt);
   });
@@ -1006,7 +1065,7 @@ describe("GET /releases — index SWR blob (Refs #325)", () => {
     await waitOnExecutionContext(ctx);
 
     expect(res.status).toBe(200);
-    expect(await env.CI_STATUS.get("releases:index:v2")).not.toBeNull();
+    expect(await env.CI_STATUS.get("releases:index:v3")).not.toBeNull();
   });
 });
 
@@ -1016,7 +1075,7 @@ describe("GET /releases — 更新中バッジ + live reload (Refs #327)", () =>
     vi.restoreAllMocks();
     await clearReleaseCache(env.CI_STATUS);
     await env.CI_STATUS.delete("direct-push-allowlist:v1");
-    await env.CI_STATUS.delete("releases:index:v2");
+    await env.CI_STATUS.delete("releases:index:v3");
     await env.CI_STATUS.delete("releases:index:refreshing");
     await env.CI_STATUS.delete(PR_MAP_CACHE_KEY);
   });
@@ -1037,7 +1096,7 @@ describe("GET /releases — 更新中バッジ + live reload (Refs #327)", () =>
   it("staleRepos の repo card に 🔄 更新中バッジ + note に repo 列挙", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
       new Response("not stubbed", { status: 500 }));
-    await env.CI_STATUS.put("releases:index:v2", JSON.stringify({
+    await env.CI_STATUS.put("releases:index:v3", JSON.stringify({
       storedAt: 0,
       views: [view("ippoan/foo"), view("ippoan/bar")],
       staleRepos: ["ippoan/foo"],
@@ -1059,7 +1118,7 @@ describe("GET /releases — 更新中バッジ + live reload (Refs #327)", () =>
   });
 
   it("live reload script (releases-updated listener) を埋め込む", async () => {
-    await env.CI_STATUS.put("releases:index:v2", JSON.stringify({
+    await env.CI_STATUS.put("releases:index:v3", JSON.stringify({
       storedAt: Date.now(), views: [],
     }));
     const ctx = createExecutionContext();
@@ -1077,7 +1136,7 @@ describe("refreshReleasesIndex guards (Refs #329)", () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     await clearReleaseCache(env.CI_STATUS);
-    await env.CI_STATUS.delete("releases:index:v2");
+    await env.CI_STATUS.delete("releases:index:v3");
     await env.CI_STATUS.delete("releases:index:refreshing");
     await env.CI_STATUS.delete("github:rl-backoff");
   });
@@ -1088,7 +1147,7 @@ describe("refreshReleasesIndex guards (Refs #329)", () => {
     const { refreshReleasesIndex } = await import("../src/releases-page");
     await setRateLimitBackoff(env.CI_STATUS, new GitHubApiError(403, "rate limit"));
     const seeded = JSON.stringify({ storedAt: 0, views: [{ repo: "ippoan/x", tagless: true, olderTags: [], tagBlocks: [] }], staleRepos: ["ippoan/x"] });
-    await env.CI_STATUS.put("releases:index:v2", seeded);
+    await env.CI_STATUS.put("releases:index:v3", seeded);
     const fetchSpy = vi.spyOn(globalThis, "fetch");
 
     const outcome = await refreshReleasesIndex(testEnv());
@@ -1096,7 +1155,7 @@ describe("refreshReleasesIndex guards (Refs #329)", () => {
     expect(outcome).toBe("backoff");
     expect(fetchSpy).not.toHaveBeenCalled();
     // blob は stale のまま温存 (cooldown 明けの reschedule で追い付く)
-    expect(await env.CI_STATUS.get("releases:index:v2")).toBe(seeded);
+    expect(await env.CI_STATUS.get("releases:index:v3")).toBe(seeded);
   });
 
 
@@ -1105,7 +1164,7 @@ describe("refreshReleasesIndex guards (Refs #329)", () => {
     // watched 空 → views [] / recheck 無し → 正常 write の "done" 経路
     const outcome = await refreshReleasesIndex(testEnv());
     expect(outcome).toBe("done");
-    expect(await env.CI_STATUS.get("releases:index:v2")).not.toBeNull();
+    expect(await env.CI_STATUS.get("releases:index:v3")).not.toBeNull();
     expect(await env.CI_STATUS.get("releases:index:refreshing")).toBeNull();
   });
 
@@ -1113,14 +1172,14 @@ describe("refreshReleasesIndex guards (Refs #329)", () => {
     const { refreshReleasesIndex } = await import("../src/releases-page");
     await env.CI_STATUS.put("releases:index:refreshing", "1", { expirationTtl: 60 });
     const seeded = JSON.stringify({ storedAt: 0, views: [] });
-    await env.CI_STATUS.put("releases:index:v2", seeded);
+    await env.CI_STATUS.put("releases:index:v3", seeded);
     const fetchSpy = vi.spyOn(globalThis, "fetch");
 
     const outcome = await refreshReleasesIndex(testEnv());
 
     expect(outcome).toBe("lock");
     expect(fetchSpy).not.toHaveBeenCalled();
-    expect(await env.CI_STATUS.get("releases:index:v2")).toBe(seeded);
+    expect(await env.CI_STATUS.get("releases:index:v3")).toBe(seeded);
   });
 });
 
@@ -1129,13 +1188,13 @@ describe("GET /releases — auth-broken note (Refs #334)", () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     await clearReleaseCache(env.CI_STATUS);
-    await env.CI_STATUS.delete("releases:index:v2");
+    await env.CI_STATUS.delete("releases:index:v3");
     await env.CI_STATUS.delete("releases:index:refreshing");
     await env.CI_STATUS.delete("github:auth-broken");
   });
 
   it("marker があれば再ログイン note を出す", async () => {
-    await env.CI_STATUS.put("releases:index:v2", JSON.stringify({ storedAt: Date.now(), views: [] }));
+    await env.CI_STATUS.put("releases:index:v3", JSON.stringify({ storedAt: Date.now(), views: [] }));
     await env.CI_STATUS.put("github:auth-broken", JSON.stringify({ at: Date.now(), message: "invalid_grant" }));
     const ctx = createExecutionContext();
     const res = await worker.fetch(new Request("http://localhost/releases"), testEnv(), ctx);

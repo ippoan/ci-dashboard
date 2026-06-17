@@ -600,6 +600,25 @@ async function loadSyntheticBlock(
     } catch { /* ignore per-PR failure — best-effort enrichment */ }
   }));
 
+  // scope filter (Refs #400): cross-repo refs の home repo が `/issues` page の
+  // scope (MAIN_ORGS + YHONDA_REPOS) に含まれない場合は drop する。scope 外 repo
+  // (archived / renamed / 別 owner) は home 側に close 権限が無く、operator が
+  // close を試みても 403/404 で失敗する。/issues page でも追跡されない issue を
+  // shipping repo の card に残す価値が無いため除外。同 repo refs (`refs` Set) は
+  // 影響しない (常に owner/name = card の repo = 暗黙に scope 内)。
+  const mainOrgsLower = MAIN_ORGS.map((o) => o.toLowerCase());
+  const yhondaReposLower = YHONDA_REPOS.map((r) => r.toLowerCase());
+  for (const [key, x] of [...crossRefs]) {
+    const ownerLower = x.owner.toLowerCase();
+    const repoLower = `${ownerLower}/${x.name.toLowerCase()}`;
+    if (
+      !mainOrgsLower.includes(ownerLower) &&
+      !yhondaReposLower.includes(repoLower)
+    ) {
+      crossRefs.delete(key);
+    }
+  }
+
   // pr-map gate (Refs #400): `Refs #N` を含む commit/PR は集めたが、その issue
   // を実際に解決する `state:"merged"` な PR が無いものは close 候補から落とす。
   // commit message 直 scan 経路で拾われる tag-release commit や direct-push
