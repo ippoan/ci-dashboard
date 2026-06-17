@@ -1110,6 +1110,9 @@ ${refreshingNote}
 ${body}
 <h2 class="lookup-header">Look up another release</h2>
 ${renderLookupForm(null, null)}
+<div class="admin-link">
+  <a href="/admin/dump-releases-blob" target="_blank" rel="noopener">🔍 dump releases blob (debug)</a>
+</div>
 ${PWA_REGISTER_SCRIPT}
 ${RELEASES_LIVE_RELOAD_SCRIPT}
 ${RELEASES_SCROLL_SAVE_SCRIPT}
@@ -1576,6 +1579,12 @@ const STYLES = `
     letter-spacing: 0.5px; color: #8b949e;
     margin: 24px 0 8px 0;
   }
+  .admin-link {
+    margin: 24px 0 12px 0;
+    font-size: 12px;
+  }
+  .admin-link a { color: #6e7681; text-decoration: none; }
+  .admin-link a:hover { color: #58a6ff; text-decoration: underline; }
 `;
 
 // Minimal HTML escape, exported for tests.
