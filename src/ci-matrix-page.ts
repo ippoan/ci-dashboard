@@ -476,8 +476,8 @@ ${summary}
   <div class="dev-list">${devItems}</div>
 </section>
 
-<script>
 ${PWA_REGISTER_SCRIPT}
+<script>
 (function() {
   const filter = document.getElementById('repo-filter');
   filter.addEventListener('input', () => {
