@@ -545,6 +545,23 @@ function renderHtml(
       border-color: #8957e588;
     }
     .pr-chip.merged:hover { background: #8957e544; }
+    /* Cross-repo PRs (= 別 repo の PR が本 issue を ref)。amber 系でハイライト
+       して同 repo (緑/紫) と区別する。Refs #421。
+       merged な cross-repo は太字下線で「他 repo の release で消化された」を
+       強調 — operator が cap-catalog issue を見て「ci-dashboard 側で merge
+       済」を即読みできる。 */
+    .pr-chip.cross-repo {
+      background: #d2932722;
+      color: #f0c674;
+      border-color: #d2932788;
+    }
+    .pr-chip.cross-repo:hover { background: #d2932744; }
+    .pr-chip.cross-repo.merged {
+      background: #d2932733;
+      color: #fbcb71;
+      border-color: #d29327bb;
+      font-weight: 600;
+    }
     .empty {
       padding: 32px;
       text-align: center;
@@ -830,7 +847,11 @@ function renderPrChips(
     // Merged PRs take precedence over draft styling — a merged PR can't
     // be draft anymore, but if GitHub ever flipped them simultaneously the
     // purple "done" signal is more useful than the gray "draft" one.
-    const cls = p.state === "merged" ? " merged" : p.draft ? " draft" : "";
+    const stateCls = p.state === "merged" ? " merged" : p.draft ? " draft" : "";
+    // cross-repo (= 別 repo の PR が本 issue を ref している)。視覚的に同 repo
+    // と区別するため別 class を当てる (#421)。例: cap-catalog#33 が
+    // claude-skills#138 から ref されているケース。
+    const crossCls = p.repo !== i.repo ? " cross-repo" : "";
     const icon = p.state === "merged" ? "✅" : "🔗";
     const label = p.state === "merged"
       ? "Merged PR"
@@ -839,7 +860,10 @@ function renderPrChips(
     const suffix = p.state === "merged"
       ? " (merged)"
       : p.draft ? " (draft)" : "";
-    return `<a class="pr-chip${cls}" href="${escapeHtml(p.url)}" target="_blank" rel="noopener" title="${escapeHtml(title)}">${icon} #${p.number}${suffix}</a>`;
+    // cross-repo の場合は chip 本文にも repo を表示 (`org/repo#N`) — title 属性
+    // hover は info dense すぎて見落とすので、可視 label に出す。
+    const numLabel = p.repo === i.repo ? `#${p.number}` : `${p.repo}#${p.number}`;
+    return `<a class="pr-chip${stateCls}${crossCls}" href="${escapeHtml(p.url)}" target="_blank" rel="noopener" title="${escapeHtml(title)}">${icon} ${escapeHtml(numLabel)}${suffix}</a>`;
   }).join("");
   return `<div class="pr-chips">${chips}</div>`;
 }

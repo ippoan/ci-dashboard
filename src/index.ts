@@ -14,6 +14,7 @@ import { handleReleasesPage } from "./releases-page";
 import { handleReleaseClose } from "./release-close";
 import { handleReleaseCloseBatch } from "./release-close-batch";
 import { readReleasesIndexBlob } from "./releases-index-cache";
+import { recomputeRepoView } from "./releases-page";
 import { handleRecheck, recheckRun } from "./recheck";
 import { handleSecretGenPage } from "./secret-gen-page";
 import { handleCapCatalogPage } from "./cap-catalog-page";
@@ -239,6 +240,37 @@ app.get("/admin/dump-releases-blob", async (c) => {
   return Response.json(blob ?? null, {
     headers: { "cache-control": "no-store" },
   });
+});
+
+// /releases blob の強制 refresh (Refs #421)。FRESH window 1h を待たずに即時
+// 更新したい時の救済経路。CF Access (zone-level) で gate。
+//
+//   - `?repo=owner/name`: 単一 repo の view だけを recomputeRepoView で
+//     同期再計算して blob に patch (= ~3-15s で完結)。`/issues KV` cache が
+//     stale な repo を pinpoint で直したい時に使う。
+//   - parameter 無し: WEBHOOK_QUEUE に releases-index-refresh を 1 件 enqueue
+//     し全 repo の full refresh を queue consumer 経由で走らせる。重複 enqueue
+//     は refresh 側の lock + fresh recheck で無駄撃ち (Refs #337)。
+//
+// GET でも accept する (operator が footer link クリックで kick できる UX)。
+app.all("/admin/force-refresh-releases", async (c) => {
+  if (c.req.method !== "GET" && c.req.method !== "POST") {
+    return new Response("Method Not Allowed", { status: 405 });
+  }
+  const repoParam = new URL(c.req.raw.url).searchParams.get("repo");
+  if (repoParam) {
+    // `owner/name` 形式の最小 validation。
+    if (!/^[\w.-]+\/[\w.-]+$/.test(repoParam)) {
+      return Response.json({ ok: false, reason: "invalid repo param" }, { status: 400 });
+    }
+    const outcome = await recomputeRepoView(c.env, repoParam);
+    return Response.json({ ok: outcome === "patched", repo: repoParam, outcome });
+  }
+  if (!c.env.WEBHOOK_QUEUE) {
+    return Response.json({ ok: false, reason: "queue binding unavailable" }, { status: 503 });
+  }
+  await c.env.WEBHOOK_QUEUE.send({ kind: "releases-index-refresh" });
+  return Response.json({ ok: true, enqueued: "releases-index-refresh" });
 });
 
 // WebSocket
