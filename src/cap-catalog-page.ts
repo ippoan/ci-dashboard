@@ -306,6 +306,28 @@ const PAGE_STYLES = `
     margin-left: 4px;
   }
   .filters .chip[aria-pressed="true"] .chip-count { color: #8b949e; }
+  /* feature chip 内の ★ button (= feature を fav に追加 / 解除)。 */
+  .filters .chip .chip-star {
+    margin-left: 6px;
+    color: #6e7681;
+    cursor: pointer;
+    font-size: 13px;
+    line-height: 1;
+  }
+  .filters .chip .chip-star:hover { color: #ffd33d; }
+  .filters .chip .chip-star[aria-pressed="true"] { color: #ffd33d; }
+  /* sidebar entry の種別 badge (fn / struct / feature 等)。 */
+  .sidebar-item .badge {
+    display: inline-block;
+    padding: 0 5px;
+    border-radius: 3px;
+    font-size: 9px;
+    text-transform: lowercase;
+    font-weight: 600;
+    margin-right: 4px;
+  }
+  .sidebar-item .badge-sym { background: #21262d; color: #d29922; }
+  .sidebar-item .badge-feat { background: #1f2d3d; color: #79c0ff; }
   .filters .chip-reset {
     background: transparent;
     color: #58a6ff;
@@ -649,16 +671,25 @@ const CLIENT_SCRIPT = `
       .catch(function(){ /* network failure: localStorage で続行 */ });
   }
 
-  function isFav(s) { return favorites.indexOf(symbolKey(s)) !== -1; }
-  function toggleFav(s) {
-    const k = symbolKey(s);
+  // favorites の entry は 2 種類混在可能:
+  //   - symbol key:  '<repo>|<lang>|<fq_path>'   (PR #380 から、prefix 無し)
+  //   - feature key: 'feat:<name>'               (本 PR から、ippoan/cap-catalog#1)
+  // 区別は 'feat:' prefix。repo 名に ':' が入らない (= owner/name 形式) ので
+  // collision 不能。
+  const FEATURE_PREFIX = 'feat:';
+  function featureKey(name) { return FEATURE_PREFIX + name; }
+  function isFeatureKey(k) { return typeof k === 'string' && k.indexOf(FEATURE_PREFIX) === 0; }
+  function featureName(k) { return k.slice(FEATURE_PREFIX.length); }
+
+  function isFavKey(k) { return favorites.indexOf(k) !== -1; }
+  function isFav(s) { return isFavKey(symbolKey(s)); }
+  function toggleFavKey(k) {
     const i = favorites.indexOf(k);
     if (i === -1) favorites.push(k); else favorites.splice(i, 1);
     saveFavorites(favorites);
     schedulePut();
   }
-  function moveFav(s, dir) {
-    const k = symbolKey(s);
+  function moveFavKey(k, dir) {
     const i = favorites.indexOf(k);
     if (i === -1) return;
     const j = i + dir;
@@ -857,22 +888,36 @@ const CLIENT_SCRIPT = `
     const byKey = {};
     data.forEach(function(s){ byKey[symbolKey(s)] = s; });
     const items = favorites.map(function(k, idx){
-      const s = byKey[k];
       const upDisabled = idx === 0 ? ' disabled' : '';
       const downDisabled = idx === favorites.length - 1 ? ' disabled' : '';
       const controls =
           '<button type="button" class="ctl" data-fav-move="up" data-key="' + escape(k) + '" title="上へ"' + upDisabled + '>↑</button>'
         + '<button type="button" class="ctl" data-fav-move="down" data-key="' + escape(k) + '" title="下へ"' + downDisabled + '>↓</button>'
         + '<button type="button" class="ctl" data-fav-toggle="1" data-key="' + escape(k) + '" title="お気に入りから削除">✕</button>';
+
+      if (isFeatureKey(k)) {
+        const name = featureName(k);
+        // 該当 feature を持つ symbol が data 内に存在するかで stale 判定。
+        const hit = data.some(function(x){ return (x.features || []).indexOf(name) !== -1; });
+        const nameHtml = hit
+          ? '<span class="name" data-jump-feat="' + escape(name) + '" title="この feature を持つ最初の card へ scroll">' + escape(name) + '</span>'
+          : '<span class="name" style="color:#6e7681">(missing) ' + escape(name) + '</span>';
+        return '<div class="sidebar-item">'
+          + '<div class="row">' + nameHtml + controls + '</div>'
+          + '<div class="repo"><span class="badge badge-feat">feature</span></div>'
+          + '</div>';
+      }
+
+      const s = byKey[k];
       if (!s) {
-        // stale: data に存在しない key (= R2 上で消えた / repo 変わった等)
         return '<div class="sidebar-item">'
           + '<div class="row"><span class="name" style="color:#6e7681">(missing) ' + escape(k) + '</span>' + controls + '</div>'
+          + '<div class="repo"><span class="badge badge-sym">symbol</span></div>'
           + '</div>';
       }
       return '<div class="sidebar-item">'
         + '<div class="row"><span class="name" data-jump-key="' + escape(k) + '" title="main list へ scroll">' + escape(s.name) + '</span>' + controls + '</div>'
-        + '<div class="repo">' + escape(s.repo) + ' · ' + escape(s.kind) + '</div>'
+        + '<div class="repo"><span class="badge badge-sym">' + escape(s.kind) + '</span> ' + escape(s.repo) + '</div>'
         + '</div>';
     }).join('');
     sidebarEl.innerHTML = '<h3>★ Favorites <span class="count">(' + favorites.length + ')</span></h3>' + items;
@@ -909,11 +954,20 @@ const CLIENT_SCRIPT = `
   function renderChips(el, axis, counts) {
     if (!el) return;
     if (axis.allKeys.length === 0) { el.innerHTML = ''; return; }
+    // feature 軸の chip だけ ★ button を中に持つ (= feature を fav 化できる)。
+    // module 軸の chip は star 無し (= module は navigation 軸であり「能力」では
+    // ないので fav の対象にしない)。(unfeatured) sentinel も fav 対象外。
+    const isFeatureAxis = axis.lsKey === 'cap-catalog:hiddenFeatures';
     const chips = axis.allKeys.map(function(k){
       const visible = !axis.hidden.has(k);
+      const showStar = isFeatureAxis && k !== UNFEATURED;
+      const star = showStar
+        ? '<span role="button" class="chip-star" data-fav-toggle="1" data-key="' + escape(featureKey(k)) + '" aria-pressed="' + isFavKey(featureKey(k)) + '" title="お気に入りに追加 / 解除">' + (isFavKey(featureKey(k)) ? '★' : '☆') + '</span>'
+        : '';
       return '<button type="button" class="chip" data-axis="' + escape(axis.lsKey) + '" data-key="' + escape(k) + '" aria-pressed="' + visible + '" title="' + (visible ? 'click to hide' : 'click to show') + '">'
         + escape(k)
         + '<span class="chip-count">' + counts[k] + '</span>'
+        + star
         + '</button>';
     }).join('');
     el.innerHTML = chips
@@ -927,6 +981,9 @@ const CLIENT_SCRIPT = `
   function bindAxisClick(el) {
     if (!el) return;
     el.addEventListener('click', function(ev){
+      // chip 内の ★ click は fav handler に任せる (= 同一 chip 内で hide-toggle
+      // と fav-toggle が両方発火しないよう priority 付け)。
+      if (ev.target.closest('[data-fav-toggle]')) return;
       const t = ev.target.closest('[data-axis]');
       if (!t) return;
       const axisKey = t.dataset.axis;
@@ -962,17 +1019,35 @@ const CLIENT_SCRIPT = `
     render(input.value);
   });
 
-  // ★ toggle / ↑↓ 順位変更は main list + sidebar 共通の click delegation。
-  // sidebar の name click は main list 内の該当 card へ scroll + flash。
+  // ★ toggle / ↑↓ 順位変更は main list + sidebar + feature chip 共通の click
+  // delegation。sidebar の name click は main list の該当 card へ scroll + flash:
+  //   - data-jump-key:  symbol key '<repo>|<lang>|<fq>' → .sym[data-symkey=]
+  //   - data-jump-feat: feature 名                       → そのタグを持つ最初の .sym
+  function safeCss(v) {
+    if (window.CSS && CSS.escape) return CSS.escape(v);
+    return v.replace(/[\\\\"]/g, '\\\\$&');
+  }
+  function flashCard(card) {
+    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    card.classList.add('flash');
+    setTimeout(function(){ card.classList.remove('flash'); }, 1500);
+  }
   function handleFavClick(ev) {
     const target = ev.target;
-    const jump = target.closest('[data-jump-key]');
-    if (jump) {
-      const card = document.querySelector('.sym[data-symkey="' + (window.CSS && CSS.escape ? CSS.escape(jump.dataset.jumpKey) : jump.dataset.jumpKey.replace(/"/g,'\\\\"')) + '"]');
-      if (card) {
-        card.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        card.classList.add('flash');
-        setTimeout(function(){ card.classList.remove('flash'); }, 1500);
+    const jumpSym = target.closest('[data-jump-key]');
+    if (jumpSym) {
+      const card = document.querySelector('.sym[data-symkey="' + safeCss(jumpSym.dataset.jumpKey) + '"]');
+      if (card) flashCard(card);
+      return;
+    }
+    const jumpFeat = target.closest('[data-jump-feat]');
+    if (jumpFeat) {
+      const name = jumpFeat.dataset.jumpFeat;
+      // data から最初に name を含む symbol を探し、その card を flash
+      const s = data.find(function(x){ return (x.features || []).indexOf(name) !== -1; });
+      if (s) {
+        const card = document.querySelector('.sym[data-symkey="' + safeCss(symbolKey(s)) + '"]');
+        if (card) flashCard(card);
       }
       return;
     }
@@ -980,38 +1055,21 @@ const CLIENT_SCRIPT = `
     if (!t) return;
     const k = t.dataset.key;
     if (!k) return;
-    // sidebar 由来の stale key (= data に該当無し) でも toggle (削除) は通す。
-    // move は data 不要なので key だけで動く。
-    const s = data.find(function(x){ return symbolKey(x) === k; });
     if (t.dataset.favToggle) {
-      if (s) {
-        toggleFav(s);
-      } else {
-        // 直接 favorites を編集 (stale 削除)
-        const i = favorites.indexOf(k);
-        if (i !== -1) { favorites.splice(i, 1); saveFavorites(favorites); schedulePut(); }
-      }
+      toggleFavKey(k);
     } else if (t.dataset.favMove) {
-      const dir = t.dataset.favMove === 'up' ? -1 : 1;
-      if (s) {
-        moveFav(s, dir);
-      } else {
-        const i = favorites.indexOf(k);
-        if (i !== -1) {
-          const j = i + dir;
-          if (j >= 0 && j < favorites.length) {
-            const tmp = favorites[i]; favorites[i] = favorites[j]; favorites[j] = tmp;
-            saveFavorites(favorites); schedulePut();
-          }
-        }
-      }
+      moveFavKey(k, t.dataset.favMove === 'up' ? -1 : 1);
     }
     renderFavToggle();
     renderSidebar();
+    renderFilters(); // feature chip の ★ 状態 update
     render(input.value);
   }
   list && list.addEventListener('click', handleFavClick);
   sidebarEl && sidebarEl.addEventListener('click', handleFavClick);
+  // feature chip area の click も同じ handler。chip 自体の hide-toggle と
+  // 競合しないよう bindAxisClick 側で [data-fav-toggle] を除外している。
+  featureFiltersEl && featureFiltersEl.addEventListener('click', handleFavClick);
 
   input.addEventListener('input', function(){ render(input.value); });
 

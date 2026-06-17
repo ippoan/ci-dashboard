@@ -201,6 +201,21 @@ describe("GET /cap-catalog", () => {
     expect(body).toContain('id="list"');
   });
 
+  it("allows favoriting feature chips (★ inside chip + feat: key prefix + jump-feat)", async () => {
+    // user 指示: feature も favorite に入れたい (Refs ippoan/cap-catalog#1)。
+    // feature chip 内に ★ を出し、key は `feat:<name>` で symbol key と区別する。
+    // sidebar の feature entry から該当 feature を持つ最初の card に jump できる。
+    const { body } = await fetchPage();
+    // chip-star span (chip 内に embedded)
+    expect(body).toContain('class="chip-star"');
+    // feature key prefix (= storage と client 内部表現の合意)
+    expect(body).toContain("'feat:'");
+    // sidebar の feature entry から main の card に jump
+    expect(body).toContain('data-jump-feat');
+    // module/symbol との視覚区別用 badge
+    expect(body).toContain('badge-feat');
+  });
+
   it("renders a left sidebar container for favorites (wire contract)", async () => {
     // 左 sidebar に ★ list を常時表示する 2-column layout。jump (sidebar →
     // main list scroll) と stale 救済の 2 属性を gate。
