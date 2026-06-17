@@ -23,29 +23,29 @@ interface GitHubJob {
   completed_at: string | null;
 }
 
-export async function handleRecheck(
-  request: Request,
+export interface RecheckResult {
+  ok: boolean;
+  status?: number;
+  error?: string;
+  run_id?: number;
+}
+
+export async function recheckRun(
   env: Env,
   hub: DurableObjectStub,
-): Promise<Response> {
-  const { run_id, repo } = await request.json<{
-    run_id: number;
-    repo: string;
-  }>();
-
-  if (!repo) {
-    return Response.json({ error: "Missing repo" }, { status: 400 });
-  }
+  run_id: number,
+  repo: string,
+): Promise<RecheckResult> {
+  if (!repo) return { ok: false, status: 400, error: "Missing repo" };
   const [owner] = repo.split("/", 1);
-  if (!owner) {
-    return Response.json({ error: "Bad repo" }, { status: 400 });
-  }
+  if (!owner) return { ok: false, status: 400, error: "Bad repo" };
+
   let token: string;
   try {
     token = await tokenForOrg(env, owner);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    return Response.json({ error: msg }, { status: 403 });
+    return { ok: false, status: 403, error: msg };
   }
 
   const headers = {
@@ -61,10 +61,7 @@ export async function handleRecheck(
   );
   if (!runRes.ok) {
     const text = await runRes.text();
-    return Response.json(
-      { error: `GitHub API ${runRes.status}: ${text}` },
-      { status: 502 },
-    );
+    return { ok: false, status: 502, error: `GitHub API ${runRes.status}: ${text}` };
   }
 
   const run = (await runRes.json()) as GitHubRun;
@@ -115,5 +112,24 @@ export async function handleRecheck(
     }
   }
 
-  return Response.json({ ok: true, run_id });
+  return { ok: true, run_id };
+}
+
+export async function handleRecheck(
+  request: Request,
+  env: Env,
+  hub: DurableObjectStub,
+): Promise<Response> {
+  const { run_id, repo } = await request.json<{
+    run_id: number;
+    repo: string;
+  }>();
+  const result = await recheckRun(env, hub, run_id, repo);
+  if (!result.ok) {
+    return Response.json(
+      { error: result.error },
+      { status: result.status ?? 500 },
+    );
+  }
+  return Response.json({ ok: true, run_id: result.run_id });
 }
