@@ -95,6 +95,17 @@ describe("GET /cap-catalog", () => {
     expect(body).toContain("not found");
   });
 
+  it("ships a `fq-link` style and wraps fq_path with GitHub link when file:line are present", async () => {
+    // sample fallback には実 file/line を持つ symbol が含まれている
+    // (cap_catalog_schema::SCHEMA_VERSION = crates/cap-catalog-schema/src/lib.rs:12)。
+    const { body } = await fetchPage();
+    expect(body).toContain("a.fq-link");
+    // client side で `<a class="fq-link" href="https://github.com/...">…</a>` を
+    // build しているコード string を出力に含む
+    expect(body).toContain('class="fq-link"');
+    expect(body).toContain("buildGitHubLink(s.repo, s.file, s.line)");
+  });
+
   it("uses R2 live data when v1/latest.jsonl is present", async () => {
     const jsonl = [
       JSON.stringify({
