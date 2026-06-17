@@ -473,6 +473,10 @@ ${summary}
 </section>
 
 <section data-view="deviations" hidden>
+  <p class="meta">
+    <a href="/ci-matrix/deviations.json" download>📥 JSON ダウンロード</a>
+    (${analyzed.deviations.length} 件)
+  </p>
   <div class="dev-list">${devItems}</div>
 </section>
 
@@ -513,6 +517,44 @@ export async function handleCiMatrixPage(req: Request, env: Env): Promise<Respon
     status: payload ? 200 : 503,
     headers: {
       "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": source === "live" ? "public, max-age=120" : "no-store",
+      "X-CI-Matrix-Source": source,
+    },
+  });
+}
+
+/** `/ci-matrix/deviations.json` — 逸脱一覧を JSON でダウンロード (Refs #395)。 */
+export async function handleCiMatrixDeviationsJson(
+  req: Request,
+  env: Env,
+): Promise<Response> {
+  const url = new URL(req.url);
+  const refresh = url.searchParams.get("refresh") === "1";
+  const { payload, source, error } = await loadPayload(env, refresh);
+  if (!payload) {
+    return new Response(JSON.stringify({ error: error ?? "no payload" }), {
+      status: 503,
+      headers: {
+        "Content-Type": "application/json",
+        "X-CI-Matrix-Source": source,
+      },
+    });
+  }
+  const analyzed = analyzeMatrix(payload);
+  const body = {
+    schema_version: 1,
+    generated_at: payload.generated_at,
+    scan_source: payload.scan_source,
+    total_repos: analyzed.rows.length,
+    total_deviations: analyzed.deviations.length,
+    deviations: analyzed.deviations,
+  };
+  const today = payload.generated_at.slice(0, 10);
+  return new Response(JSON.stringify(body, null, 2) + "\n", {
+    status: 200,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Content-Disposition": `attachment; filename="ci-matrix-deviations-${today}.json"`,
       "Cache-Control": source === "live" ? "public, max-age=120" : "no-store",
       "X-CI-Matrix-Source": source,
     },
