@@ -25,6 +25,8 @@ import {
 } from "./release-cache";
 import { loadDirectPushAllowlist } from "./direct-push-allowlist";
 import { parseTaglessRepos } from "./tagless-repos";
+import { loadPrMap, type PrMapResult } from "./pr-map-cache";
+import { MAIN_ORGS, YHONDA_REPOS } from "./scanned-orgs";
 import {
   getRateLimitBackoff,
   noteGitHubAuthBroken,
@@ -378,14 +380,29 @@ async function computeIndexViews(env: ReleasesIndexEnv): Promise<RepoView[]> {
 
   const repos = [...watched].sort();
 
-  // 2. Per-repo data load in parallel; whole-repo failures get a null view
+  // 2. Shared pr-map: `/issues` page の KV cache をそのまま reuse して、合致する
+  //    merged PR を持たない `Refs #N` を close 候補から落とす gate (Refs #400)。
+  //    tag-release commit / 直 push commit など PR 経由を持たない Refs が
+  //    synthetic block に紛れ込む bug の修正。loading 中 (cold start) は
+  //    filter を skip して fail-open (= 空 index を blob にキャッシュしない
+  //    invariant を維持しつつ、warm 後に正しく絞られる)。
+  let prMap: PrMapResult;
+  try {
+    prMap = await loadPrMap(env, MAIN_ORGS, YHONDA_REPOS);
+  } catch {
+    // pr-map fetch 失敗 (rate limit 等) は fail-open: 既存挙動 (gate 無し) に
+    // degrade して空表示を避ける。次の warm 時に filter が効き始める。
+    prMap = { map: new Map(), stale: false, refreshing: false, loading: true, error: null };
+  }
+
+  // 3. Per-repo data load in parallel; whole-repo failures get a null view
   //    we drop in the renderer. Allowlisted or TAGLESS_REPOS-listed repos
   //    take the synthetic path inside loadRepoView when they have no semver
   //    tags.
   const views = await Promise.all(repos.map(async (repo) => {
     try {
       const useSynthetic = allowlist.has(repo) || tagless.has(repo);
-      return await loadRepoView(env, repo, useSynthetic, env.CI_STATUS);
+      return await loadRepoView(env, repo, useSynthetic, env.CI_STATUS, prMap);
     } catch {
       return null;
     }
@@ -399,6 +416,7 @@ async function loadRepoView(
   repo: string,
   useSynthetic: boolean,
   kv?: KVNamespace,
+  prMap?: PrMapResult,
 ): Promise<RepoView | null> {
   const { owner, repo: name } = parseRepo(repo);
   const token = await tokenForOrg(env, owner);
@@ -440,7 +458,7 @@ async function loadRepoView(
   // 回避するためだけに参照する。
   void useSynthetic;
 
-  const block = await loadSyntheticBlock(env, token, owner, name, kv);
+  const block = await loadSyntheticBlock(env, token, owner, name, kv, undefined, prMap);
   return {
     repo: `${owner}/${name}`,
     tagBlocks: block ? [block] : [],
@@ -490,6 +508,12 @@ async function loadSyntheticBlock(
   // TAGLESS_REPOS 指定の repo が tag を持つ場合に「latest tag → HEAD で merge
   // されたが未 release な PR」を表示するための「unreleased zone」用途。
   sinceTag?: string,
+  // `/issues` page の pr-map を share した gate (Refs #400)。同 issue を
+  // `state:"merged"` で指す PR が無い `Refs #N` を close 候補から落とす
+  // (tag-release commit / direct-push commit が拾われる bug の修正)。
+  // `loading === true` (cold start) または undefined は filter を skip して
+  // fail-open (既存挙動に degrade)。
+  prMap?: PrMapResult,
 ): Promise<TagBlock | null> {
   let defaultBranch: string;
   try {
@@ -575,6 +599,27 @@ async function loadSyntheticBlock(
       }
     } catch { /* ignore per-PR failure — best-effort enrichment */ }
   }));
+
+  // pr-map gate (Refs #400): `Refs #N` を含む commit/PR は集めたが、その issue
+  // を実際に解決する `state:"merged"` な PR が無いものは close 候補から落とす。
+  // commit message 直 scan 経路で拾われる tag-release commit や direct-push
+  // commit が「PR 不在の checked 候補」として並ぶ bug の修正。同じ pr-map は
+  // `/issues` page の chip でも使われており SSR で 2 重 fetch にはならない。
+  //
+  // cold start (loading) や fetch 失敗 (gate 未提供) は filter skip = 既存挙動。
+  if (prMap && !prMap.loading) {
+    const hasMergedPr = (ownerRepo: string, n: number): boolean => {
+      const refsList = prMap.map.get(`${ownerRepo}#${n}`);
+      return Array.isArray(refsList) && refsList.some((r) => r.state === "merged");
+    };
+    const sameRepoOwnerRepo = `${owner}/${name}`;
+    for (const n of [...refs]) {
+      if (!hasMergedPr(sameRepoOwnerRepo, n)) refs.delete(n);
+    }
+    for (const [key, x] of [...crossRefs]) {
+      if (!hasMergedPr(`${x.owner}/${x.name}`, x.number)) crossRefs.delete(key);
+    }
+  }
 
   // Hydrate cross-repo issues from their home repo (own token + cache), capped
   // like the PR pass. Built into rows tagged with `repo` so render + close target

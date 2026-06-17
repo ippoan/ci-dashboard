@@ -25,17 +25,7 @@ import {
 } from "./project-cache";
 import { readPrMapCache } from "./pr-map-cache";
 import { parseTaglessRepos } from "./tagless-repos";
-
-// Orgs fetched in full. Same allowlist as github-api.ts (not imported because
-// ALLOWED_ORGS isn't exported; keep the two in sync if either grows).
-const ORGS = ["ippoan", "ohishi-exp"];
-
-// yhonda-ohishi org has many old personal repos (2023-2024 lineworks_bot /
-// nginx / authjs-nuxt-test etc.) that would create noise. Only surface the
-// active claude-tooling repos by filtering on `repo:` qualifiers.
-// NB: claude-hooks has migrated to ippoan/claude-hooks, which is already
-// covered by the full ORGS scan, so it is no longer listed here.
-const YHONDA_REPOS = ["yhonda-ohishi/claude-skills"];
+import { MAIN_ORGS as ORGS, YHONDA_REPOS } from "./scanned-orgs";
 
 // Orgs scanned for Projects v2 (used by `fetchProjectIssueMap`). yhonda-ohishi
 // is included so the user's claude-tooling repos can still be pinned to a
