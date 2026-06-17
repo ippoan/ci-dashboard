@@ -35,6 +35,7 @@ import {
 import {
   readReleasesIndexBlob,
   writeReleasesIndexBlob,
+  writePatchedReleasesIndexBlob,
   RELEASES_INDEX_FRESH_SECONDS,
   RELEASES_INDEX_REFRESH_LOCK,
   RELEASES_INDEX_REFRESH_LOCK_TTL,
@@ -250,6 +251,47 @@ async function kickReleasesIndexRefresh(
 export type ReleasesIndexRefreshOutcome =
   | "done" | "fresh" | "backoff" | "lock" | "empty-skip";
 
+/** 単一 repo の view を再計算し、blob の該当 view を差し替える (Refs #421)。
+ *  /admin/force-refresh-releases?repo=owner/name endpoint から呼ばれる。
+ *  full refresh (~16-35s for ~30 repo) を待たずに特定 repo だけ即時更新したい
+ *  時の救済経路。useSynthetic は computeIndexViews と同じロジックで判定。
+ *  @returns "patched" = view を差し替え blob を書いた
+ *           "view-null" = loadRepoView が null (archived / fetch fail)
+ *           "no-blob" = blob 不在 (cold start 中) — 通常 full refresh に倒す */
+export async function recomputeRepoView(
+  env: ReleasesIndexEnv,
+  repo: string,
+): Promise<"patched" | "view-null" | "no-blob"> {
+  const blob = await readReleasesIndexBlob<RepoView[]>(env);
+  if (!blob) return "no-blob";
+
+  const tagless = parseTaglessRepos(env.TAGLESS_REPOS);
+  let allowlist = new Set<string>();
+  try {
+    allowlist = await loadDirectPushAllowlist(env, env.CI_STATUS);
+  } catch { /* keep empty — allowlist は best-effort */ }
+
+  let prMap: PrMapResult;
+  try {
+    prMap = await loadPrMap(env, MAIN_ORGS, YHONDA_REPOS);
+  } catch {
+    prMap = { map: new Map(), stale: false, refreshing: false, loading: true, error: null };
+  }
+
+  const useSynthetic = allowlist.has(repo) || tagless.has(repo);
+  const view = await loadRepoView(env, repo, useSynthetic, env.CI_STATUS, prMap);
+  if (!view) return "view-null";
+
+  // blob の views[] 内の該当 entry を差し替え (存在しなければ末尾に追加)。
+  // storedAt は触らない (= 全集計とは別経路、patch の意味を維持、#339 と同じ
+  // invariant)。
+  const idx = blob.views.findIndex((v) => v.repo === repo);
+  if (idx >= 0) blob.views[idx] = view;
+  else blob.views.push(view);
+  await writePatchedReleasesIndexBlob(env, blob);
+  return "patched";
+}
+
 export async function refreshReleasesIndex(
   env: ReleasesIndexEnv,
 ): Promise<ReleasesIndexRefreshOutcome> {
@@ -410,7 +452,7 @@ async function computeIndexViews(env: ReleasesIndexEnv): Promise<RepoView[]> {
   return views.filter((v): v is RepoView => v !== null);
 }
 
-async function loadRepoView(
+export async function loadRepoView(
   env: AuthClientWorkerEnv,
   repo: string,
   useSynthetic: boolean,
@@ -1112,6 +1154,8 @@ ${body}
 ${renderLookupForm(null, null)}
 <div class="admin-link">
   <a href="/admin/dump-releases-blob" target="_blank" rel="noopener">🔍 dump releases blob (debug)</a>
+  <span class="admin-link-sep">·</span>
+  <a href="/admin/force-refresh-releases" target="_blank" rel="noopener" title="WEBHOOK_QUEUE に releases-index-refresh を 1 件 enqueue。次の queue 処理で blob が再生成される">🔄 force refresh</a>
 </div>
 ${PWA_REGISTER_SCRIPT}
 ${RELEASES_LIVE_RELOAD_SCRIPT}
@@ -1257,8 +1301,11 @@ function renderIndexRepo(view: RepoView, updating = false): string {
   // Whole repo card is one form so the operator can tick across tags and
   // close them in one shot; the POST handler groups by tag for comment
   // attribution.
+  // per-repo force-refresh link (Refs #421)。/admin/force-refresh-releases?repo=
+  // を新タブで開き、その repo の view だけ即時 recompute する (~3-15s)。
+  const refreshHref = `/admin/force-refresh-releases?repo=${encodeURIComponent(view.repo)}`;
   return `<section class="repo-card">
-    <h2><a href="https://github.com/${escapeHtml(view.repo)}/releases" target="_blank" rel="noopener">${escapeHtml(view.repo)}</a>${renderModeBadge(view.tagless)}${updatingBadge}</h2>
+    <h2><a href="https://github.com/${escapeHtml(view.repo)}/releases" target="_blank" rel="noopener">${escapeHtml(view.repo)}</a>${renderModeBadge(view.tagless)}${updatingBadge}<a class="repo-refresh" href="${refreshHref}" target="_blank" rel="noopener" title="この repo の view を即時再計算 (loadRepoView)">🔄</a></h2>
     <form method="POST" action="/api/release-close-batch" class="batch-close-form">
       <input type="hidden" name="repo" value="${escapeHtml(view.repo)}">
       ${tagSections}
@@ -1585,6 +1632,13 @@ const STYLES = `
   }
   .admin-link a { color: #6e7681; text-decoration: none; }
   .admin-link a:hover { color: #58a6ff; text-decoration: underline; }
+  .admin-link-sep { color: #30363d; margin: 0 6px; }
+  .repo-refresh {
+    margin-left: 8px; font-size: 12px;
+    color: #6e7681; text-decoration: none;
+    opacity: 0.6;
+  }
+  .repo-refresh:hover { opacity: 1; color: #58a6ff; }
 `;
 
 // Minimal HTML escape, exported for tests.
