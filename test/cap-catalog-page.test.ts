@@ -201,6 +201,18 @@ describe("GET /cap-catalog", () => {
     expect(body).toContain('id="list"');
   });
 
+  it("renders a left sidebar container for favorites (wire contract)", async () => {
+    // 左 sidebar に ★ list を常時表示する 2-column layout。jump (sidebar →
+    // main list scroll) と stale 救済の 2 属性を gate。
+    const { body } = await fetchPage();
+    expect(body).toContain('id="favorites-sidebar"');
+    expect(body).toContain('class="layout"');
+    // sidebar entry の name から main list 該当 card へ scroll
+    expect(body).toContain('data-jump-key');
+    // ★ 済 card は左 border 黄色 (= 視認性)
+    expect(body).toContain('is-fav');
+  });
+
   it("ships favorites button + ordered storage + favOnly toggle (wire contract)", async () => {
     // お気に入り: 順序付き Array で保存 (= 順位 ↑↓ 変更可)、favOnly モードで
     // ★ つきだけ表示。fq_path 変更時の追従性のため key は repo|language|fq_path。
