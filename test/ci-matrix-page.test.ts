@@ -408,6 +408,8 @@ describe("buildCapCatalogStatus", () => {
     expect(CAP_CATALOG_EXCLUSIONS["ippoan/claude-md"]).toBe("no-code");
     expect(CAP_CATALOG_EXCLUSIONS["ippoan/cap-catalog"]).toBe("self");
     expect(CAP_CATALOG_EXCLUSIONS["ippoan/cf-access-mcp"]).toBe("deleted");
+    // freee MCP 利用 workspace は実コード無しの no-code
+    expect(CAP_CATALOG_EXCLUSIONS["yhonda-ohishi/freee"]).toBe("no-code");
   });
 });
 
