@@ -11,6 +11,8 @@ import {
   renderMatrixPage,
   handleCiMatrixPage,
   _resetMatrixCacheForTest,
+  buildCapCatalogStatus,
+  CAP_CATALOG_EXCLUSIONS,
   type ScannerPayload,
   COLUMN_ORDER,
 } from "../src/ci-matrix-page";
@@ -283,5 +285,226 @@ describe("handleCiMatrixPage", () => {
     // refresh=1 で再 list される
     await handleCiMatrixPage(new Request("https://example.com/ci-matrix?refresh=1"), env);
     expect(spy).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("buildCapCatalogStatus", () => {
+  it("cap-catalog-extract caller がある repo を covered=true にする", () => {
+    const payload: ScannerPayload = {
+      ...fixturePayload(),
+      reusable_categories: {
+        "frontend-ci.yml": "frontend-ci",
+        "catalog-extract.yml": "cap-catalog-extract",
+      },
+      repos: [
+        {
+          owner: "ippoan",
+          repo: "auth-worker",
+          scanned_at: "2026-06-17T00:00:00Z",
+          workflows: [
+            {
+              file: ".github/workflows/cap-catalog-extract.yml",
+              reusable_calls: [
+                {
+                  job_id: "extract",
+                  target_owner: "ippoan",
+                  target_repo: "ci-workflows",
+                  target_file: ".github/workflows/catalog-extract.yml",
+                  reusable_name: "catalog-extract.yml",
+                  ref: "main",
+                  pinned_sha: false,
+                  secrets_inherit: false,
+                },
+              ],
+              self_jobs: [],
+              deviations: [],
+            },
+          ],
+          summary: {
+            total_workflows: 1,
+            reusable_caller_workflows: 1,
+            used_reusable_categories: ["cap-catalog-extract"],
+            deviation_flags: [],
+          },
+        },
+      ],
+    };
+    const rows = analyzeMatrix(payload).rows;
+    const status = buildCapCatalogStatus(rows);
+    expect(status).toHaveLength(1);
+    expect(status[0]).toMatchObject({
+      owner: "ippoan",
+      name: "auth-worker",
+      cap_catalog_covered: true,
+      exclusion_reason: null,
+    });
+    expect(status[0]!.workflows).toContain("cap-catalog-extract");
+  });
+
+  it("caller 無し + 除外宣言無し repo を uncovered (= 取りこぼし候補) にする", () => {
+    const rows = analyzeMatrix(fixturePayload()).rows;
+    const status = buildCapCatalogStatus(rows);
+    for (const s of status) {
+      expect(s.cap_catalog_covered).toBe(false);
+      expect(s.exclusion_reason).toBeNull();
+    }
+  });
+
+  it("除外 config に乗っている repo は exclusion_reason を返す", () => {
+    const rows = analyzeMatrix(fixturePayload()).rows;
+    const status = buildCapCatalogStatus(rows, {
+      "ippoan/auth-worker": "no-code",
+    });
+    const auth = status.find((s) => s.name === "auth-worker")!;
+    expect(auth.cap_catalog_covered).toBe(false);
+    expect(auth.exclusion_reason).toBe("no-code");
+    const flickr = status.find((s) => s.name === "rust-flickr")!;
+    expect(flickr.exclusion_reason).toBeNull();
+  });
+
+  it("使われている reusable category から language を推定する", () => {
+    const payload: ScannerPayload = {
+      ...fixturePayload(),
+      reusable_categories: {
+        "rust-ci.yml": "rust-ci",
+        "go-ci.yml": "go-ci",
+        "frontend-ci.yml": "frontend-ci",
+      },
+      repos: [
+        {
+          owner: "ippoan",
+          repo: "rust-flickr",
+          scanned_at: "2026-06-17T00:00:00Z",
+          workflows: [
+            {
+              file: ".github/workflows/ci.yml",
+              reusable_calls: [
+                {
+                  job_id: "ci",
+                  target_owner: "ippoan",
+                  target_repo: "ci-workflows",
+                  target_file: ".github/workflows/rust-ci.yml",
+                  reusable_name: "rust-ci.yml",
+                  ref: "main",
+                  pinned_sha: false,
+                  secrets_inherit: true,
+                },
+              ],
+              self_jobs: [],
+              deviations: [],
+            },
+          ],
+        },
+      ],
+    };
+    const rows = analyzeMatrix(payload).rows;
+    const status = buildCapCatalogStatus(rows);
+    expect(status[0]!.languages).toEqual(["rust"]);
+  });
+
+  it("default 除外 config に Android / no-code / self / deleted の代表が入っている", () => {
+    // SoT は cap-catalog#29。新規追加時にこの test が「忘れ防止」になる。
+    expect(CAP_CATALOG_EXCLUSIONS["ippoan/HealthConnectReader"]).toBe("android");
+    expect(CAP_CATALOG_EXCLUSIONS["ippoan/claude-md"]).toBe("no-code");
+    expect(CAP_CATALOG_EXCLUSIONS["ippoan/cap-catalog"]).toBe("self");
+    expect(CAP_CATALOG_EXCLUSIONS["ippoan/cf-access-mcp"]).toBe("deleted");
+  });
+});
+
+describe("handleCiMatrixPage ?format=json", () => {
+  beforeEach(() => {
+    _resetMatrixCacheForTest();
+    vi.restoreAllMocks();
+  });
+
+  it("?format=json で application/json を返す", async () => {
+    const env = envWithShapes();
+    const res = await handleCiMatrixPage(
+      new Request("https://example.com/ci-matrix?format=json"),
+      env,
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toContain("application/json");
+    const body = (await res.json()) as {
+      schema_version: number;
+      cap_catalog: { covered: number; excluded: number; uncovered: number };
+      repos: Array<{
+        owner: string;
+        name: string;
+        cap_catalog_covered: boolean;
+        exclusion_reason: string | null;
+      }>;
+    };
+    expect(body.schema_version).toBe(1);
+    expect(body.repos).toHaveLength(1);
+    expect(body.repos[0]).toMatchObject({
+      owner: "ippoan",
+      name: "auth-worker",
+      cap_catalog_covered: false,
+      exclusion_reason: null,
+    });
+    // auth-worker は除外宣言が無いので uncovered=1
+    expect(body.cap_catalog.uncovered).toBe(1);
+    expect(body.cap_catalog.covered).toBe(0);
+    expect(body.cap_catalog.excluded).toBe(0);
+  });
+
+  it("acceptance: uncovered & exclusion_reason==null の repo を抽出できる", async () => {
+    const env = envWithShapes();
+    const res = await handleCiMatrixPage(
+      new Request("https://example.com/ci-matrix?format=json"),
+      env,
+    );
+    const body = (await res.json()) as {
+      repos: Array<{ name: string; cap_catalog_covered: boolean; exclusion_reason: string | null }>;
+    };
+    const leaks = body.repos
+      .filter((r) => !r.cap_catalog_covered && r.exclusion_reason === null)
+      .map((r) => r.name);
+    expect(leaks).toEqual(["auth-worker"]);
+  });
+
+  it("KV broken なら 503 + JSON error body", async () => {
+    const broken = {
+      CI_STATUS: {
+        async list() {
+          throw new Error("kv dead");
+        },
+      },
+    } as unknown as import("../src/index").Env;
+    const res = await handleCiMatrixPage(
+      new Request("https://example.com/ci-matrix?format=json"),
+      broken,
+    );
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Content-Type")).toContain("application/json");
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("kv dead");
+  });
+});
+
+describe("renderMatrixPage cap-catalog excluded cell", () => {
+  it("除外宣言された repo の cap-catalog-extract セルに 🚫 + 理由を出す", () => {
+    // CAP_CATALOG_EXCLUSIONS の owner/repo を使う必要がある (config は in-source 固定)
+    const payload: ScannerPayload = {
+      ...fixturePayload(),
+      repos: [
+        {
+          owner: "ippoan",
+          repo: "claude-md",
+          scanned_at: "2026-06-17T00:00:00Z",
+          workflows: [],
+          summary: {
+            total_workflows: 0,
+            reusable_caller_workflows: 0,
+            used_reusable_categories: [],
+            deviation_flags: [],
+          },
+        },
+      ],
+    };
+    const html = renderMatrixPage(payload);
+    expect(html).toContain("🚫 no-code");
+    expect(html).toContain('title="excluded: no-code"');
   });
 });

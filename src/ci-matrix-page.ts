@@ -269,6 +269,7 @@ const PAGE_STYLES = `
   .cell-self   { background: #1f2d44; color: #79c0ff; border: 1px solid #1f6feb; }
   .cell-pinned { background: #14361f; color: #3fb950; border: 1px solid #238636; }
   .cell-mutable{ background: #3a2d12; color: #d29922; border: 1px solid #9e6a03; }
+  .cell-excluded { background: #2d2233; color: #a371f7; border: 1px solid #6e40c9; }
   /* 逸脱タブ */
   .dev-list { display: grid; gap: 8px; }
   .dev-item {
@@ -388,6 +389,7 @@ ${tabs}
   <a href="https://github.com/ippoan/ci-workflows/blob/main/.github/workflows/ci-shape-report.yml" target="_blank" rel="noopener"><code>ci-shape-report.yml</code></a>
   reusable 経由で push したもの (KV 保存)。caller 未追加 repo は表示されません。
   <a href="?refresh=1">[キャッシュを破棄して再 fetch]</a>
+  · <a href="?format=json">JSON 出力</a>
 </p>`;
 
   if (!payload) {
@@ -423,9 +425,14 @@ ${tabs}
     .map((r) => {
       const repoUrl = `https://github.com/${r.owner}/${r.repo}`;
       const repoCol = `<td class="repo-col"><a href="${repoUrl}" target="_blank" rel="noopener">${escapeHtml(r.owner)}/${escapeHtml(r.repo)}</a></td>`;
+      const exclusion = CAP_CATALOG_EXCLUSIONS[`${r.owner}/${r.repo}`] ?? null;
       const cells = analyzed.columns
         .map((col) => {
           const s = r.cells[col]!;
+          // cap-catalog-extract 列だけ excluded 表示で上書き (Refs #398)。
+          if (col === "cap-catalog-extract" && s.kind === "none" && exclusion) {
+            return `<td title="excluded: ${escapeHtml(exclusion)}"><span class="cell cell-excluded">🚫 ${escapeHtml(exclusion)}</span></td>`;
+          }
           if (s.kind === "none") return `<td><span class="cell cell-none">—</span></td>`;
           if (s.kind === "self") return `<td><span class="cell cell-self">self</span></td>`;
           const cls = s.pinned ? "cell-pinned" : "cell-mutable";
@@ -510,6 +517,10 @@ ${PWA_REGISTER_SCRIPT}
 
 export async function handleCiMatrixPage(req: Request, env: Env): Promise<Response> {
   const url = new URL(req.url);
+  // `?format=json` で JSON 出力に切り替える (Refs cap-catalog#29, #398)。
+  if (url.searchParams.get("format") === "json") {
+    return handleCiMatrixJson(req, env);
+  }
   const refresh = url.searchParams.get("refresh") === "1";
   const { payload, source, error } = await loadPayload(env, refresh);
   const html = renderMatrixPage(payload, error);
@@ -517,6 +528,115 @@ export async function handleCiMatrixPage(req: Request, env: Env): Promise<Respon
     status: payload ? 200 : 503,
     headers: {
       "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": source === "live" ? "public, max-age=120" : "no-store",
+      "X-CI-Matrix-Source": source,
+    },
+  });
+}
+
+export type CapCatalogExclusionReason = "android" | "no-code" | "self" | "deleted";
+
+// cap-catalog 展開で「意図的に除外」されている repo の一覧 (Refs cap-catalog#29)。
+// `owner/repo` → 除外理由。`/ci-matrix?format=json` の `exclusion_reason` に
+// そのまま乗る。新規 repo は default = null (= 取りこぼし候補) として検出される。
+//
+// 更新規約: cap-catalog#29 の「除外」セクションを SoT とし、変更があったらこの
+// 表も同時に更新する。
+export const CAP_CATALOG_EXCLUSIONS: Record<string, CapCatalogExclusionReason> = {
+  // Android (extractor 未対応)
+  "ippoan/HealthConnectReader": "android",
+  "ippoan/AlcoholChecker": "android",
+  "ippoan/ShakenApp": "android",
+  // 実コード無し (shell / yaml / md のみ)
+  "ippoan/claude-md": "no-code",
+  "ippoan/claude-skills": "no-code",
+  "ippoan/claude-hooks": "no-code",
+  "ippoan/ci-workflows": "no-code",
+  // self (dogfood)
+  "ippoan/cap-catalog": "self",
+  // repo 削除
+  "ippoan/cf-access-mcp": "deleted",
+};
+
+export interface CapCatalogRepoStatus {
+  owner: string;
+  name: string;
+  /** 使われている reusable category 群 (例: ["frontend-ci", "auto-merge", "cap-catalog-extract"])。 */
+  workflows: string[];
+  /** 上記から推定した言語タグ (例: ["ts"] / ["rust"] / ["go"])。未確定なら空配列。 */
+  languages: string[];
+  /** cap-catalog-extract caller が CI に乗っているか。 */
+  cap_catalog_covered: boolean;
+  /** 意図的除外の理由。null なら「取りこぼし候補」(`covered=false` のときのみ意味あり)。 */
+  exclusion_reason: CapCatalogExclusionReason | null;
+}
+
+/** Pure: matrix rows + 除外 config → cap-catalog 状況 (per repo)。 */
+export function buildCapCatalogStatus(
+  rows: MatrixRow[],
+  exclusions: Record<string, CapCatalogExclusionReason> = CAP_CATALOG_EXCLUSIONS,
+): CapCatalogRepoStatus[] {
+  return rows.map((r) => {
+    const used: string[] = [];
+    for (const col of COLUMN_ORDER) {
+      const s = r.cells[col];
+      if (s && s.kind !== "none") used.push(col);
+    }
+    const key = `${r.owner}/${r.repo}`;
+    return {
+      owner: r.owner,
+      name: r.repo,
+      workflows: used,
+      languages: inferLanguagesFromCategories(used),
+      cap_catalog_covered: r.cells["cap-catalog-extract"]?.kind !== "none",
+      exclusion_reason: exclusions[key] ?? null,
+    };
+  });
+}
+
+function inferLanguagesFromCategories(cats: string[]): string[] {
+  const langs = new Set<string>();
+  for (const c of cats) {
+    if (c === "rust-ci" || c === "rust-binary-release") langs.add("rust");
+    else if (c === "go-ci") langs.add("go");
+    else if (c === "frontend-ci" || c === "lib-ci" || c === "lib-publish") langs.add("ts");
+  }
+  return [...langs].sort();
+}
+
+/** `/ci-matrix?format=json` — CI Matrix を JSON で返す。
+ *  cap-catalog 取りこぼし検出に使う (Refs cap-catalog#29, ci-dashboard#398)。 */
+export async function handleCiMatrixJson(req: Request, env: Env): Promise<Response> {
+  const url = new URL(req.url);
+  const refresh = url.searchParams.get("refresh") === "1";
+  const { payload, source, error } = await loadPayload(env, refresh);
+  if (!payload) {
+    return new Response(JSON.stringify({ error: error ?? "no payload" }), {
+      status: 503,
+      headers: {
+        "Content-Type": "application/json",
+        "X-CI-Matrix-Source": source,
+      },
+    });
+  }
+  const analyzed = analyzeMatrix(payload);
+  const repos = buildCapCatalogStatus(analyzed.rows);
+  const body = {
+    schema_version: 1,
+    generated_at: payload.generated_at,
+    scan_source: payload.scan_source,
+    total_repos: repos.length,
+    cap_catalog: {
+      covered: repos.filter((r) => r.cap_catalog_covered).length,
+      excluded: repos.filter((r) => !r.cap_catalog_covered && r.exclusion_reason !== null).length,
+      uncovered: repos.filter((r) => !r.cap_catalog_covered && r.exclusion_reason === null).length,
+    },
+    repos,
+  };
+  return new Response(JSON.stringify(body, null, 2) + "\n", {
+    status: 200,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
       "Cache-Control": source === "live" ? "public, max-age=120" : "no-store",
       "X-CI-Matrix-Source": source,
     },
