@@ -26,6 +26,15 @@
       "id": "ffb983ee8324499f915b11a0b8cf787b"
     }
   ],
+  // cap-catalog の R2 bucket。`v1/latest.sqlite` + `v1/latest.jsonl` を
+  // `catalog-build-upload.yml` が定期 push。/cap-catalog page が read-only に
+  // jsonl を fetch して表示する (Refs ippoan/cap-catalog#1 #10)。
+  "r2_buckets": [
+    {
+      "binding": "CAP_CATALOG_R2",
+      "bucket_name": "cap-catalog"
+    }
+  ],
   "durable_objects": {
     "bindings": [
       {
@@ -134,6 +143,12 @@
         {
           "binding": "COMPAT_KV",
           "id": "ffb983ee8324499f915b11a0b8cf787b"
+        }
+      ],
+      "r2_buckets": [
+        {
+          "binding": "CAP_CATALOG_R2",
+          "bucket_name": "cap-catalog"
         }
       ],
       "durable_objects": {

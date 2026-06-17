@@ -1,19 +1,41 @@
 /**
- * `/cap-catalog` は preview SSR page。worker は HTML を返すだけで、検索 /
- * フィルタは inline JSON + client-side JS。ここでは:
+ * `/cap-catalog` SSR page。worker は HTML を返すだけで、検索 / フィルタは
+ * inline JSON + client-side JS。`CAP_CATALOG_R2` binding 経由で
+ * `v1/latest.jsonl` を fetch し、failure 時は inline sample に fallback する。
+ *
+ * ここでは:
  *   - 200 + text/html + no-store
  *   - tab nav に cap-catalog active 表示
- *   - sample JSON が catalog-data script に埋め込まれている
- *   - 検索 input + meta + list の DOM が出ている
- * を gate する。実 catalog データ (R2 / artifact fetch) は別 PR で配線するので、
- * ここでは "preview" banner と sample 1 行の存在まで確認する。
+ *   - R2 binding 無し → sample fallback banner ("Sample fallback")
+ *   - R2 binding + jsonl object あり → R2 live banner + 投入した symbol が出る
+ *   - JSONL parse error 行 / 必須 field 欠落行 → 弾かれて sample fallback
+ *   - 検索 input + meta + list の DOM
+ * を gate する。
  */
 import { env } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
 import worker from "../src/index";
 import type { Env } from "../src/index";
 
-function testEnv(): Env {
+interface R2GetResult {
+  body?: string;
+  uploaded?: Date;
+}
+
+function makeR2(map: Record<string, R2GetResult>): R2Bucket {
+  return {
+    get: async (key: string) => {
+      const entry = map[key];
+      if (!entry) return null;
+      return {
+        text: async () => entry.body ?? "",
+        uploaded: entry.uploaded ?? new Date("2026-06-17T00:00:00Z"),
+      } as unknown as R2ObjectBody;
+    },
+  } as unknown as R2Bucket;
+}
+
+function testEnv(over: Partial<Env> = {}): Env {
   return {
     CI_STATUS: env.CI_STATUS,
     WEBHOOK_SECRET: { get: async () => "test-secret" } as unknown as SecretsStoreSecret,
@@ -29,13 +51,14 @@ function testEnv(): Env {
     RELEASE_WAVE_WEBHOOK_SECRET: {
       get: async () => "test-webhook-secret",
     } as unknown as SecretsStoreSecret,
+    ...over,
   };
 }
 
-async function fetchPage(): Promise<{ res: Response; body: string }> {
+async function fetchPage(over: Partial<Env> = {}): Promise<{ res: Response; body: string }> {
   const res = await worker.fetch(
     new Request("https://x/cap-catalog"),
-    testEnv(),
+    testEnv(over),
     {} as ExecutionContext,
   );
   const body = await res.text();
@@ -55,13 +78,66 @@ describe("GET /cap-catalog", () => {
     expect(body).toMatch(/href="\/cap-catalog"[^>]*class="tab tab-active"/);
   });
 
-  it("inlines sample symbols as JSON", async () => {
+  it("falls back to inline sample when R2 binding is absent", async () => {
     const { body } = await fetchPage();
-    // script tag with the catalog-data id
+    expect(body).toContain("Sample fallback");
+    expect(body).toContain("CAP_CATALOG_R2 binding not configured");
     expect(body).toContain('id="catalog-data"');
-    // at least one expected sample symbol (from cap-catalog#18 self-dogfood)
+    // sample includes the cap-catalog#18 self-dogfood SCHEMA_VERSION row
     expect(body).toContain("cap_catalog_schema::SCHEMA_VERSION");
     expect(body).toContain('"language":"rust"');
+  });
+
+  it("falls back to inline sample when R2 object is missing", async () => {
+    const r2 = makeR2({});
+    const { body } = await fetchPage({ CAP_CATALOG_R2: r2 });
+    expect(body).toContain("Sample fallback");
+    expect(body).toContain("not found");
+  });
+
+  it("uses R2 live data when v1/latest.jsonl is present", async () => {
+    const jsonl = [
+      JSON.stringify({
+        repo: "ippoan/auth-worker",
+        language: "ts",
+        kind: "fn",
+        name: "createAuthFetch",
+        fq_path: "auth_client::createAuthFetch",
+        doc: "Wraps fetch with JWT refresh.",
+        features: ["auth-fetch"],
+      }),
+      "",  // 空行は skip される
+      JSON.stringify({
+        repo: "ippoan/cap-catalog",
+        language: "rust",
+        kind: "const",
+        name: "SCHEMA_VERSION",
+        fq_path: "cap_catalog_schema::SCHEMA_VERSION",
+        features: ["catalog-schema"],
+      }),
+    ].join("\n");
+    const r2 = makeR2({
+      "v1/latest.jsonl": {
+        body: jsonl,
+        uploaded: new Date("2026-06-17T03:50:00Z"),
+      },
+    });
+    const { body } = await fetchPage({ CAP_CATALOG_R2: r2 });
+    expect(body).toContain("R2 live");
+    expect(body).toContain("2026-06-17T03:50:00.000Z");
+    expect(body).toContain("createAuthFetch");
+    expect(body).toContain('"features":["auth-fetch"]');
+  });
+
+  it("falls back when JSONL has only invalid rows", async () => {
+    // 必須 field (repo) 欠落 + invalid JSON の混合 → 0 valid rows → sample fallback
+    const jsonl = ["not json at all", JSON.stringify({ name: "x" })].join("\n");
+    const r2 = makeR2({
+      "v1/latest.jsonl": { body: jsonl },
+    });
+    const { body } = await fetchPage({ CAP_CATALOG_R2: r2 });
+    expect(body).toContain("Sample fallback");
+    expect(body).toContain("0 valid rows");
   });
 
   it("includes search input + result list containers", async () => {
@@ -69,10 +145,5 @@ describe("GET /cap-catalog", () => {
     expect(body).toMatch(/<input[^>]+id="q"[^>]+type="search"/);
     expect(body).toContain('id="meta"');
     expect(body).toContain('id="list"');
-  });
-
-  it("flags preview status banner", async () => {
-    const { body } = await fetchPage();
-    expect(body).toMatch(/Preview/);
   });
 });
