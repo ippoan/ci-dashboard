@@ -1174,20 +1174,20 @@ describe("webhook queue ingest (Refs #318)", () => {
 describe("releases index blob (Refs #325)", () => {
   beforeEach(async () => {
     resetHubCalls();
-    await env.CI_STATUS.delete("releases:index:v2");
+    await env.CI_STATUS.delete("releases:index:v3");
     await env.CI_STATUS.delete("releases:index:refreshing");
   });
   afterEach(() => { vi.restoreAllMocks(); });
 
   async function seedBlob(): Promise<void> {
     await env.CI_STATUS.put(
-      "releases:index:v2",
+      "releases:index:v3",
       JSON.stringify({ storedAt: Date.now(), views: [] }),
     );
   }
 
   async function blobStoredAt(): Promise<number | null> {
-    const blob = await env.CI_STATUS.get("releases:index:v2", "json") as
+    const blob = await env.CI_STATUS.get("releases:index:v3", "json") as
       { storedAt: number } | null;
     return blob ? blob.storedAt : null;
   }
@@ -1215,7 +1215,7 @@ describe("releases index blob (Refs #325)", () => {
     );
     await waitOnExecutionContext(ctx);
 
-    const blob = await env.CI_STATUS.get("releases:index:v2", "json") as
+    const blob = await env.CI_STATUS.get("releases:index:v3", "json") as
       { storedAt: number; staleRepos?: string[] };
     expect(blob.storedAt).toBe(0);
     expect(blob.staleRepos).toContain("ippoan/foo");
@@ -1275,7 +1275,7 @@ describe("releases index blob (Refs #325)", () => {
 
   it("index に出ている issue の close は blob を直接 patch して broadcast する (Refs #339)", async () => {
     // blob に open 行を seed (synthetic block)
-    await env.CI_STATUS.put("releases:index:v2", JSON.stringify({
+    await env.CI_STATUS.put("releases:index:v3", JSON.stringify({
       storedAt: 12345,
       views: [{
         repo: "ippoan/foo", tagless: true, olderTags: [],
@@ -1311,7 +1311,7 @@ describe("releases index blob (Refs #325)", () => {
     );
     await waitOnExecutionContext(ctx);
 
-    const blob = await env.CI_STATUS.get("releases:index:v2", "json") as {
+    const blob = await env.CI_STATUS.get("releases:index:v3", "json") as {
       storedAt: number;
       views: Array<{ tagBlocks: Array<{ issues: Array<{ state: string; warnings: string[] }> }> }>;
     };
@@ -1332,7 +1332,7 @@ describe("releases index blob (Refs #325)", () => {
       url: "https://github.com/ippoan/foo/issues/9",
     }));
     // blob: 空の synthetic block を持つ tagless card
-    await env.CI_STATUS.put("releases:index:v2", JSON.stringify({
+    await env.CI_STATUS.put("releases:index:v3", JSON.stringify({
       storedAt: 12345,
       views: [{
         repo: "ippoan/foo", tagless: true, olderTags: [],
@@ -1360,7 +1360,7 @@ describe("releases index blob (Refs #325)", () => {
     );
     await waitOnExecutionContext(ctx);
 
-    const blob = await env.CI_STATUS.get("releases:index:v2", "json") as {
+    const blob = await env.CI_STATUS.get("releases:index:v3", "json") as {
       storedAt: number;
       staleRepos?: string[];
       views: Array<{ tagBlocks: Array<{ tag: string; issues: Array<{ number: number; title: string }> }> }>;
@@ -1378,7 +1378,7 @@ describe("releases index blob (Refs #325)", () => {
   });
 
   it("Refs 先が /issues KV に無い merge は全集計に fallback する (Refs #339)", async () => {
-    await env.CI_STATUS.put("releases:index:v2", JSON.stringify({
+    await env.CI_STATUS.put("releases:index:v3", JSON.stringify({
       storedAt: 12345,
       views: [{
         repo: "ippoan/foo", tagless: true, olderTags: [],
@@ -1406,7 +1406,7 @@ describe("releases index blob (Refs #325)", () => {
     );
     await waitOnExecutionContext(ctx);
 
-    const blob = await env.CI_STATUS.get("releases:index:v2", "json") as
+    const blob = await env.CI_STATUS.get("releases:index:v3", "json") as
       { storedAt: number; staleRepos?: string[] };
     expect(blob.storedAt).toBe(0);
     expect(blob.staleRepos).toContain("ippoan/foo");
@@ -1449,7 +1449,7 @@ describe("releases index blob (Refs #325)", () => {
     await consumeWebhookBatch(batch, testEnv());
 
     expect(acked).toEqual(["refresh"]);
-    expect(await env.CI_STATUS.get("releases:index:v2")).not.toBeNull();
+    expect(await env.CI_STATUS.get("releases:index:v3")).not.toBeNull();
   });
 });
 
@@ -1457,7 +1457,7 @@ describe("releases index blob (Refs #325)", () => {
 describe("consumeWebhookBatch — event-first (Refs #335)", () => {
   beforeEach(async () => {
     resetHubCalls();
-    await env.CI_STATUS.delete("releases:index:v2");
+    await env.CI_STATUS.delete("releases:index:v3");
     await env.CI_STATUS.delete("releases:index:refreshing");
     await env.CI_STATUS.delete("issue:ippoan/foo#88");
     await env.CI_STATUS.delete("github:rl-backoff");
@@ -1509,7 +1509,7 @@ describe("consumeWebhookBatch — event-first (Refs #335)", () => {
 describe("consumeWebhookBatch — refresh self-reschedule (Refs #337)", () => {
   beforeEach(async () => {
     resetHubCalls();
-    await env.CI_STATUS.delete("releases:index:v2");
+    await env.CI_STATUS.delete("releases:index:v3");
     await env.CI_STATUS.delete("releases:index:refreshing");
     await env.CI_STATUS.delete("releases:index:rekick-scheduled");
     await env.CI_STATUS.delete("github:rl-backoff");
@@ -1530,7 +1530,7 @@ describe("consumeWebhookBatch — refresh self-reschedule (Refs #337)", () => {
   it("lock bail 時は 60s 遅延の refresh job を再投函してから ack する", async () => {
     // deploy に殺された compute の残 lock を再現
     await env.CI_STATUS.put("releases:index:refreshing", "1", { expirationTtl: 60 });
-    await env.CI_STATUS.put("releases:index:v2", JSON.stringify({ storedAt: 0, views: [] }));
+    await env.CI_STATUS.put("releases:index:v3", JSON.stringify({ storedAt: 0, views: [] }));
 
     const sent: Array<{ msg: unknown; opts: unknown }> = [];
     const queueEnv = {
@@ -1553,7 +1553,7 @@ describe("consumeWebhookBatch — refresh self-reschedule (Refs #337)", () => {
   });
 
   it("fresh 時は再投函しない (停止条件)", async () => {
-    await env.CI_STATUS.put("releases:index:v2", JSON.stringify({ storedAt: Date.now(), views: [] }));
+    await env.CI_STATUS.put("releases:index:v3", JSON.stringify({ storedAt: Date.now(), views: [] }));
     const sent: unknown[] = [];
     const queueEnv = {
       ...testEnv(),

@@ -21,11 +21,11 @@ export interface ReleasesIndexBlob<T = unknown> {
 // staleRepos の肥大防止 (CI burst で merge が連発しても note が溢れない)。
 const STALE_REPOS_CAP = 20;
 
-// `:v2` bump (Refs #400): pr-map gate (PR #403) を入れた後、SWR fresh window
-// が 1h 残っているため古い blob (gate 未適用) が配信され続けて #2 等が残る
-// 実害があった。version を 1 つ上げて即時 flush。logic 変更で全体を作り直す
-// 必要が出たら同様に bump する。
-export const RELEASES_INDEX_KEY = "releases:index:v2";
+// version bump で SWR blob を即時 flush する pattern (Refs #400):
+//   v1 → v2: pr-map gate (PR #403) を追加 (古い blob が PR 不在の Refs を残してた)
+//   v2 → v3: cross-repo refs の scope filter を追加 (scope 外 repo の issue を drop)
+// gate / filter ロジックを変更するたびに version を上げて 1h SWR を待たずに反映する。
+export const RELEASES_INDEX_KEY = "releases:index:v3";
 // 鮮度は WS event 起点の refresh (#327) が担保するため、この window は
 // 「refresh の最短間隔」としてだけ機能する。60s だと CI ラッシュ時に
 // 全集計 (~30 repo × 100+ GitHub call) が時間 30 回走り quota を食い潰した
