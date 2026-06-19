@@ -498,6 +498,13 @@ function renderHtml(
       margin-right: 4px;
       margin-bottom: 2px;
     }
+    /* 「対応待ち」ラベル: 外部返信待ち等を一目で判別できるよう黄系で強調 */
+    .label-waiting {
+      background: #bb800033;
+      color: #f0b429;
+      font-weight: 600;
+      border: 1px solid #bb800077;
+    }
     /* Project chips: brighter than label chips so the board affiliation pops */
     .project-chip {
       display: inline-block;
@@ -788,8 +795,7 @@ function renderProjectRow(
     `<a class="project-chip" href="${escapeHtml(p.url)}" target="_blank" rel="noopener">${escapeHtml(p.title)}</a>`,
   ).join("");
   const labelChips = i.labels.length > 0
-    ? `<div class="labels">${i.labels.map((l) =>
-        `<span class="label">${escapeHtml(l)}</span>`).join("")}</div>`
+    ? `<div class="labels">${i.labels.map(renderLabelChip).join("")}</div>`
     : "";
   const trClass = isFixtureIssue(i) ? ' class="fixture"' : "";
   return `<tr${trClass} data-ik="${escapeHtml(`${i.repo}#${i.number}`)}">
@@ -824,8 +830,7 @@ function renderRow(
   prMap: ReadonlyMap<string, IssuePrRef[]>,
 ): string {
   const labelChips = i.labels.length > 0
-    ? `<div class="labels">${i.labels.map((l) =>
-        `<span class="label">${escapeHtml(l)}</span>`).join("")}</div>`
+    ? `<div class="labels">${i.labels.map(renderLabelChip).join("")}</div>`
     : "";
   const trClass = isFixtureIssue(i) ? ' class="fixture"' : "";
   return `<tr${trClass} data-ik="${escapeHtml(`${i.repo}#${i.number}`)}">
@@ -893,6 +898,15 @@ export function renderReleaseModeBadge(
 // the title prefix is the only marker available at render time anyway.
 export function isFixtureIssue(i: { title: string }): boolean {
   return /^\s*\[CI fixture\]/i.test(i.title);
+}
+
+// ラベルチップを描画する。名前に「対応待ち」を含むラベルは黄系の強調バッジ + ⏳ で
+// 一覧から判別しやすくする (外部返信待ち等の tracking issue 向け)。
+export function renderLabelChip(label: string): string {
+  if (label.includes("対応待ち")) {
+    return `<span class="label label-waiting">⏳ ${escapeHtml(label)}</span>`;
+  }
+  return `<span class="label">${escapeHtml(label)}</span>`;
 }
 
 function renderFixtureBadge(i: OrgIssue): string {
