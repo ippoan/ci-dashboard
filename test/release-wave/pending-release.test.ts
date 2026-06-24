@@ -65,9 +65,61 @@ describe("computeUnifiedPending — flip 済みの stale pending-release:: を�
 
     const out = computeUnifiedPending(trafficRecords, pendingRecords);
     expect(out).toHaveLength(1);
-    expect(out[0]).toMatchObject({ repo, version_id: V, source: "pending", tag: "v0.0.21" });
+    // traffic:: record を持つ worker なので flip 機構は traffic (= wrangler
+    // versions deploy)。version / tag は pending-release:: 由来 (durable, tagged)。
+    expect(out[0]).toMatchObject({ repo, version_id: V, source: "traffic", tag: "v0.0.21" });
     // rollback 先 = 現 active (old)。
     expect(out[0]?.rollback_to).toBe("old-v0-0-20");
+  });
+
+  // 実害 (Refs #427 monorepo flip): release deploy 後も「未tag — flip不可」のまま
+  // だった。原因の合わせ技 ——
+  //  (1) report-traffic-split は propagation lag で upload 直後の version を
+  //      `wrangler versions list` に含められず、traffic:: の最新 0% は 1 つ前の
+  //      untagged version (eb2c721d) になる。
+  //  (2) 旧 computeUnifiedPending は traffic:: 由来 (untagged) を優先し、tag を持つ
+  //      pending-release:: record (51b72b7f / v0.0.25) を shadow して捨てていた。
+  // → tagged な真実 (pending-release::) を採用し、flip 機構は traffic に保つ。
+  it("traffic:: の新しい untagged 0% に shadow されず pending-release:: の tagged version を出す", () => {
+    const repo = "ippoan/nuxt-notify";
+    const worker = "notify-realtime-bus";
+    const ACTIVE = "1601602a-6672-4615-bc07-0f3ec0ece237"; // 現 100% (2026-06-03)
+    const LAGGED = "eb2c721d-03e7-47f8-8e26-31f326ce8a6f"; // 1 つ前の untagged 0% (lag)
+    const TAGGED = "51b72b7f-3522-45f4-8d81-98e51a1b1668"; // 今 release した version
+    const trafficRecords: TrafficRecord[] = [
+      {
+        schema_version: 4,
+        repo,
+        worker_name: worker,
+        versions: [
+          { version_id: ACTIVE, percentage: 100, created_on: "2026-06-03T16:20:24.948Z" },
+          { version_id: LAGGED, percentage: 0, created_on: "2026-06-24T10:33:33.997Z" },
+        ],
+        reported_at: "2026-06-24T19:54:30.000Z",
+      },
+    ];
+    const pendingRecords: PendingReleaseRecord[] = [
+      {
+        schema_version: 1,
+        repo,
+        worker_name: worker,
+        version_id: TAGGED,
+        tag: "v0.0.25",
+        preview_url: null,
+        uploaded_at: "2026-06-24T19:54:28.000Z",
+      },
+    ];
+
+    const out = computeUnifiedPending(trafficRecords, pendingRecords);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({
+      repo,
+      worker_name: worker,
+      version_id: TAGGED, // lag した eb2c721d ではなく tagged 51b72b7f
+      tag: "v0.0.25",
+      source: "traffic", // flip は wrangler versions deploy 51b72b7f@100%
+      rollback_to: ACTIVE,
+    });
   });
 
   it("traffic:: source: active より新しい 0% promotable は traffic source で出す", () => {

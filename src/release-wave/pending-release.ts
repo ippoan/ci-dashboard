@@ -264,75 +264,103 @@ function currentActiveOf(
 
 /**
  * Pending releases の単一真実リストを組む (Refs #237)。uploaded_at 降順。
+ *
+ * (repo, worker) ごとに 1 行を導出する。各 key について:
+ *
+ *  - **flip 機構 (source)** は traffic:: record の有無で決める:
+ *    traffic:: を持つ = workers (flip は `wrangler versions deploy <id>@100%` =
+ *    traffic-rollback dispatch)、持たない = cloudrun 等 (pending-release/flip
+ *    handler が platform routing)。
+ *  - **flip 対象 version + release tag** は「未 flip の pending-release:: record」を
+ *    最優先で採用する。理由: release tag は CF version (traffic::) には**乗らない**
+ *    (`wrangler versions list` の tag は常に null)。tag を持つのは
+ *    pending-release:: record だけ。traffic:: 由来の untagged version を優先すると
+ *    `!tag → 未tag — flip不可` の gate に永久に弾かれる (= monorepo unit / 単一
+ *    worker の release deploy が flip できない実害、Refs #427)。さらに
+ *    report-traffic-split は propagation lag で **upload 直後の version を versions
+ *    list に含められない**ことがあり、traffic:: 由来だと 1 つ前の untagged 0%
+ *    version で shadow される。durable な tag 源は pending-release:: record。
+ *  - pending-release:: record が**既に flip 済み** (traffic:: で当該 version が
+ *    active = percentage > 0) なら、その release は完了済みなので採用しない
+ *    (#248 の「flip 済みなのに Pending に残る」回避)。
+ *  - pending-release:: record が無い / flip 済みなら、従来どおり traffic:: 由来の
+ *    promotable (untagged。手動 upload / legacy 経路) に fall back する。
  */
 export function computeUnifiedPending(
   trafficRecords: TrafficRecord[],
   pendingRecords: PendingReleaseRecord[],
 ): UnifiedPending[] {
   const out: UnifiedPending[] = [];
-  const seen = new Set<string>();
   // (repo, worker) 複合キー。monorepo unit を repo 単位で潰さず個別に扱う。
   const composite = (repo: string, worker: string | null): string =>
     `${repo}::${worker ?? ""}`;
-  // pending source の flip 済み判定 / 戻し先解決に使う traffic record 索引。
+
   const trafficByKey = new Map<string, TrafficRecord>();
   for (const rec of trafficRecords) {
     trafficByKey.set(composite(rec.repo, rec.worker_name ?? null), rec);
   }
-
-  for (const rec of trafficRecords) {
-    const worker = rec.worker_name ?? null;
-    const v = noTrafficPromotable(rec);
-    if (!v) continue;
-    const active = currentActiveOf(rec);
-    out.push({
-      repo: rec.repo,
-      worker_name: worker,
-      version_id: v.version_id,
-      tag: v.tag ?? null,
-      uploaded_at: v.created_on ?? "",
-      preview_url: null,
-      source: "traffic",
-      rollback_to: active?.version_id ?? null,
-      rollback_tag: active?.tag ?? null,
-    });
-    seen.add(composite(rec.repo, worker));
-  }
+  const pendingByKey = new Map<string, PendingReleaseRecord>();
   for (const r of pendingRecords) {
-    const worker = r.worker_name ?? null;
-    const k = composite(r.repo, worker);
-    if (seen.has(k)) continue; // traffic:: の no-traffic promotable を持つ (repo,worker) は traffic:: 優先
-    const rec = trafficByKey.get(k) ?? null;
-    // flip 済み判定: pending-release:: が指す version が traffic:: で既に active
-    // (percentage > 0) なら、その release は既に flip 済み。pending-release:: は
-    // deploy 時 (frontend-ci) に作られ traffic-report では clear されないため、
-    // flip 後も stale record として残る。これを出すと「flip 済みなのに Pending に
-    // 残る」状態になる (Refs ippoan/ci-dashboard#248)。
-    // ※ deploy 直後 (未 flip) は traffic:: に当該 version が無い (= active 判定
-    //    false) ので、ちゃんと Pending に出る。
-    if (
-      rec &&
-      (rec.versions ?? []).some(
-        (v) => v.version_id === r.version_id && v.percentage > 0,
-      )
-    ) {
+    pendingByKey.set(composite(r.repo, r.worker_name ?? null), r);
+  }
+
+  // traffic:: / pending-release:: のどちらか一方でも持つ全 (repo, worker) を
+  // 1 度ずつ処理する。
+  const keys = new Set<string>([
+    ...trafficByKey.keys(),
+    ...pendingByKey.keys(),
+  ]);
+
+  for (const k of keys) {
+    const tr = trafficByKey.get(k) ?? null;
+    const pr = pendingByKey.get(k) ?? null;
+    // flip 機構: traffic:: を持つ = workers、持たない = cloudrun 等。
+    const source: PendingSource = tr ? "traffic" : "pending";
+    const active = tr ? currentActiveOf(tr) : null;
+
+    // pending-release:: record が指す version が既に flip 済み (traffic:: で active)
+    // か。pending-release:: は deploy 時 (frontend-ci) に作られ traffic-report では
+    // clear されないため、flip 後も stale record として残る (Refs #248)。
+    const prFlipped =
+      pr != null &&
+      tr != null &&
+      (tr.versions ?? []).some(
+        (v) => v.version_id === pr.version_id && v.percentage > 0,
+      );
+
+    // 未 flip の pending-release:: record があれば、それを tagged な真実として採用。
+    if (pr && !prFlipped) {
+      out.push({
+        repo: pr.repo,
+        worker_name: pr.worker_name ?? null,
+        version_id: pr.version_id,
+        tag: pr.tag,
+        uploaded_at: pr.uploaded_at,
+        preview_url: pr.preview_url ?? null,
+        source,
+        rollback_to: active?.version_id ?? null,
+        rollback_tag: active?.tag ?? null,
+      });
       continue;
     }
-    // pending source (cloudrun 等) でも traffic:: record があれば現 active を
-    // rollback 先として控える (= 一括 flip → flip-group rollback の戻し先確保、
-    // Refs ippoan/ci-dashboard#241)。traffic:: が無ければ null (戻し先不明)。
-    const active = rec ? currentActiveOf(rec) : null;
-    out.push({
-      repo: r.repo,
-      worker_name: worker,
-      version_id: r.version_id,
-      tag: r.tag,
-      uploaded_at: r.uploaded_at,
-      preview_url: r.preview_url ?? null,
-      source: "pending",
-      rollback_to: active?.version_id ?? null,
-      rollback_tag: active?.tag ?? null,
-    });
+
+    // pending-release:: record が無い / flip 済み → traffic:: 由来の promotable
+    // (untagged。手動 upload / legacy 経路。tag が無ければ flip gate で弾かれる)。
+    if (tr) {
+      const v = noTrafficPromotable(tr);
+      if (!v) continue;
+      out.push({
+        repo: tr.repo,
+        worker_name: tr.worker_name ?? null,
+        version_id: v.version_id,
+        tag: v.tag ?? null,
+        uploaded_at: v.created_on ?? "",
+        preview_url: null,
+        source: "traffic",
+        rollback_to: active?.version_id ?? null,
+        rollback_tag: active?.tag ?? null,
+      });
+    }
   }
   out.sort((a, b) => (a.uploaded_at < b.uploaded_at ? 1 : -1));
   return out;

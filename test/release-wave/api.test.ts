@@ -1125,10 +1125,13 @@ describe("handleReleaseWavePendingReleaseFlipAll", () => {
     );
     expect(dispatchCall).toBeDefined();
     const body = JSON.parse(dispatchCall![1].body);
-    expect(body.event_type).toBe("release-wave-flip");
+    // auth-worker は traffic:: record を持つ worker なので flip 機構は
+    // traffic-rollback (wrangler versions deploy <id>@100%)。version / tag は
+    // pending-release:: 由来 (Refs #427)。
+    expect(body.event_type).toBe("release-wave-traffic-rollback");
     expect(body.client_payload).toMatchObject({
       previewed_version_id: PENDING_VID,
-      pending_release: true,
+      traffic_rollback: true,
     });
     // pending record は消える
     expect(await getPendingRelease(kv, "ippoan/auth-worker")).toBeNull();
