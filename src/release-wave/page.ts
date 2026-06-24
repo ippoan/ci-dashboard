@@ -501,6 +501,53 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
     pendingReleases,
   );
 
+  // CCoW (CF Access 保護で /release-wave を直接見れない環境) から flip の反映状態を
+  // 確認できるよう、computeUnifiedPending の入出力を Workers Observability に
+  // 構造化ログとして残す。リクエストごとに 1 行 (= ページ "mount" 時)。
+  // 確認: mcp__cf_logging__query_worker_observability で event="release_wave_page_state"
+  // を絞る。client onMount だとブラウザ console 止まりで CCoW から読めないため SSR 側で出す。
+  try {
+    console.log(
+      JSON.stringify({
+        event: "release_wave_page_state",
+        traffic: trafficRecordsPerWorker.map((t) => ({
+          repo: t.repo,
+          worker_name: t.worker_name ?? null,
+          reported_at: t.reported_at,
+          active: (t.versions ?? [])
+            .filter((v) => v.percentage > 0)
+            .map((v) => ({ id: v.version_id, pct: v.percentage, on: v.created_on ?? null })),
+          zero: (t.versions ?? [])
+            .filter((v) => v.percentage <= 0)
+            .slice(0, 5)
+            .map((v) => ({ id: v.version_id, on: v.created_on ?? null })),
+          deploy_history: (t.deploy_history ?? [])
+            .slice(0, 3)
+            .map((h) => ({ id: h.version_id, tag: h.tag ?? null, at: h.became_active_at ?? null })),
+        })),
+        pending: pendingReleases.map((p) => ({
+          repo: p.repo,
+          worker_name: p.worker_name ?? null,
+          version_id: p.version_id,
+          tag: p.tag,
+          uploaded_at: p.uploaded_at,
+        })),
+        unified: unifiedPending.map((u) => ({
+          repo: u.repo,
+          worker_name: u.worker_name,
+          version_id: u.version_id,
+          tag: u.tag,
+          source: u.source,
+          uploaded_at: u.uploaded_at,
+          rollback_to: u.rollback_to,
+          flippable: !!u.tag,
+        })),
+      }),
+    );
+  } catch {
+    // log 失敗で render を止めない
+  }
+
   // 未適用マイグレーションは Cloud Run backend (= backend:: を持ち traffic:: 無し)
   // についてだけ算出する (= migrate job を持つ repo。CF Worker は除外)。GitHub
   // 依存なので fail-soft (computePendingMigrationsForRepos が空 Map を返す)。
