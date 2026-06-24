@@ -3,6 +3,7 @@ import {
   recordTraffic,
   getTraffic,
   getTrafficForRepos,
+  listTrafficForReposPerWorker,
   nextDeployHistory,
   DEPLOY_HISTORY_MAX,
   type TrafficRecord,
@@ -221,5 +222,63 @@ describe("traffic record", () => {
     expect(map.has("ippoan/a")).toBe(true);
     expect(map.has("ippoan/c")).toBe(false);
     expect(map.size).toBe(1);
+  });
+});
+
+describe("per-worker traffic (monorepo, Refs #427)", () => {
+  it("recordTraffic with worker_name uses a per-worker key separate from repo-key", async () => {
+    const kv = memKv();
+    const repo = "ippoan/nuxt-notify";
+    await recordTraffic(kv, {
+      repo,
+      worker_name: "notify-email-receiver",
+      versions: [{ version_id: "v-email", percentage: 100 }],
+      now: "2026-06-24T10:00:00.000Z",
+    });
+    // worker_name 指定で round-trip。
+    const rec = await getTraffic(kv, repo, "notify-email-receiver");
+    expect(rec?.worker_name).toBe("notify-email-receiver");
+    expect(rec?.versions[0]?.version_id).toBe("v-email");
+    // repo-key (worker_name 無し) は別キーなので null。
+    expect(await getTraffic(kv, repo)).toBeNull();
+  });
+
+  it("listTrafficForReposPerWorker collects legacy repo-key + all per-worker units", async () => {
+    const kv = memKv();
+    const repo = "ippoan/nuxt-notify";
+    // legacy repo-key (worker_name 無し)。
+    await recordTraffic(kv, {
+      repo,
+      versions: [{ version_id: "v-app", percentage: 100 }],
+      now: "2026-06-24T10:00:00.000Z",
+    });
+    // 2 つの unit。
+    await recordTraffic(kv, {
+      repo,
+      worker_name: "notify-email-receiver",
+      versions: [{ version_id: "v-email", percentage: 100 }],
+      now: "2026-06-24T10:00:01.000Z",
+    });
+    await recordTraffic(kv, {
+      repo,
+      worker_name: "notify-realtime-bus",
+      versions: [{ version_id: "v-realtime", percentage: 100 }],
+      now: "2026-06-24T10:00:02.000Z",
+    });
+    // 別 repo は prefix `::` 区切りなので混ざらない。
+    await recordTraffic(kv, {
+      repo: "ippoan/auth-worker",
+      versions: [{ version_id: "v-auth", percentage: 100 }],
+      now: "2026-06-24T10:00:03.000Z",
+    });
+
+    const recs = await listTrafficForReposPerWorker(kv, [repo]);
+    const byWorker = new Map(recs.map((r) => [r.worker_name ?? "(legacy)", r]));
+    expect(recs).toHaveLength(3);
+    expect(byWorker.get("(legacy)")?.versions[0]?.version_id).toBe("v-app");
+    expect(byWorker.get("notify-email-receiver")?.versions[0]?.version_id).toBe("v-email");
+    expect(byWorker.get("notify-realtime-bus")?.versions[0]?.version_id).toBe("v-realtime");
+    // auth-worker は対象 repo に含めていないので出ない。
+    expect(recs.every((r) => r.repo === repo)).toBe(true);
   });
 });

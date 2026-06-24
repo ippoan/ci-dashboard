@@ -29,7 +29,11 @@ import {
   type FlipGroupRecord,
   type UnifiedPending,
 } from "./pending-release";
-import { getTrafficForRepos, type TrafficRecord } from "./traffic";
+import {
+  getTrafficForRepos,
+  listTrafficForReposPerWorker,
+  type TrafficRecord,
+} from "./traffic";
 import {
   computePendingMigrationsForRepos,
   type RepoPendingMigrations,
@@ -446,6 +450,7 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
   // % / id」を出す用 + Pending releases の単一真実導出用 + Frontends セクションの
   // 「Current (live)」列 + frontend/backend 判定用 (Refs #237 / #268)。
   let trafficByRepo: Map<string, TrafficRecord> = new Map();
+  let trafficRecordsPerWorker: TrafficRecord[] = [];
   if (env.COMPAT_KV) {
     const repos = new Set<string>();
     if (globalCompat) {
@@ -460,6 +465,17 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
       trafficByRepo = await getTrafficForRepos(env.COMPAT_KV, repos);
     } catch {
       trafficByRepo = new Map();
+    }
+    // monorepo unit を個別に拾うため per-worker list も取得 (computeUnifiedPending
+    // 用、Refs #427)。repo-key の trafficByRepo は compat グラフ / Frontends
+    // セクションの repo 単位判定にそのまま使う。
+    try {
+      trafficRecordsPerWorker = await listTrafficForReposPerWorker(
+        env.COMPAT_KV,
+        repos,
+      );
+    } catch {
+      trafficRecordsPerWorker = [];
     }
   }
 
@@ -480,7 +496,10 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
   // version / cloudrun=pending-release:: を統合し、Traffic セクションと一致させる。
   // compat section の「Staged previews」内 ⚡ Flip all ボタンの出し分けに件数を使う
   // ため、compatSection より先に算出する。
-  const unifiedPending = computeUnifiedPending(trafficByRepo, pendingReleases);
+  const unifiedPending = computeUnifiedPending(
+    trafficRecordsPerWorker,
+    pendingReleases,
+  );
 
   // 未適用マイグレーションは Cloud Run backend (= backend:: を持ち traffic:: 無し)
   // についてだけ算出する (= migrate job を持つ repo。CF Worker は除外)。GitHub
@@ -827,12 +846,17 @@ function renderPendingReleaseSection(
       //    (handler が platform で routing、cloudrun は target_tag→pending-<tag>)。
       // 未 tag version は flip 禁止 (release / prod テスト gate 未通過)。ボタンを
       // 出さず理由を表示する (API 側も UNTAGGED_VERSION_FORBIDDEN で reject)。
+      // monorepo unit の対象 worker を dispatch に渡す hidden input (単一 worker は空)。
+      const workerInput = r.worker_name
+        ? `<input type="hidden" name="worker_name" value="${escapeHtml(r.worker_name)}">`
+        : "";
       const flipForm = !r.tag
         ? `<span class="meta" title="未 tag version (v* tag リリースを経ていない) は 100% flip 禁止。v* tag を打って release で上げ直してください。">未tag — flip不可</span>`
         : r.source === "traffic"
           ? `<form method="post" action="/api/release-wave/traffic-rollback" style="margin:0">
               <input type="hidden" name="repo" value="${escapeHtml(r.repo)}">
               <input type="hidden" name="version_id" value="${escapeHtml(r.version_id)}">
+              ${workerInput}
               <button type="submit"
                 title="Promote this no-traffic version to 100% (wrangler versions deploy ${escapeHtml(r.version_id)}@100%)">
                 Flip to 100%
@@ -840,14 +864,19 @@ function renderPendingReleaseSection(
             </form>`
           : `<form method="post" action="/api/release-wave/pending-release/flip" style="margin:0">
               <input type="hidden" name="repo" value="${escapeHtml(r.repo)}">
+              ${workerInput}
               <button type="submit"
                 title="Promote this no-traffic release to 100% traffic">
                 Flip to 100%
               </button>
             </form>`;
+      // repo セルは monorepo unit を併記 (どの worker の Pending かを明示)。
+      const repoCell = r.worker_name
+        ? `${escapeHtml(r.repo)} <span class="meta">/ ${escapeHtml(r.worker_name)}</span>`
+        : escapeHtml(r.repo);
       return `
         <tr>
-          <td>${escapeHtml(r.repo)}</td>
+          <td>${repoCell}</td>
           <td class="meta">${tagCell}</td>
           <td class="meta" title="${escapeHtml(r.version_id)}">${escapeHtml(shortVid)}…</td>
           <td>${previewCell}</td>

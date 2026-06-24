@@ -65,6 +65,13 @@ export interface TrafficRecord {
   /** "owner/name"。 */
   repo: string;
   /**
+   * monorepo repo の unit worker 名 (CF script 名、例 "notify-email-receiver")。
+   * 単一 worker repo / legacy record では null/undefined。非 null の record は
+   * `traffic::<repo>::<worker_name>` キーで保存される (per-worker 分離)。
+   * flip/rollback dispatch の `cf_worker_name` 源 (Refs #427)。
+   */
+  worker_name?: string | null;
+  /**
    * version 配分。percentage 降順 → 同率は created_on 降順 (新しい順) で並ぶ。
    * 100% (active) と 0% (no-traffic / promote 待ち) が混在する。
    */
@@ -79,8 +86,13 @@ export interface TrafficRecord {
   reported_at: string;
 }
 
-function trafficKey(repo: string): string {
-  return `${TRAFFIC_PREFIX}${repo}`;
+function trafficKey(repo: string, workerName?: string | null): string {
+  // worker_name 付き (monorepo unit) は `traffic::<repo>::<worker>`、無し
+  // (単一 worker / legacy) は従来どおり `traffic::<repo>`。`::` 区切りなので
+  // 別 repo の prefix と衝突しない。
+  return workerName
+    ? `${TRAFFIC_PREFIX}${repo}::${workerName}`
+    : `${TRAFFIC_PREFIX}${repo}`;
 }
 
 /**
@@ -100,10 +112,13 @@ export async function recordTraffic(
     repo: string;
     versions: TrafficVersion[];
     now: string;
+    /** monorepo unit worker 名 (省略時は単一 worker / legacy = repo-key)。 */
+    worker_name?: string | null;
   },
 ): Promise<TrafficRecord> {
+  const workerName = input.worker_name ?? null;
   // 既存 record から version_id → tag を引き継ぐ準備。
-  const prev = await getTraffic(kv, input.repo);
+  const prev = await getTraffic(kv, input.repo, workerName);
   const prevTagById = new Map<string, string>();
   if (prev) {
     for (const v of prev.versions) {
@@ -143,11 +158,12 @@ export async function recordTraffic(
   const record: TrafficRecord = {
     schema_version: SCHEMA_VERSION,
     repo: input.repo,
+    ...(workerName ? { worker_name: workerName } : {}),
     versions: merged,
     ...(deploy_history.length > 0 ? { deploy_history } : {}),
     reported_at: input.now,
   };
-  await kv.put(trafficKey(input.repo), JSON.stringify(record));
+  await kv.put(trafficKey(input.repo, workerName), JSON.stringify(record));
   return record;
 }
 
@@ -190,10 +206,49 @@ export function nextDeployHistory(
 export async function getTraffic(
   kv: KVNamespace,
   repo: string,
+  workerName?: string | null,
 ): Promise<TrafficRecord | null> {
-  const v = await kv.get<TrafficRecord>(trafficKey(repo), "json");
+  const v = await kv.get<TrafficRecord>(trafficKey(repo, workerName), "json");
   if (!v || v.schema_version < 1 || v.schema_version > 4) return null;
   return v;
+}
+
+/**
+ * monorepo を含む repo 群の traffic を **per-worker 単位**で全件返す (Refs #427)。
+ * 各 repo について legacy の `traffic::<repo>` (worker_name=null) と、
+ * `traffic::<repo>::<worker>` 配下の全 unit record を列挙する。computeUnifiedPending
+ * が unit ごとに Pending 行 / flip dispatch を出すための入力。
+ */
+export async function listTrafficForReposPerWorker(
+  kv: KVNamespace,
+  repos: Iterable<string>,
+): Promise<TrafficRecord[]> {
+  const list = [...new Set(repos)];
+  const out: TrafficRecord[] = [];
+  await Promise.all(
+    list.map(async (repo) => {
+      // legacy / 単一 worker の repo-key。
+      const legacy = await getTraffic(kv, repo);
+      if (legacy) out.push({ ...legacy, worker_name: legacy.worker_name ?? null });
+      // per-worker key (`traffic::<repo>::<worker>`)。`::` 区切りなので
+      // 別 repo (`traffic::<repo>-foo`) を拾わない。
+      let cursor: string | undefined;
+      do {
+        const page = await kv.list({
+          prefix: `${TRAFFIC_PREFIX}${repo}::`,
+          cursor,
+        });
+        for (const key of page.keys) {
+          const rec = await kv.get<TrafficRecord>(key.name, "json");
+          if (rec && rec.schema_version >= 1 && rec.schema_version <= 4) {
+            out.push({ ...rec, worker_name: rec.worker_name ?? null });
+          }
+        }
+        cursor = page.list_complete ? undefined : page.cursor;
+      } while (cursor);
+    }),
+  );
+  return out;
 }
 
 /**
