@@ -6,10 +6,14 @@
  *   - hasTag       : tag が 1 つでもあるか
  *   - behind       : 最新 tag から default branch HEAD までの commit 数
  *                    (= まだ release されていない変更量)。-1 は取得失敗。
- *   - tagless      : TAGLESS_REPOS 指定の repo か (tag を打たない方針)
+ *   - tagless      : タグを切らない repo か。**手書きリストではなく repo の
+ *                    現行 config から自動判定** (release-model.ts: release-wave.yml
+ *                    も publish 可能な package.json も無い = tagless)。staging=prod
+ *                    の merge 駆動 service と純 infra がここに入る。
  *
- * repo 一覧の出所は /releases と同じ 3 ソース (Hub status / direct-push
- * allowlist / TAGLESS_REPOS) に加え、Compatibility (all consumers) グラフに出る
+ * repo 一覧 (discovery) の出所は /releases と同じ 3 ソース (Hub status /
+ * direct-push allowlist / TAGLESS_REPOS) に加え、Compatibility (all consumers)
+ * グラフに出る
  * repo (compat KV の backend + frontend) も含める。後者を足すのは、compat グラフ
  * にしか出ない consumer frontend (例: nuxt-notify。ci-dashboard 宛の CI webhook を
  * 出さず allowlist/tagless でもない) を取りこぼさないため。tag / compare /
@@ -24,6 +28,7 @@ import { loadDirectPushAllowlist } from "../direct-push-allowlist";
 import { parseTaglessRepos } from "../tagless-repos";
 import { sortSemverDesc } from "../release-helpers";
 import { computeGlobalCompatibility } from "./compat";
+import { isTaglessRepo } from "../release-model";
 
 export interface RepoReleaseStatus {
   repo: string;
@@ -32,7 +37,7 @@ export interface RepoReleaseStatus {
   hasTag: boolean;
   /** 最新 tag から default branch HEAD までの commit 数。-1 = 取得失敗。 */
   behind: number;
-  /** TAGLESS_REPOS 指定 (tag を打たない方針の repo)。 */
+  /** タグを切らない repo か (release-model.ts が config から自動判定)。 */
   tagless: boolean;
 }
 
@@ -89,11 +94,11 @@ async function discoverRepos(
 async function computeOne(
   env: Env,
   repo: string,
-  taglessSet: Set<string>,
 ): Promise<RepoReleaseStatus | null> {
   const { owner, repo: name } = parseRepo(repo);
   const full = `${owner}/${name}`;
-  const tagless = taglessSet.has(repo) || taglessSet.has(full);
+  // tagless は手書きリストでなく repo の現行 config から自動判定 (release-model.ts)。
+  const tagless = await isTaglessRepo(env, env.CI_STATUS, repo);
 
   let token: string;
   try {
@@ -139,9 +144,9 @@ async function computeOne(
 export async function getRepoReleaseStatuses(
   env: Env,
 ): Promise<RepoReleaseStatus[]> {
-  const { repos, tagless } = await discoverRepos(env);
-  const results = await Promise.all(
-    repos.map((r) => computeOne(env, r, tagless)),
-  );
+  // discoverRepos の tagless set は discovery 用にだけ使う (どの repo を一覧に
+  // 含めるか)。tagless 判定 (classify) は computeOne が config から自動導出する。
+  const { repos } = await discoverRepos(env);
+  const results = await Promise.all(repos.map((r) => computeOne(env, r)));
   return results.filter((r): r is RepoReleaseStatus => r !== null);
 }
