@@ -652,10 +652,10 @@ export async function pendingFlipAllCore(
       tag: u.tag,
       source: u.source,
     });
-    // pending-release:: 由来 (cloudrun) は flip したので消す。traffic 由来は
-    // traffic-report (flip 後) が状態を更新するので KV 操作不要。
-    if (u.source === "pending")
-      await clearPendingRelease(env.COMPAT_KV, u.repo, u.worker_name);
+    // flip したので pending-release:: record を消す (idempotent。tag を持つ flip
+    // 対象は必ず pending-release:: 由来 = traffic:: 由来 promotable は untagged で
+    // 上の !u.tag filter で除外済み。source 問わず消して stale を残さない)。
+    await clearPendingRelease(env.COMPAT_KV, u.repo, u.worker_name);
   }
 
   if (items.length === 0) {
@@ -946,24 +946,30 @@ export async function handleReleaseWaveTrafficRollback(
   }
 
   const traffic = await getTraffic(env.COMPAT_KV, repo, workerName);
-  if (!traffic) {
-    return jsonResponse(404, {
-      code: "NOT_FOUND",
-      error: `no traffic record for ${repo}`,
-    });
-  }
-  // version_id は履歴 (deploy_history) か現配分 (versions) のどちらかに居ること。
-  const fromHistory = (traffic.deploy_history ?? []).find(
+  // pending-release:: record (= release deploy が no-traffic upload した version)。
+  // report-traffic-split は propagation lag で upload 直後の version を
+  // `wrangler versions list` に含められないことがあり、かつ release tag は CF
+  // version (traffic::) には乗らない。よって flip 対象 version の正当性 (既知
+  // version か) と release tag は pending-release:: record からも引けるようにする
+  // (= Pending releases の「Flip to 100%」が release deploy 直後でも通る、Refs #427)。
+  const pending = await getPendingRelease(env.COMPAT_KV, repo, workerName);
+  // version_id は traffic:: 履歴 (deploy_history) / 現配分 (versions) /
+  // pending-release:: のいずれかに居ること (= 未知 version への誤 flip を防ぐ)。
+  const fromHistory = (traffic?.deploy_history ?? []).find(
     (e) => e.version_id === versionId,
   );
-  const fromVersions = traffic.versions.find((v) => v.version_id === versionId);
-  if (!fromHistory && !fromVersions) {
+  const fromVersions = (traffic?.versions ?? []).find(
+    (v) => v.version_id === versionId,
+  );
+  const fromPending =
+    pending && pending.version_id === versionId ? pending : null;
+  if (!fromHistory && !fromVersions && !fromPending) {
     return jsonResponse(404, {
       code: "VERSION_NOT_FOUND",
-      error: `version ${versionId} is not in traffic history for ${repo}`,
+      error: `version ${versionId} is not in traffic history or pending release for ${repo}`,
     });
   }
-  const tag = fromHistory?.tag ?? fromVersions?.tag ?? null;
+  const tag = fromHistory?.tag ?? fromVersions?.tag ?? fromPending?.tag ?? null;
 
   // 未 tag version の 100% flip は禁止。tag が無い version = v* tag リリース
   // (= prod テスト gate) を経ていない version で、これを 100% に上げると
@@ -985,6 +991,12 @@ export async function handleReleaseWaveTrafficRollback(
       code: "DISPATCH_FAILED",
       error: `failed to dispatch traffic-rollback for ${repo}: ${err}`,
     });
+  }
+  // flip 対象が pending-release:: 由来 (= 今 release した no-traffic version を
+  // promote) なら record を消す (flip-all path と揃える)。flip 後は traffic-report
+  // が当該 version を active として更新するので、stale pending を残さない。
+  if (fromPending) {
+    await clearPendingRelease(env.COMPAT_KV, repo, workerName);
   }
   return redirectToList();
 }
