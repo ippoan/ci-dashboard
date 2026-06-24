@@ -333,6 +333,8 @@ export async function handleBackendDeployReportWebhook(
  */
 const pendingReleaseSchema = z.object({
   repo: z.string().min(1),
+  // monorepo unit worker 名 (CF script 名)。省略時は単一 worker / legacy = repo-key。
+  worker_name: z.string().min(1).nullish(),
   // version_id:
   //   - cloudflare-workers: wrangler の version id (UUID)。flip 時に
   //     `wrangler versions deploy <id>@100%` に渡る。
@@ -354,6 +356,7 @@ export async function handlePendingReleaseWebhook(
   if (!v.ok) return v.response;
   const record = await recordPendingRelease(env.COMPAT_KV, {
     repo: v.data.repo,
+    worker_name: v.data.worker_name ?? null,
     version_id: v.data.version_id,
     tag: v.data.tag,
     preview_url: v.data.preview_url ?? null,
@@ -441,6 +444,8 @@ export async function handleBackendCurrentImageWebhook(
  */
 const trafficReportSchema = z.object({
   repo: z.string().min(1),
+  // monorepo unit worker 名 (CF script 名)。省略時は単一 worker / legacy = repo-key。
+  worker_name: z.string().min(1).nullish(),
   versions: z
     .array(
       z.object({
@@ -468,6 +473,7 @@ export async function handleTrafficReportWebhook(
   }
   const record = await recordTraffic(env.COMPAT_KV, {
     repo: v.data.repo,
+    worker_name: v.data.worker_name ?? null,
     versions: v.data.versions.map((x) => ({
       version_id: x.version_id,
       percentage: x.percentage,

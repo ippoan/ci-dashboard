@@ -890,6 +890,45 @@ describe("handleReleaseWaveTrafficRollback", () => {
       traffic_rollback: true,
     });
     expect(body.client_payload.wave_id).toMatch(/^[a-zA-Z0-9._-]{1,128}$/);
+    // 単一 worker repo は cf_worker_name を載せない (handler が targets.yaml に fallback)。
+    expect(body.client_payload.cf_worker_name).toBeUndefined();
+  });
+
+  it("monorepo unit: worker_name 指定で per-worker record を引き dispatch に cf_worker_name を載せる (Refs #427)", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    // per-worker キー `traffic::<repo>::<worker>` の record。
+    const kv = memKv({
+      "traffic::ippoan/nuxt-notify::notify-email-receiver": {
+        schema_version: 4,
+        repo: "ippoan/nuxt-notify",
+        worker_name: "notify-email-receiver",
+        versions: [{ version_id: ROLLBACK_VID, percentage: 0, tag: "v0.0.30" }],
+        reported_at: "2026-06-24T10:00:00Z",
+      },
+    });
+    const resp = await handleReleaseWaveTrafficRollback(
+      postRequest("/api/release-wave/traffic-rollback", {
+        formBody: {
+          repo: "ippoan/nuxt-notify",
+          version_id: ROLLBACK_VID,
+          worker_name: "notify-email-receiver",
+        },
+      }),
+      pendingFlipEnv(kv),
+    );
+    expect(resp.status).toBe(303);
+    const call = fetchSpy.mock.calls.find((c) =>
+      String(c[0]).includes("/repos/ippoan/nuxt-notify/dispatches"),
+    );
+    expect(call).toBeDefined();
+    const body = JSON.parse(call![1].body);
+    expect(body.event_type).toBe("release-wave-traffic-rollback");
+    expect(body.client_payload).toMatchObject({
+      previewed_version_id: ROLLBACK_VID,
+      cf_worker_name: "notify-email-receiver",
+      traffic_rollback: true,
+    });
   });
 
   it("returns 502 when dispatch fails", async () => {

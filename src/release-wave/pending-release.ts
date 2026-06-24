@@ -21,6 +21,12 @@ export interface PendingReleaseRecord {
   schema_version: typeof SCHEMA_VERSION;
   /** "owner/name"。 */
   repo: string;
+  /**
+   * monorepo unit worker 名 (CF script 名)。単一 worker / legacy は null。
+   * 非 null の record は `pending-release::<repo>::<worker>` キーで保存される。
+   * Refs #427。
+   */
+  worker_name?: string | null;
   /** `wrangler versions upload` が返した version id (UUID)。flip 対象。 */
   version_id: string;
   /** リリース tag (e.g. v0.2.38)。表示 / compat current_image 用。 */
@@ -31,11 +37,15 @@ export interface PendingReleaseRecord {
   uploaded_at: string;
 }
 
-function pendingReleaseKey(repo: string): string {
-  return `${PENDING_RELEASE_PREFIX}${repo}`;
+function pendingReleaseKey(repo: string, workerName?: string | null): string {
+  // monorepo unit は `pending-release::<repo>::<worker>`、単一/legacy は
+  // `pending-release::<repo>`。`::` 区切りで別 repo prefix と衝突しない。
+  return workerName
+    ? `${PENDING_RELEASE_PREFIX}${repo}::${workerName}`
+    : `${PENDING_RELEASE_PREFIX}${repo}`;
 }
 
-/** upsert: repo ごとに最新 upload で上書きする (古い未 flip version は捨てる)。 */
+/** upsert: (repo, worker) ごとに最新 upload で上書きする (古い未 flip version は捨てる)。 */
 export async function recordPendingRelease(
   kv: KVNamespace,
   input: {
@@ -44,26 +54,34 @@ export async function recordPendingRelease(
     tag: string;
     preview_url?: string | null;
     now: string;
+    /** monorepo unit worker 名 (省略時は単一 worker / legacy = repo-key)。 */
+    worker_name?: string | null;
   },
 ): Promise<PendingReleaseRecord> {
+  const workerName = input.worker_name ?? null;
   const record: PendingReleaseRecord = {
     schema_version: SCHEMA_VERSION,
     repo: input.repo,
+    ...(workerName ? { worker_name: workerName } : {}),
     version_id: input.version_id,
     tag: input.tag,
     preview_url: input.preview_url ?? null,
     uploaded_at: input.now,
   };
-  await kv.put(pendingReleaseKey(input.repo), JSON.stringify(record));
+  await kv.put(pendingReleaseKey(input.repo, workerName), JSON.stringify(record));
   return record;
 }
 
-/** 単一 repo の pending release を取得 (無ければ null)。 */
+/** 単一 (repo, worker) の pending release を取得 (無ければ null)。 */
 export async function getPendingRelease(
   kv: KVNamespace,
   repo: string,
+  workerName?: string | null,
 ): Promise<PendingReleaseRecord | null> {
-  const v = await kv.get<PendingReleaseRecord>(pendingReleaseKey(repo), "json");
+  const v = await kv.get<PendingReleaseRecord>(
+    pendingReleaseKey(repo, workerName),
+    "json",
+  );
   if (!v || v.schema_version !== SCHEMA_VERSION) return null;
   return v;
 }
@@ -88,12 +106,13 @@ export async function listPendingReleases(
   return out;
 }
 
-/** flip 完了後に record を消す。 */
+/** flip 完了後に record を消す。monorepo は worker_name で対象 unit を指定。 */
 export async function clearPendingRelease(
   kv: KVNamespace,
   repo: string,
+  workerName?: string | null,
 ): Promise<void> {
-  await kv.delete(pendingReleaseKey(repo));
+  await kv.delete(pendingReleaseKey(repo, workerName));
 }
 
 // ----------------------------------------------------------------------------
@@ -112,6 +131,8 @@ const FLIP_GROUP_SCHEMA = 1 as const;
 export interface FlipGroupItem {
   /** "owner/name"。 */
   repo: string;
+  /** monorepo unit worker 名 (単一 worker repo は null)。一括 rollback の dispatch に使う。 */
+  worker_name?: string | null;
   /** 今回 100% に flip した version id。 */
   flipped_version_id: string;
   /** flip した version の release tag。 */
@@ -184,6 +205,8 @@ export type PendingSource = "traffic" | "pending";
 /** Pending releases の 1 行 (統合表現)。 */
 export interface UnifiedPending {
   repo: string;
+  /** monorepo unit worker 名 (単一 worker repo は null)。flip dispatch の cf_worker_name 源。 */
+  worker_name: string | null;
   version_id: string;
   tag: string | null;
   uploaded_at: string;
@@ -243,17 +266,28 @@ function currentActiveOf(
  * Pending releases の単一真実リストを組む (Refs #237)。uploaded_at 降順。
  */
 export function computeUnifiedPending(
-  trafficByRepo: Map<string, TrafficRecord>,
+  trafficRecords: TrafficRecord[],
   pendingRecords: PendingReleaseRecord[],
 ): UnifiedPending[] {
   const out: UnifiedPending[] = [];
   const seen = new Set<string>();
-  for (const [repo, rec] of trafficByRepo) {
+  // (repo, worker) 複合キー。monorepo unit を repo 単位で潰さず個別に扱う。
+  const composite = (repo: string, worker: string | null): string =>
+    `${repo}::${worker ?? ""}`;
+  // pending source の flip 済み判定 / 戻し先解決に使う traffic record 索引。
+  const trafficByKey = new Map<string, TrafficRecord>();
+  for (const rec of trafficRecords) {
+    trafficByKey.set(composite(rec.repo, rec.worker_name ?? null), rec);
+  }
+
+  for (const rec of trafficRecords) {
+    const worker = rec.worker_name ?? null;
     const v = noTrafficPromotable(rec);
     if (!v) continue;
     const active = currentActiveOf(rec);
     out.push({
-      repo,
+      repo: rec.repo,
+      worker_name: worker,
       version_id: v.version_id,
       tag: v.tag ?? null,
       uploaded_at: v.created_on ?? "",
@@ -262,11 +296,13 @@ export function computeUnifiedPending(
       rollback_to: active?.version_id ?? null,
       rollback_tag: active?.tag ?? null,
     });
-    seen.add(repo);
+    seen.add(composite(rec.repo, worker));
   }
   for (const r of pendingRecords) {
-    if (seen.has(r.repo)) continue; // traffic:: の no-traffic promotable を持つ repo は traffic:: 優先
-    const rec = trafficByRepo.get(r.repo) ?? null;
+    const worker = r.worker_name ?? null;
+    const k = composite(r.repo, worker);
+    if (seen.has(k)) continue; // traffic:: の no-traffic promotable を持つ (repo,worker) は traffic:: 優先
+    const rec = trafficByKey.get(k) ?? null;
     // flip 済み判定: pending-release:: が指す version が traffic:: で既に active
     // (percentage > 0) なら、その release は既に flip 済み。pending-release:: は
     // deploy 時 (frontend-ci) に作られ traffic-report では clear されないため、
@@ -288,6 +324,7 @@ export function computeUnifiedPending(
     const active = rec ? currentActiveOf(rec) : null;
     out.push({
       repo: r.repo,
+      worker_name: worker,
       version_id: r.version_id,
       tag: r.tag,
       uploaded_at: r.uploaded_at,

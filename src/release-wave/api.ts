@@ -35,7 +35,7 @@ import {
 } from "./pending-release";
 import {
   getTraffic,
-  getTrafficForRepos,
+  listTrafficForReposPerWorker,
   type TrafficRecord,
 } from "./traffic";
 import { serviceNameFromRevision } from "./revision";
@@ -411,6 +411,9 @@ function buildPendingFlipDispatch(record: PendingReleaseRecord): Dispatch {
       target_tag: record.tag,
       head_sha: "",
       previewed_version_id: record.version_id,
+      // monorepo unit の対象 worker。handler が --name に使う (Phase 1, #143)。
+      // 単一 worker repo は null/省略 → handler は targets.yaml の cf_worker_name に fallback。
+      ...(record.worker_name ? { cf_worker_name: record.worker_name } : {}),
       // handler が wave flip-report callback を skip するためのマーカー。
       pending_release: true,
     },
@@ -425,6 +428,7 @@ function buildTrafficRollbackDispatch(
   repo: string,
   versionId: string,
   tag: string | null,
+  workerName?: string | null,
 ): Dispatch {
   const wave_id = `traffic-rollback-${repo.replace(/[^a-zA-Z0-9._-]/g, "-")}-${Date.now()}`;
   return {
@@ -436,6 +440,9 @@ function buildTrafficRollbackDispatch(
       head_sha: "",
       // handler が `wrangler versions deploy <id>@100%` の対象にする version。
       previewed_version_id: versionId,
+      // monorepo unit の対象 worker。handler が --name に使う (Phase 1, #143)。
+      // 単一 worker repo は省略 → handler は targets.yaml の cf_worker_name に fallback。
+      ...(workerName ? { cf_worker_name: workerName } : {}),
       // handler が wave callback を skip するためのマーカー。
       traffic_rollback: true,
     },
@@ -479,6 +486,7 @@ export type PendingFlipResult =
 export async function pendingFlipCore(
   env: Env,
   repo: string,
+  workerName?: string | null,
 ): Promise<PendingFlipResult> {
   if (!env.COMPAT_KV) {
     return { ok: false, code: "KV_NOT_CONFIGURED", error: "COMPAT_KV is not bound" };
@@ -487,7 +495,8 @@ export async function pendingFlipCore(
   if (!r) {
     return { ok: false, code: "BAD_REQUEST", error: "repo is required" };
   }
-  const record = await getPendingRelease(env.COMPAT_KV, r);
+  const w = workerName?.trim() || null;
+  const record = await getPendingRelease(env.COMPAT_KV, r, w);
   if (!record) {
     return { ok: false, code: "NOT_FOUND", error: `no pending release for ${r}` };
   }
@@ -503,7 +512,7 @@ export async function pendingFlipCore(
   }
   // 着火できたら record を消す (optimistic)。着火失敗時は上で return 済みなので
   // record は残り、operator が再試行できる。
-  await clearPendingRelease(env.COMPAT_KV, r);
+  await clearPendingRelease(env.COMPAT_KV, r, w);
   return { ok: true, repo: r, tag: record.tag, version_id: record.version_id };
 }
 
@@ -522,9 +531,11 @@ export async function handleReleaseWavePendingReleaseFlip(
   }
 
   let repo = "";
+  let workerName: string | null = null;
   try {
     const form = await req.formData();
     repo = String(form.get("repo") ?? "").trim();
+    workerName = String(form.get("worker_name") ?? "").trim() || null;
   } catch {
     // form-data 以外は repo 無し → 下で 400
   }
@@ -535,7 +546,7 @@ export async function handleReleaseWavePendingReleaseFlip(
     });
   }
 
-  const result = await pendingFlipCore(env, repo);
+  const result = await pendingFlipCore(env, repo, workerName);
   if (!result.ok) {
     const status =
       result.code === "KV_NOT_CONFIGURED"
@@ -612,7 +623,7 @@ export async function pendingFlipAllCore(
   // (traffic source / pending source どちらも、traffic:: があれば現 active)。
   const dispatches = unified.map((u) =>
     u.source === "traffic"
-      ? buildTrafficRollbackDispatch(u.repo, u.version_id, u.tag)
+      ? buildTrafficRollbackDispatch(u.repo, u.version_id, u.tag, u.worker_name)
       : buildPendingFlipDispatch(unifiedToRecord(u)),
   );
   const results = await dispatchAll(env, dispatches);
@@ -629,6 +640,7 @@ export async function pendingFlipAllCore(
     if (!results[i]?.ok) continue;
     items.push({
       repo: u.repo,
+      worker_name: u.worker_name,
       flipped_version_id: u.version_id,
       flipped_tag: u.tag ?? "",
       rollback_to: u.rollback_to,
@@ -642,7 +654,8 @@ export async function pendingFlipAllCore(
     });
     // pending-release:: 由来 (cloudrun) は flip したので消す。traffic 由来は
     // traffic-report (flip 後) が状態を更新するので KV 操作不要。
-    if (u.source === "pending") await clearPendingRelease(env.COMPAT_KV, u.repo);
+    if (u.source === "pending")
+      await clearPendingRelease(env.COMPAT_KV, u.repo, u.worker_name);
   }
 
   if (items.length === 0) {
@@ -689,6 +702,7 @@ function unifiedToRecord(u: UnifiedPending): PendingReleaseRecord {
   return {
     schema_version: 1,
     repo: u.repo,
+    ...(u.worker_name ? { worker_name: u.worker_name } : {}),
     version_id: u.version_id,
     tag: u.tag ?? "",
     preview_url: u.preview_url,
@@ -723,13 +737,14 @@ async function loadUnifiedPending(env: Env): Promise<UnifiedPending[]> {
     // compat 取得失敗時は pending repo のみで degrade。
   }
   for (const r of pending) repos.add(r.repo);
-  let trafficByRepo = new Map<string, TrafficRecord>();
+  let trafficRecords: TrafficRecord[] = [];
   try {
-    trafficByRepo = await getTrafficForRepos(env.COMPAT_KV, repos);
+    // monorepo unit を個別に拾うため per-worker lister を使う (Refs #427)。
+    trafficRecords = await listTrafficForReposPerWorker(env.COMPAT_KV, repos);
   } catch {
     // traffic 取得失敗時は pending-release:: のみで degrade。
   }
-  return computeUnifiedPending(trafficByRepo, pending);
+  return computeUnifiedPending(trafficRecords, pending);
 }
 
 // ----------------------------------------------------------------------------
@@ -794,7 +809,12 @@ export async function handleReleaseWaveFlipGroupRollback(
       });
     }
     const results = await dispatchAll(env, [
-      buildTrafficRollbackDispatch(item.repo, item.rollback_to, item.rollback_tag),
+      buildTrafficRollbackDispatch(
+        item.repo,
+        item.rollback_to,
+        item.rollback_tag,
+        item.worker_name,
+      ),
     ]);
     if (!(results.length > 0 && results[0]!.ok)) {
       const err =
@@ -808,6 +828,7 @@ export async function handleReleaseWaveFlipGroupRollback(
     // に再登録して再 flip できるようにする (Refs ippoan/ci-dashboard#237)。
     await recordPendingRelease(env.COMPAT_KV, {
       repo: item.repo,
+      worker_name: item.worker_name,
       version_id: item.flipped_version_id,
       tag: item.flipped_tag,
       now: new Date().toISOString(),
@@ -837,7 +858,12 @@ export async function handleReleaseWaveFlipGroupRollback(
   }
 
   const dispatches = rollbackable.map((it) =>
-    buildTrafficRollbackDispatch(it.repo, it.rollback_to, it.rollback_tag),
+    buildTrafficRollbackDispatch(
+      it.repo,
+      it.rollback_to,
+      it.rollback_tag,
+      it.worker_name,
+    ),
   );
   const results = await dispatchAll(env, dispatches);
 
@@ -858,6 +884,7 @@ export async function handleReleaseWaveFlipGroupRollback(
     const it = rollbackable[i]!;
     await recordPendingRelease(env.COMPAT_KV, {
       repo: it.repo,
+      worker_name: it.worker_name,
       version_id: it.flipped_version_id,
       tag: it.flipped_tag,
       now,
@@ -901,10 +928,13 @@ export async function handleReleaseWaveTrafficRollback(
 
   let repo = "";
   let versionId = "";
+  let workerName: string | null = null;
   try {
     const form = await req.formData();
     repo = String(form.get("repo") ?? "").trim();
     versionId = String(form.get("version_id") ?? "").trim();
+    // monorepo unit を対象にする場合は worker_name も受ける (単一 worker は空)。
+    workerName = String(form.get("worker_name") ?? "").trim() || null;
   } catch {
     // form-data 以外は下で 400
   }
@@ -915,7 +945,7 @@ export async function handleReleaseWaveTrafficRollback(
     });
   }
 
-  const traffic = await getTraffic(env.COMPAT_KV, repo);
+  const traffic = await getTraffic(env.COMPAT_KV, repo, workerName);
   if (!traffic) {
     return jsonResponse(404, {
       code: "NOT_FOUND",
@@ -947,7 +977,7 @@ export async function handleReleaseWaveTrafficRollback(
   }
 
   const results = await dispatchAll(env, [
-    buildTrafficRollbackDispatch(repo, versionId, tag),
+    buildTrafficRollbackDispatch(repo, versionId, tag, workerName),
   ]);
   if (!(results.length > 0 && results[0]!.ok)) {
     const err = results.length > 0 && !results[0]!.ok ? results[0]!.error : "dispatch failed";
