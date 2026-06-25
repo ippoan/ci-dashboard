@@ -86,6 +86,16 @@ export interface RepoState {
    */
   previewed_version_id: string | null;
 
+  /**
+   * flip-report が報告した「100% traffic に flip した version」(CF Workers の
+   * version id 等)。flip 完了後にこの wave がその repo を **どの version へ**
+   * deploy したかを保持する (Refs ippoan/ci-dashboard#427 Phase 2)。flip-report
+   * 未対応 (旧 handler) / cloudrun path では null。monorepo の per-unit dispatch
+   * では unit ごとに flip-report が届くため最後に報告された unit の version を
+   * 保持する (authoritative な per-unit live は `traffic::<repo>::<worker>` 側)。
+   */
+  deployed_version?: string | null;
+
   /** rollback 実行時、戻した先 revision。 */
   rolled_back_to_revision: string | null;
 }
@@ -162,6 +172,10 @@ export type WaveEvent =
       repo: string;
       ok: boolean;
       error?: string | null;
+      /** 100% に flip した version id (CF Workers)。RepoState.deployed_version に保持。 */
+      version_id?: string | null;
+      /** monorepo unit の worker 名 (単一 worker は null)。audit 用に event detail に載せる。 */
+      worker_name?: string | null;
     }
   | { kind: "rollback"; now: string; rolled_back_by: string; force?: boolean }
   | { kind: "abort"; now: string; aborted_by: string; reason: string }

@@ -326,6 +326,35 @@ describe("handleFlipReportWebhook", () => {
       repo: "ippoan/a",
       ok: true,
       error: null,
+      version_id: null,
+      worker_name: null,
+    });
+  });
+
+  it("forwards version_id + worker_name when provided (Refs #427)", async () => {
+    const { env, spies } = fakeEnv();
+    const resp = await handleFlipReportWebhook(
+      jsonRequest({
+        url: FLIP_URL,
+        secret: "expected-secret",
+        body: {
+          wave_id: "w1",
+          repo: "ippoan/nuxt-notify",
+          ok: true,
+          version_id: "530b908c-5385-451c-b163-747caaedafd3",
+          worker_name: "notify-email-receiver",
+        },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(200);
+    expect(spies.flipReport).toHaveBeenCalledWith({
+      wave_id: "w1",
+      repo: "ippoan/nuxt-notify",
+      ok: true,
+      error: null,
+      version_id: "530b908c-5385-451c-b163-747caaedafd3",
+      worker_name: "notify-email-receiver",
     });
   });
 

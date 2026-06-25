@@ -178,14 +178,21 @@ export async function handleContractAppliedWebhook(
  *     "wave_id": "wave_...",
  *     "repo": "ippoan/rust-alc-api",
  *     "ok": true,
- *     "error": "patch denied"   // ok=false 時のみ
+ *     "error": "patch denied",       // ok=false 時のみ
+ *     "version_id": "530b908c-...",  // 100% に flip した version (CF Workers、任意)
+ *     "worker_name": "notify-email-receiver"  // monorepo unit (任意)
  *   }
+ *
+ * `version_id` / `worker_name` は Refs #427 Phase 2 で追加。RepoState.deployed_version
+ * を保持し、monorepo の per-unit flip を audit するため。旧 handler は送らない (= 任意)。
  */
 const flipReportSchema = z.object({
   wave_id: z.string().min(1),
   repo: z.string().min(1),
   ok: z.boolean(),
   error: z.string().optional(),
+  version_id: z.string().min(1).nullish(),
+  worker_name: z.string().min(1).nullish(),
 });
 
 export async function handleFlipReportWebhook(
@@ -199,6 +206,8 @@ export async function handleFlipReportWebhook(
     repo: v.data.repo,
     ok: v.data.ok,
     error: v.data.error ?? null,
+    version_id: v.data.version_id ?? null,
+    worker_name: v.data.worker_name ?? null,
   })) as RpcResult<WaveState>;
   return rpcResultToResponse(result);
 }

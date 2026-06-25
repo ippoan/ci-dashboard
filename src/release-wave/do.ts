@@ -70,6 +70,10 @@ export interface FlipReportInput {
   repo: string;
   ok: boolean;
   error?: string | null;
+  /** 100% に flip した version id (CF Workers)。RepoState.deployed_version に保持。 */
+  version_id?: string | null;
+  /** monorepo unit の worker 名 (単一 worker は null)。 */
+  worker_name?: string | null;
 }
 
 export interface RollbackInput {
@@ -303,6 +307,8 @@ export class ReleaseWaveHub extends DurableObject<Env> {
       repo: input.repo,
       ok: input.ok,
       error: input.error ?? null,
+      version_id: input.version_id ?? null,
+      worker_name: input.worker_name ?? null,
     });
   }
 
