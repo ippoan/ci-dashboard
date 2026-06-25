@@ -1,5 +1,5 @@
 /**
- * Release Wave 機構の MCP tools (9 個)。
+ * Release Wave 機構の MCP tools (10 個)。
  *
  * 設計の親 issue: ippoan/ci-dashboard#137
  *
@@ -23,7 +23,13 @@ import type { Env } from "../../index";
 import type { ReleaseWaveHub, RpcResult } from "../../release-wave/do";
 import type { WaveState } from "../../release-wave/types";
 import { computeWaveCompatibility } from "../../release-wave/compat";
-import { pendingFlipCore, pendingFlipAllCore } from "../../release-wave/api";
+import {
+  pendingFlipCore,
+  pendingFlipAllCore,
+  loadUnifiedPending,
+} from "../../release-wave/api";
+import { listPendingReleases } from "../../release-wave/pending-release";
+import { listTrafficForReposPerWorker } from "../../release-wave/traffic";
 
 // ----------------------------------------------------------------------------
 // Hub helper
@@ -285,6 +291,96 @@ export function registerReleaseWaveTools(server: McpServer, env: Env): void {
         migration_id,
       });
       return formatRpcResult(result);
+    },
+  );
+
+  // ============================================================
+  // release_wave_pending_state   (read-only 診断)
+  // ============================================================
+  // /release-wave の「Pending releases」が なぜ その状態かを CCoW から直接
+  // 確認するための read-only tool。CF Access 保護でページを直接見れない環境から
+  // 「どの version が active か / pending-release:: が残っているか / unified の
+  // source・tag・flippable」を JSON で引く。page.ts の computeUnifiedPending と
+  // 同一 source を使うので、画面表示と一致する (Refs #427)。
+  server.registerTool(
+    "release_wave_pending_state",
+    {
+      description:
+        "Read-only diagnostic for /release-wave 'Pending releases'. Returns the unified pending list (repo, worker_name, version_id, tag, source, flippable, rollback_to) exactly as the page derives it, plus the raw pending-release:: records and per-worker traffic:: records (active/zero versions, deploy_history) for the involved repos. Use to diagnose 'I flipped but the dashboard still shows it / shows 未tag'. Optional repo filter (substring match on owner/name).",
+      inputSchema: {
+        repo: z
+          .string()
+          .optional()
+          .describe(
+            "Optional owner/name substring filter (e.g. 'nuxt-notify'). Omit for all.",
+          ),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ repo }) => {
+      if (!env.COMPAT_KV) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(
+                { code: "KV_NOT_CONFIGURED", error: "COMPAT_KV is not bound" },
+                null,
+                2,
+              ),
+            },
+          ],
+          isError: true,
+        };
+      }
+      const match = (r: string): boolean => !repo || r.includes(repo);
+      const unifiedAll = await loadUnifiedPending(env);
+      const pendingAll = await listPendingReleases(env.COMPAT_KV);
+      // unified / pending に出る repo の生 traffic を per-worker で引く。
+      const repos = new Set<string>();
+      for (const u of unifiedAll) repos.add(u.repo);
+      for (const p of pendingAll) repos.add(p.repo);
+      let trafficAll: Awaited<
+        ReturnType<typeof listTrafficForReposPerWorker>
+      > = [];
+      try {
+        trafficAll = await listTrafficForReposPerWorker(env.COMPAT_KV, repos);
+      } catch {
+        trafficAll = [];
+      }
+      const payload = {
+        unified: unifiedAll.filter((u) => match(u.repo)),
+        pending: pendingAll.filter((p) => match(p.repo)),
+        traffic: trafficAll
+          .filter((t) => match(t.repo))
+          .map((t) => ({
+            repo: t.repo,
+            worker_name: t.worker_name ?? null,
+            reported_at: t.reported_at,
+            active: (t.versions ?? [])
+              .filter((v) => v.percentage > 0)
+              .map((v) => ({
+                version_id: v.version_id,
+                percentage: v.percentage,
+                created_on: v.created_on ?? null,
+                tag: v.tag ?? null,
+              })),
+            zero: (t.versions ?? [])
+              .filter((v) => v.percentage <= 0)
+              .slice(0, 8)
+              .map((v) => ({
+                version_id: v.version_id,
+                created_on: v.created_on ?? null,
+                tag: v.tag ?? null,
+              })),
+            deploy_history: (t.deploy_history ?? []).slice(0, 5),
+          })),
+      };
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(payload, null, 2) },
+        ],
+      };
     },
   );
 

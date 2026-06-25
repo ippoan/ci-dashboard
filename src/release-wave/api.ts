@@ -714,7 +714,7 @@ function unifiedToRecord(u: UnifiedPending): PendingReleaseRecord {
  * Pending releases の単一真実リストをサーバ側で導出する (Refs #237)。
  * page.ts の表示と同じ source: workers=traffic:: / cloudrun=pending-release::。
  */
-async function loadUnifiedPending(env: Env): Promise<UnifiedPending[]> {
+export async function loadUnifiedPending(env: Env): Promise<UnifiedPending[]> {
   if (!env.COMPAT_KV) return [];
   let pending: PendingReleaseRecord[] = [];
   try {
