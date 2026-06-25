@@ -156,6 +156,42 @@ describe("transition: flip_report", () => {
     expect(r.state.flipped_at).toBeNull();
   });
 
+  it("stores deployed_version + worker_name detail on ok flip_report (Refs #427)", () => {
+    const s = flippingWave();
+    const r = assertOk(
+      transition(s, {
+        kind: "flip_report",
+        now: T3,
+        repo: "ippoan/rust-alc-api",
+        ok: true,
+        version_id: "530b908c-5385-451c-b163-747caaedafd3",
+        worker_name: "notify-email-receiver",
+      }),
+    );
+    expect(r.state.repos[0]!.deployed_version).toBe(
+      "530b908c-5385-451c-b163-747caaedafd3",
+    );
+    const ev = r.state.events.at(-1)!;
+    expect(ev.kind).toBe("flip_report");
+    expect(ev.detail).toMatchObject({
+      worker_name: "notify-email-receiver",
+      version_id: "530b908c-5385-451c-b163-747caaedafd3",
+    });
+  });
+
+  it("leaves deployed_version unset when version_id omitted (legacy handler)", () => {
+    const s = flippingWave();
+    const r = assertOk(
+      transition(s, {
+        kind: "flip_report",
+        now: T3,
+        repo: "ippoan/rust-alc-api",
+        ok: true,
+      }),
+    );
+    expect(r.state.repos[0]!.deployed_version ?? null).toBeNull();
+  });
+
   it("transitions to flipped when all done", () => {
     let s = flippingWave();
     s = assertOk(

@@ -200,6 +200,11 @@ function applyFlipReport(
   if (event.ok) {
     repoNext.flip_status = "done";
     repoNext.flip_error = null;
+    // flip-report が報告した version をこの wave の deploy 先として保持する
+    // (Refs #427 Phase 2)。monorepo の per-unit dispatch では unit ごとに届く
+    // ため最後に報告された version が残る (authoritative な per-unit live は
+    // traffic:: 側)。未報告 (旧 handler / cloudrun) は既存値を据え置く。
+    if (event.version_id) repoNext.deployed_version = event.version_id;
   } else {
     repoNext.flip_status = "failed";
     repoNext.flip_error = event.error ?? "flip failed (no detail)";
@@ -224,7 +229,12 @@ function applyFlipReport(
     at: event.now,
     kind: "flip_report",
     summary,
-    detail: { repo: event.repo, ok: event.ok },
+    detail: {
+      repo: event.repo,
+      ok: event.ok,
+      ...(event.worker_name ? { worker_name: event.worker_name } : {}),
+      ...(event.version_id ? { version_id: event.version_id } : {}),
+    },
   });
   return { ok: true, state: next };
 }
