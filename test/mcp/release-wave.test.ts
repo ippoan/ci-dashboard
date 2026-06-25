@@ -122,7 +122,7 @@ const STUB_ERR = {
 // ----------------------------------------------------------------------------
 
 describe("registerReleaseWaveTools registration", () => {
-  it("registers exactly 9 tools with expected names", () => {
+  it("registers exactly 10 tools with expected names", () => {
     const { tools } = setup();
     expect(Array.from(tools.keys()).sort()).toEqual(
       [
@@ -133,10 +133,20 @@ describe("registerReleaseWaveTools registration", () => {
         "release_wave_flip",
         "release_wave_pending_flip",
         "release_wave_pending_flip_all",
+        "release_wave_pending_state",
         "release_wave_rollback",
         "release_wave_status",
       ].sort(),
     );
+  });
+
+  it("pending_state tool is marked readOnly", () => {
+    const { tools } = setup();
+    const t = tools.get("release_wave_pending_state")!;
+    expect(
+      (t.config as { annotations?: { readOnlyHint?: boolean } }).annotations
+        ?.readOnlyHint,
+    ).toBe(true);
   });
 
   it("status tool is marked readOnly", () => {
