@@ -46,6 +46,25 @@ describe("handlePwaServiceWorker", () => {
     expect(body).toContain("/webhook");
     expect(body).toContain("/api/");
   });
+
+  it("serves only static assets cache-first; dynamic data (/snapshot) is network-first (Refs #427)", async () => {
+    const body = await handlePwaServiceWorker().text();
+    // cache-first 分岐は明示的な static 判定 (STATIC_ASSETS / /icons/ / manifest)
+    // でガードされていること。`/snapshot` を cache-first に落とさない。
+    expect(body).toContain("isStatic");
+    expect(body).toContain('url.pathname.startsWith("/icons/")');
+    expect(body).toContain('url.pathname === "/manifest.webmanifest"');
+    // network-first の fetch().catch(cache) パターンが残っていること。
+    expect(body).toMatch(/fetch\(req\)\s*\.then/);
+    // 動的 JSON を cache に焼かない設計のマーカー (navigation だけ cache.put)。
+    expect(body).toContain('req.mode === "navigate" && res.ok');
+  });
+
+  it("bumps CACHE_VERSION past v1 so existing clients evict the poisoned cache (Refs #427)", async () => {
+    const body = await handlePwaServiceWorker().text();
+    expect(body).toContain("ci-dashboard-v2");
+    expect(body).not.toContain("ci-dashboard-v1");
+  });
 });
 
 describe("handlePwaIcon", () => {

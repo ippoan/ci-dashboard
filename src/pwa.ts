@@ -6,9 +6,12 @@
 // - handlePwaManifest / handlePwaServiceWorker / handlePwaIcon: route handlers
 //   served from src/index.ts.
 //
-// The service worker uses a network-first strategy for navigations (so live
-// CI status is always fresh when online) and falls back to a cached shell
-// when offline. Static assets (manifest, icons, SW itself) are cache-first.
+// The service worker uses a network-first strategy for navigations AND dynamic
+// data fetches (so live CI status is always fresh when online) and falls back
+// to a cached shell when offline. ONLY explicitly static assets (manifest,
+// icons) are cache-first. Dynamic JSON like `/snapshot` must never be served
+// from cache while online — otherwise the dashboard renders a stale snapshot
+// that survives reloads (Refs #427: 「reload しても古い CI 状態のまま」).
 
 const APP_NAME = "CI Dashboard";
 const APP_SHORT_NAME = "CI Dash";
@@ -16,7 +19,10 @@ const THEME_COLOR = "#0d1117";
 const BACKGROUND_COLOR = "#0d1117";
 
 // Bump CACHE_VERSION whenever PWA assets change so old SWs evict caches.
-const CACHE_VERSION = "v1";
+// v2: 旧 SW が `/snapshot` 等の動的データを cache-first で焼き込んでいたのを
+// evict する (activate handler が CACHE_NAME 以外を delete するため、version を
+// 上げるだけで既存クライアントの汚染キャッシュが次回 activate で消える)。Refs #427。
+const CACHE_VERSION = "v2";
 
 export const PWA_HEAD_TAGS = `
   <link rel="manifest" href="/manifest.webmanifest">
@@ -134,34 +140,48 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // Navigations: network-first, fall back to cached shell.
-  if (req.mode === "navigate") {
+  // Static assets (manifest / icons) only: cache-first. これ以外を cache-first に
+  // すると /snapshot 等の動的データが焼き込まれて reload でも更新されなくなる。
+  const isStatic =
+    STATIC_ASSETS.includes(url.pathname) ||
+    url.pathname.startsWith("/icons/") ||
+    url.pathname === "/manifest.webmanifest";
+
+  if (isStatic) {
     event.respondWith(
-      fetch(req)
-        .then((res) => {
-          const copy = res.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(req, copy));
+      caches.match(req).then((cached) => {
+        if (cached) return cached;
+        return fetch(req).then((res) => {
+          if (res.ok && res.type === "basic") {
+            const copy = res.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(req, copy));
+          }
           return res;
-        })
-        .catch(() =>
-          caches.match(req).then((cached) => cached || caches.match("/")),
-        ),
+        });
+      }),
     );
     return;
   }
 
-  // Static assets: cache-first.
+  // Navigations + 動的データ (/snapshot 等): network-first。online では常に最新を
+  // 返し、offline 時のみ cache (navigation は shell に fallback) を使う。
+  // navigation だけ cache に保存する (動的 JSON は焼かない = stale を残さない)。
   event.respondWith(
-    caches.match(req).then((cached) => {
-      if (cached) return cached;
-      return fetch(req).then((res) => {
-        if (res.ok && res.type === "basic") {
+    fetch(req)
+      .then((res) => {
+        if (req.mode === "navigate" && res.ok) {
           const copy = res.clone();
           caches.open(CACHE_NAME).then((cache) => cache.put(req, copy));
         }
         return res;
-      });
-    }),
+      })
+      .catch(() =>
+        caches
+          .match(req)
+          .then((cached) =>
+            cached || (req.mode === "navigate" ? caches.match("/") : undefined),
+          ),
+      ),
   );
 });
 `;
