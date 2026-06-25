@@ -33,6 +33,14 @@ export interface PendingReleaseRecord {
   tag: string;
   /** version preview URL (workers.dev)。無ければ null。 */
   preview_url: string | null;
+  /**
+   * flip 前 (no-traffic 0% で上がった) production image の識別子 (= deploy した
+   * git SHA / image tag)。consumer が **flip 前に** この image を retest して
+   * 互換性を検証するための anchor (Refs ippoan/ci-dashboard#427)。cloudrun backend
+   * の release で報告される。frontend (CF Workers) の単独 release では使わないので
+   * null。`computeCompatibility(kv, repo, staged_image)` の target に使う。
+   */
+  staged_image?: string | null;
   /** upload 報告を受けた UTC ISO。 */
   uploaded_at: string;
 }
@@ -56,6 +64,8 @@ export async function recordPendingRelease(
     now: string;
     /** monorepo unit worker 名 (省略時は単一 worker / legacy = repo-key)。 */
     worker_name?: string | null;
+    /** flip 前 production image (cloudrun release の retest anchor、Refs #427)。 */
+    staged_image?: string | null;
   },
 ): Promise<PendingReleaseRecord> {
   const workerName = input.worker_name ?? null;
@@ -66,6 +76,7 @@ export async function recordPendingRelease(
     version_id: input.version_id,
     tag: input.tag,
     preview_url: input.preview_url ?? null,
+    ...(input.staged_image ? { staged_image: input.staged_image } : {}),
     uploaded_at: input.now,
   };
   await kv.put(pendingReleaseKey(input.repo, workerName), JSON.stringify(record));
