@@ -547,6 +547,84 @@ describe("renderTrafficVersionsBlock", () => {
     // 過去 active への rollback 候補が無いので rollback 行自体も出ない。
     expect(html).not.toContain("Rollback to (過去の deployed version):");
   });
+
+  it("renders per-unit rows for a monorepo, ignoring the stale legacy repo-key record (Refs #427)", () => {
+    // per-worker 移行後の monorepo: legacy `traffic::<repo>` に stale な v0.0.21
+    // (100%) が残っていても、Traffic (version split) 表は authoritative な
+    // per-worker record (`traffic::<repo>::<worker>` = v0.0.25) を unit ごとに
+    // 行で出す。legacy の stale 値が「100%」として誤表示されない
+    // (= 根本原因対処、legacy は削除しない)。Frontends 列 (#434) と同じ性質の
+    // 別セクション残骸を根治。
+    const repo = "ippoan/nuxt-notify";
+    const legacy = rec(repo, [
+      { version_id: "stale-vid-21", percentage: 100, created_on: "2026-06-03T16:00:00Z", tag: "v0.0.21" },
+    ]);
+    const unitA: TrafficRecord = {
+      ...rec(repo, [
+        { version_id: "live-a", percentage: 100, created_on: "2026-06-24T19:54:00Z", tag: "v0.0.25" },
+      ]),
+      worker_name: "nuxt-notify",
+    };
+    const unitB: TrafficRecord = {
+      ...rec(repo, [
+        { version_id: "live-b", percentage: 100, created_on: "2026-06-24T19:54:00Z", tag: "v0.0.25" },
+      ]),
+      worker_name: "notify-email-receiver",
+    };
+    const legacyMap = new Map([[repo, legacy]]);
+    const perWorkerMap = new Map([[repo, [unitA, unitB]]]);
+    const html = renderTrafficVersionsBlock([repo], legacyMap, perWorkerMap);
+
+    // monorepo は unit ごとに行 = worker 名を併記する。
+    expect(html).toContain("/ nuxt-notify</span>");
+    expect(html).toContain("/ notify-email-receiver</span>");
+    // authoritative な per-worker version (v0.0.25 / live-a / live-b) が出る。
+    expect(html).toContain("v0.0.25");
+    expect(html).toContain("live-a");
+    expect(html).toContain("live-b");
+    // stale な legacy repo-key の version (v0.0.21 / stale-vid-21) は出さない。
+    expect(html).not.toContain("v0.0.21");
+    expect(html).not.toContain("stale-vid-21");
+  });
+
+  it("emits worker_name hidden input + per-unit getTraffic key for monorepo rollback form (Refs #427)", () => {
+    const repo = "ippoan/nuxt-notify";
+    const unit: TrafficRecord = {
+      ...rec(repo, [
+        { version_id: "active-id", percentage: 100, created_on: "2026-06-24T19:54:00Z", tag: "v0.0.25" },
+      ]),
+      worker_name: "nuxt-notify",
+      deploy_history: [
+        // 現 active と直前の active (= rollback 候補)。
+        { version_id: "active-id", tag: "v0.0.25", became_active_at: "2026-06-24T19:54:00Z" },
+        { version_id: "prev-id", tag: "v0.0.23", became_active_at: "2026-06-20T00:00:00Z" },
+      ],
+    };
+    const perWorkerMap = new Map([[repo, [unit]]]);
+    const html = renderTrafficVersionsBlock([repo], new Map(), perWorkerMap);
+    // form は per-unit endpoint を狙うので worker_name hidden input が必須。
+    expect(html).toContain('name="worker_name" value="nuxt-notify"');
+    expect(html).toContain('action="/api/release-wave/traffic-rollback"');
+    // rollback 候補 (deploy_history の 2 件目以降) が表示される。
+    expect(html).toContain("prev-id");
+  });
+
+  it("falls back to legacy repo-key for single-worker / unmigrated repo (backward-compat)", () => {
+    // perWorkerByRepo に entry が無い repo は従来どおり legacy traffic::<repo> で
+    // 1 行 (= 削除せず参照されなくする方針なので、未移行 repo はそのまま使う)。
+    const map = new Map([
+      ["ippoan/auth-worker", rec("ippoan/auth-worker", [
+        { version_id: "vid", percentage: 100, created_on: "2026-05-28T11:00:00Z", tag: "v0.5.0" },
+      ])],
+    ]);
+    const html = renderTrafficVersionsBlock(["ippoan/auth-worker"], map, new Map());
+    expect(html).toContain("ippoan/auth-worker");
+    // worker 併記 (Repo セルの `/ <name></span>` パターン) は付かない (単一 worker repo)。
+    expect(html).not.toMatch(/\/ [a-z][a-z0-9-]*<\/span>/);
+    expect(html).toContain("v0.5.0");
+    // rollback form の worker_name hidden input は付かない (単一 worker)。
+    expect(html).not.toContain('name="worker_name"');
+  });
 });
 
 describe("renderBackendRollbackBlock", () => {

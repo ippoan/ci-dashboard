@@ -34,6 +34,7 @@ import {
 import { parseTaglessRepos } from "../tagless-repos";
 import {
   getTrafficForRepos,
+  listTrafficForReposPerWorker,
   type TrafficRecord,
   type TrafficVersion,
 } from "./traffic";
@@ -365,26 +366,54 @@ export function promotableZeroVersions(rec: TrafficRecord): TrafficVersion[] {
 
 /**
  * Compatibility グラフに出ている repo の version traffic split を HTML で返す。
- * frontend CI が報告した `traffic::<repo>` を読み、repo ごとに:
+ * frontend CI が報告した `traffic::<repo>` (legacy 単一 worker / 未移行) と
+ * `traffic::<repo>::<worker>` (monorepo per-worker) を読み、repo / unit ごとに:
  *   - traffic を受けている version (100% / canary 等、percentage > 0) は全行表示
  *   - 0% (no-traffic) は active より新しいものだけ対象にし、**最新 1 件だけ**行表示
  *     (= 次に flip する候補)。残り件数は最新 0% 行の % セルに「(他N件)」併記
  *   - active より古い 0% は非表示 (= 用済みの過去履歴)
  * 行は created_on 降順 (新しい順) で並べる → 最新 0% が active(100%) より上に出る。
- * traffic 報告のある repo が 1 つも無ければ ""。
+ *
+ * **monorepo (per-worker record を持つ repo) は unit ごとに 1 ブロック**を出す
+ * (Refs #427)。Repo セルには `<repo> / <worker>` を併記、rollback form には
+ * `worker_name` hidden input を載せ、api 側 (per-unit `getTraffic` /
+ * `traffic-rollback`) と整合させる。これにより per-worker 移行後に残った legacy
+ * repo-key record (`traffic::<repo>`) の stale な値が「100% live」として誤表示
+ * される問題 (#434 の Frontends 列と同じ性質、別セクション残骸) を根治する。
+ * 単一 worker / 未移行 repo は従来どおり repo-key record で 1 ブロック (= fallback)。
+ *
+ * traffic 報告のある (repo, worker) が 1 つも無ければ ""。
  */
 export function renderTrafficVersionsBlock(
   repos: Iterable<string>,
   trafficByRepo: Map<string, TrafficRecord>,
+  perWorkerByRepo?: Map<string, TrafficRecord[]>,
 ): string {
-  const list = [...new Set(repos)]
-    .filter((r) => trafficByRepo.has(r))
-    .sort();
-  if (list.length === 0) return "";
+  // 表示単位 = (repo, worker, record) の tuple。monorepo は per-worker record を
+  // unit ごとに出す。単一 worker / 未移行は legacy repo-key の record を 1 行で出す。
+  type Unit = { repo: string; worker: string | null; rec: TrafficRecord };
+  const units: Unit[] = [];
+  for (const repo of new Set(repos)) {
+    const perWorker = (perWorkerByRepo?.get(repo) ?? []).filter(
+      (r) => r.worker_name,
+    );
+    if (perWorker.length > 0) {
+      perWorker
+        .slice()
+        .sort((a, b) => ((a.worker_name ?? "") < (b.worker_name ?? "") ? -1 : 1))
+        .forEach((rec) =>
+          units.push({ repo, worker: rec.worker_name ?? null, rec }),
+        );
+      continue;
+    }
+    const legacy = trafficByRepo.get(repo);
+    if (legacy) units.push({ repo, worker: null, rec: legacy });
+  }
+  if (units.length === 0) return "";
 
   // 1 行 = 1 version。% セルに余剰件数 (extra) を「(他N件)」で併記する。
   const versionRow = (
-    repo: string,
+    repoLabel: string,
     v: TrafficVersion,
     first: boolean,
     extra: number,
@@ -401,14 +430,14 @@ export function renderTrafficVersionsBlock(
       : "";
     const vid = `${tagPart}<code title="${escapeHtml(v.version_id)}">${escapeHtml(shortId(v.version_id))}</code>`;
     const when = `<span class="meta" title="${escapeHtml(v.created_on ?? "")}">${escapeHtml(shortWhen(v.created_on))}</span>`;
-    // rollback は repo 単位なので、先頭 version 行にだけ rowspan セルを置き、
-    // version 行と同じ行に並べる (別 colspan 行にはしない)。残り行には td 無し。
+    // rollback は (repo, worker) 単位なので、先頭 version 行にだけ rowspan セルを
+    // 置き、version 行と同じ行に並べる (別 colspan 行にはしない)。残り行には td 無し。
     const rollbackTd = rollback
       ? `<td rowspan="${rollback.rowspan}">${rollback.cell}</td>`
       : "";
     return `
             <tr>
-              <td>${first ? escapeHtml(repo) : ""}</td>
+              <td>${first ? repoLabel : ""}</td>
               <td>${pctBadge}</td>
               <td>${vid}</td>
               <td>${when}</td>
@@ -416,9 +445,8 @@ export function renderTrafficVersionsBlock(
             </tr>`;
   };
 
-  const rows = list
-    .map((repo) => {
-      const rec = trafficByRepo.get(repo)!;
+  const rows = units
+    .map(({ repo, worker, rec }) => {
       const active = rec.versions.filter((v) => v.percentage > 0);
       // promote 候補の 0% (= active より新しい no-traffic)。表と self-test で
       // 共有する promotableZeroVersions に集約 (active より古い 0% は除外)。
@@ -443,12 +471,16 @@ export function renderTrafficVersionsBlock(
       // 直前以前の active version への rollback UI を先頭 version 行と同じ行に置く
       // (no-traffic version の flip は Pending releases に一本化、Refs #237)。
       // 候補が無ければ "—" を出して列を揃える。
-      const rollbackInner = renderTrafficRollbackCell(repo, rec);
+      const rollbackInner = renderTrafficRollbackCell(repo, rec, worker);
       const rollbackCell = rollbackInner || `<span class="meta">—</span>`;
+      // Repo セル: monorepo unit は `<repo> / <worker>` を併記。
+      const repoLabel = worker
+        ? `${escapeHtml(repo)} <span class="meta">/ ${escapeHtml(worker)}</span>`
+        : escapeHtml(repo);
       const versionRows = shown
         .map((v, i) =>
           versionRow(
-            repo,
+            repoLabel,
             v,
             i === 0,
             // 余剰件数は最新 0% (= zeroShown) の行にだけ付ける。
@@ -486,7 +518,11 @@ export function renderTrafficVersionsBlock(
  * 現 active は traffic の最大 percentage version。deploy_history[0] が現 active と
  * 一致する想定だが、念のため active version_id を除いて候補を作る。
  */
-function renderTrafficRollbackCell(repo: string, rec: TrafficRecord): string {
+function renderTrafficRollbackCell(
+  repo: string,
+  rec: TrafficRecord,
+  workerName: string | null = null,
+): string {
   const versions = rec.versions ?? [];
   const history = rec.deploy_history ?? [];
   const activeId = versions.find((v) => v.percentage > 0)?.version_id ?? null;
@@ -509,13 +545,22 @@ function renderTrafficRollbackCell(repo: string, rec: TrafficRecord): string {
     })
     .join("");
 
+  // monorepo unit は worker_name hidden input を載せ、API 側 (per-unit getTraffic
+  // / traffic-rollback) が `traffic::<repo>::<worker>` を引けるようにする (Refs #427)。
+  // 単一 worker repo は空文字 → handleReleaseWaveTrafficRollback で null に正規化される。
+  const workerInput = workerName
+    ? `<input type="hidden" name="worker_name" value="${escapeHtml(workerName)}">`
+    : "";
+  const buttonLabel = workerName ? `${repo} / ${workerName}` : repo;
+
   return `<form method="post" action="/api/release-wave/traffic-rollback"
                   style="margin:0;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
                   <input type="hidden" name="repo" value="${escapeHtml(repo)}">
+                  ${workerInput}
                   <span class="meta">Rollback to:</span>
                   <select name="version_id" style="max-width:280px">${options}</select>
                   <button type="submit" class="danger"
-                    title="${escapeHtml(repo)} を選択した version に即 100% で戻す (wrangler versions deploy <id>@100%)">
+                    title="${escapeHtml(buttonLabel)} を選択した version に即 100% で戻す (wrangler versions deploy <id>@100%)">
                     Rollback
                   </button>
                 </form>`;
@@ -755,6 +800,10 @@ export async function handleReleaseWaveListPageWithRepoStatus(
   let compat: WaveCompatibility | null = null;
   const compatRepos = new Set<string>();
   let trafficByRepo = new Map<string, TrafficRecord>();
+  // monorepo (per-worker record を持つ repo) の `traffic::<repo>::<worker>` を
+  // unit ごとにまとめる。renderTrafficVersionsBlock が unit ごとに行を出すための
+  // 入力 (Refs #427)。
+  const perWorkerByRepo = new Map<string, TrafficRecord[]>();
   let sampleUntagged: { repo: string; versionId: string } | undefined;
   if (env.COMPAT_KV) {
     try {
@@ -764,11 +813,30 @@ export async function handleReleaseWaveListPageWithRepoStatus(
         for (const m of b.matrix) compatRepos.add(m.frontend);
       }
       trafficByRepo = await getTrafficForRepos(env.COMPAT_KV, compatRepos);
-      for (const [repo, rec] of trafficByRepo) {
-        // 表に出る promote 候補 (active より新しい 0%) の中の未 tag のみ対象。
+      try {
+        const perWorker = await listTrafficForReposPerWorker(
+          env.COMPAT_KV,
+          compatRepos,
+        );
+        for (const rec of perWorker) {
+          if (!rec.worker_name) continue;
+          const arr = perWorkerByRepo.get(rec.repo);
+          if (arr) arr.push(rec);
+          else perWorkerByRepo.set(rec.repo, [rec]);
+        }
+      } catch {
+        // per-worker 取得失敗時は legacy のみで degrade
+      }
+      // sampleUntagged の探索は per-worker record も対象に入れる (monorepo unit の
+      // 未 tag promotable がここでだけ残るケースに備える)。
+      const trafficForSample: TrafficRecord[] = [
+        ...trafficByRepo.values(),
+        ...Array.from(perWorkerByRepo.values()).flat(),
+      ];
+      for (const rec of trafficForSample) {
         const v = promotableZeroVersions(rec).find((x) => !x.tag);
         if (v) {
-          sampleUntagged = { repo, versionId: v.version_id };
+          sampleUntagged = { repo: rec.repo, versionId: v.version_id };
           break;
         }
       }
@@ -808,7 +876,7 @@ export async function handleReleaseWaveListPageWithRepoStatus(
       // 紛らわしくならないよう、敢えてこのブロックに同居させる。
       // sampleUntagged が無くても self-test UI 自体は常に出す (ボタンは disabled)。
       const trafficBlock =
-        renderTrafficVersionsBlock(repos, trafficByRepo) +
+        renderTrafficVersionsBlock(repos, trafficByRepo, perWorkerByRepo) +
         renderFlipGuardSelfTest(sampleUntagged);
 
       // backend (Cloud Run) の実 traffic split + rollback ボタンをグラフ下に出す。
