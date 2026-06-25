@@ -91,6 +91,25 @@ watched = hub(CI run) + direct-push allowlist + **`TAGLESS_REPOS`** の和で、
 tag-less な repo はここに追加する (#217: claude-skills/ci-workflows/ref-files-worker
 /claude-hooks を追加)。
 
+**Q: `TAGLESS_REPOS` に repo を追加 + deploy したのに `/releases` に card が出ない**
+`/releases` は **事前計算した index blob** (`CIDashboardHub` DO storage、KV v4 backup)
+を SWR 配信する。watched set / pr-map は live でも、blob を**再計算するまで新 repo は
+出ない**。罠は **full refresh が 1 時間の fresh-window で bail** すること
+(`refreshReleasesIndexInner`: `now - storedAt < RELEASES_INDEX_FRESH_SECONDS(3600)`
+なら `"fresh"` で即 return)。30+ repo の CI webhook で blob は頻繁に更新され
+storedAt がほぼ常に 1h 以内 → **footer の「🔄 force refresh」(parameter 無し =
+`/admin/force-refresh-releases`、queue に full refresh を enqueue) を押しても
+fresh で no-op**。
+**回避**: `/admin/force-refresh-releases?repo=owner/name` (= `recomputeRepoView`)。
+**単一 repo だけを同期再計算して blob に patch** し (`releases-page.ts` 290 行:
+blob に無ければ末尾 append)、`storedAt` を触らないので fresh-window を貫通する。
+返り JSON で切り分け: `outcome:"patched"` → reload で card 出る /
+`"view-null"` → synthetic block が空 (`Refs #N` を持つ merged PR が無い/拾えない)。
+> これは webhook 取りこぼしでも pr-map gate (#400) でもない。pr-map は org 全体の
+> open+merged PR search で、`/issues` の PR chip と `/releases` gate が同じものを
+> 共有する (= `/issues` に merged chip が出るなら pr-map は当該 PR を持つ)。
+> 事例: ohishi-exp/nuxt-ichibanboshi-seikyu の追加で踏んだ (#438/#439)。
+
 **Q: ci-dashboard の runtime log を MCP で見たい**
 Cloudflare observability MCP `query_worker_observability` (`service=ci-dashboard-staging`)。
 events view は `$metadata.message` までで、`console.log(JSON.stringify({msg,...}))` の

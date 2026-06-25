@@ -322,6 +322,12 @@ async function refreshReleasesIndexInner(
   try {
     const recheck = await readReleasesIndexBlob<RepoView[]>(env);
     if (recheck && Date.now() - recheck.storedAt < RELEASES_INDEX_FRESH_SECONDS * 1000) {
+      // fresh-window 内は full refresh を no-op にする (= refresh の最短間隔)。
+      // この bail のせいで「TAGLESS_REPOS に追加 → parameter 無し force-refresh」
+      // が反映されない罠がある (busy org は blob がほぼ常に <1h fresh)。新 repo を
+      // 即時 index へ入れたい時は storedAt を触らない recomputeRepoView
+      // (`/admin/force-refresh-releases?repo=owner/name`) で貫通する。
+      // 詳細: ci-dashboard-map skill の Q&A (#438/#439)。
       return "fresh";
     }
     const views = await computeIndexViews(env);
