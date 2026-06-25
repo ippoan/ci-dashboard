@@ -345,6 +345,90 @@ describe("handleReleaseWaveListPage", () => {
     expect(html).toContain("100%");
   });
 
+  it("renders per-unit live rows for a monorepo, ignoring the stale legacy repo-key record (Refs #427)", async () => {
+    // per-worker 移行後の monorepo: legacy `traffic::<repo>` に stale な v0.0.21 が
+    // 残っていても、Frontends セクションは authoritative な per-worker record
+    // (`traffic::<repo>::<worker>` = v0.0.25) を unit ごとに行で出す。legacy の
+    // stale 値が「live」として誤表示されない (= 根本原因対処、legacy は削除しない)。
+    const env = fakeEnv({
+      listReturn: [
+        makeWave({
+          wave_id: "w-notify",
+          state: "flipped",
+          repos: [
+            {
+              repo: "ippoan/nuxt-notify",
+              target_tag: "v0.0.25",
+              head_sha: "deadbeef",
+              require_compatibility: false,
+              stage_status: "done",
+              preview_url: null,
+              stage_error: null,
+              flip_status: "done",
+              flip_error: null,
+              flip_from_revision: null,
+              rolled_back_to_revision: null,
+            },
+          ],
+        }),
+      ],
+      compatKv: memKv({
+        // 移行前に残った legacy repo-key (stale v0.0.21、削除されず残存)。
+        "traffic::ippoan/nuxt-notify": {
+          schema_version: 4,
+          repo: "ippoan/nuxt-notify",
+          versions: [
+            {
+              version_id: "stale-vid",
+              percentage: 100,
+              created_on: "2026-06-20T00:00:00Z",
+              tag: "v0.0.21",
+            },
+          ],
+          reported_at: "2026-06-20T00:01:00Z",
+        },
+        // authoritative な per-worker record (v0.0.25、各 unit が live)。
+        "traffic::ippoan/nuxt-notify::nuxt-notify": {
+          schema_version: 4,
+          repo: "ippoan/nuxt-notify",
+          worker_name: "nuxt-notify",
+          versions: [
+            {
+              version_id: "live-a",
+              percentage: 100,
+              created_on: "2026-06-24T19:54:00Z",
+              tag: "v0.0.25",
+            },
+          ],
+          reported_at: "2026-06-24T19:55:00Z",
+        },
+        "traffic::ippoan/nuxt-notify::notify-email-receiver": {
+          schema_version: 4,
+          repo: "ippoan/nuxt-notify",
+          worker_name: "notify-email-receiver",
+          versions: [
+            {
+              version_id: "live-b",
+              percentage: 100,
+              created_on: "2026-06-24T19:54:00Z",
+              tag: "v0.0.25",
+            },
+          ],
+          reported_at: "2026-06-24T19:55:00Z",
+        },
+      }),
+    });
+    const html = await (await handleReleaseWaveListPage(env)).text();
+    expect(html).toContain("Frontends (per-repo tracking)");
+    // monorepo は unit ごとに行 = worker 名を併記する。
+    expect(html).toContain("/ nuxt-notify</span>");
+    expect(html).toContain("/ notify-email-receiver</span>");
+    // Current (live) は authoritative な per-worker version (v0.0.25)。
+    expect(html).toContain('<span class="ok">v0.0.25</span>');
+    // stale な legacy repo-key の値 (v0.0.21) は live セルに出さない (誤表示の根治)。
+    expect(html).not.toContain('<span class="ok">v0.0.21</span>');
+  });
+
   it("shows the wave state badge (failed) when there is no live deploy", async () => {
     const env = fakeEnv({
       listReturn: [

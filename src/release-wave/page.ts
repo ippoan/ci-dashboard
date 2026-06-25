@@ -328,10 +328,58 @@ function liveDeployCell(live: TrafficRecord["versions"][number] | null): string 
 }
 
 /**
+ * Frontends セクションの 1 行 (`<tr>`) を組む。`repoSuffix` は monorepo unit の
+ * `/ <worker>` 併記用 (単一 worker repo は空)。`live` はその行が示す live deploy
+ * (monorepo は unit の per-worker record 由来、単一 worker は repo-key record 由来)。
+ * preview / last deploy / latest wave 列は **wave 由来 = repo 単位**なので、
+ * monorepo では全 unit 行に同じ値が出る (per-unit の wave 追跡は #427 Phase 2 の
+ * flip-report callback / matrix 化で追って分離する)。
+ */
+function renderFrontendRow(
+  t: FrontendTrack,
+  repoSuffix: string,
+  live: TrafficRecord["versions"][number] | null,
+): string {
+  const previewCell = t.previewUrl
+    ? `<a href="${escapeHtml(t.previewUrl)}" target="_blank" rel="noopener noreferrer">preview</a>
+       ${t.previewSha ? `<span class="meta">${escapeHtml(t.previewSha)}</span>` : ""}
+       <span class="meta">(${escapeHtml(t.previewWaveId ?? "")})</span>`
+    : `<span class="meta">—</span>`;
+  const liveCell = liveDeployCell(live);
+  const deployCell = t.lastFlipWaveId
+    ? `<a href="/release-wave/${encodeURIComponent(t.lastFlipWaveId)}">${escapeHtml(t.lastFlipTag ?? t.lastFlipWaveId)}</a>
+       <span class="meta">${escapeHtml(t.lastFlipAt ?? "")}</span>`
+    : `<span class="meta">not deployed</span>`;
+  // live なら緑 "live" (failed wave でも現状 OK)。live でなければ
+  // 直近 wave の実 state を出す。
+  const waveBadge = live
+    ? `<span class="badge" style="background:#188038" title="traffic 100% で live。直近 wave が failed でも現状は OK">live</span>`
+    : `<span class="badge" style="background:${stateColor(t.latestWaveState)}">${escapeHtml(t.latestWaveState)}</span>`;
+  const latestCell = `<a href="/release-wave/${encodeURIComponent(t.latestWaveId)}">${escapeHtml(t.latestWaveId)}</a>
+      ${waveBadge}`;
+  return `
+    <tr>
+      <td>${escapeHtml(t.repo)}${repoSuffix}</td>
+      <td>${previewCell}</td>
+      <td>${liveCell}</td>
+      <td class="meta">${deployCell}</td>
+      <td>${latestCell}</td>
+    </tr>`;
+}
+
+/**
  * frontend (repo) 単位の追跡セクション。各 frontend の最新 preview URL、現 live
  * deploy (traffic 100%)、最後に flip された wave、最新 wave を 1 行ずつ出す。
  * preview を wave 行ではなく frontend 行に分けて持つことで「どの front の
  * preview がどれか」を分離する。
+ *
+ * **monorepo (per-worker traffic record を持つ repo) は unit ごとに 1 行**出す
+ * (Refs #427)。Current (live) はその unit の per-worker record (`traffic::<repo>::
+ * <worker>`) 由来の live version を出す。これにより per-worker 移行後に残った
+ * legacy repo-key record (`traffic::<repo>`) の stale な値が「live」として誤表示
+ * される問題を根治する (= legacy record は削除せず、authoritative な per-worker
+ * record を読むことで参照されなくする)。単一 worker / 未移行 repo は従来どおり
+ * repo-key record を fallback として 1 行出す。
  *
  * 「Latest wave」のバッジは frontend の**現在の健全性**を表す:
  * - live deploy (traffic 100%) が出ていれば緑 **live** (= 今は OK)。直近 wave が
@@ -342,38 +390,37 @@ function liveDeployCell(live: TrafficRecord["versions"][number] | null): string 
 function renderFrontendSection(
   tracks: FrontendTrack[],
   trafficByRepo?: Map<string, TrafficRecord>,
+  perWorkerByRepo?: Map<string, TrafficRecord[]>,
 ): string {
   const rows =
     tracks.length === 0
       ? `<tr><td colspan="5" class="empty">No frontends tracked yet.</td></tr>`
       : tracks
           .map((t) => {
-            const previewCell = t.previewUrl
-              ? `<a href="${escapeHtml(t.previewUrl)}" target="_blank" rel="noopener noreferrer">preview</a>
-                 ${t.previewSha ? `<span class="meta">${escapeHtml(t.previewSha)}</span>` : ""}
-                 <span class="meta">(${escapeHtml(t.previewWaveId ?? "")})</span>`
-              : `<span class="meta">—</span>`;
-            const { live } = resolveLiveDeploy(trafficByRepo?.get(t.repo));
-            const liveCell = liveDeployCell(live);
-            const deployCell = t.lastFlipWaveId
-              ? `<a href="/release-wave/${encodeURIComponent(t.lastFlipWaveId)}">${escapeHtml(t.lastFlipTag ?? t.lastFlipWaveId)}</a>
-                 <span class="meta">${escapeHtml(t.lastFlipAt ?? "")}</span>`
-              : `<span class="meta">not deployed</span>`;
-            // live なら緑 "live" (failed wave でも現状 OK)。live でなければ
-            // 直近 wave の実 state を出す。
-            const waveBadge = live
-              ? `<span class="badge" style="background:#188038" title="traffic 100% で live。直近 wave が failed でも現状は OK">live</span>`
-              : `<span class="badge" style="background:${stateColor(t.latestWaveState)}">${escapeHtml(t.latestWaveState)}</span>`;
-            const latestCell = `<a href="/release-wave/${encodeURIComponent(t.latestWaveId)}">${escapeHtml(t.latestWaveId)}</a>
-                ${waveBadge}`;
-            return `
-              <tr>
-                <td>${escapeHtml(t.repo)}</td>
-                <td>${previewCell}</td>
-                <td>${liveCell}</td>
-                <td class="meta">${deployCell}</td>
-                <td>${latestCell}</td>
-              </tr>`;
+            // monorepo unit (worker_name != null の per-worker record)。あれば
+            // unit ごとに行を出す (= authoritative な per-worker live を表示)。
+            const units = (perWorkerByRepo?.get(t.repo) ?? [])
+              .filter((r) => r.worker_name)
+              .sort((a, b) =>
+                (a.worker_name ?? "") < (b.worker_name ?? "") ? -1 : 1,
+              );
+            if (units.length > 0) {
+              return units
+                .map((u) =>
+                  renderFrontendRow(
+                    t,
+                    ` <span class="meta">/ ${escapeHtml(u.worker_name ?? "")}</span>`,
+                    resolveLiveDeploy(u).live,
+                  ),
+                )
+                .join("");
+            }
+            // 単一 worker / 未移行: repo-key record を fallback で 1 行。
+            return renderFrontendRow(
+              t,
+              "",
+              resolveLiveDeploy(trafficByRepo?.get(t.repo)).live,
+            );
           })
           .join("");
 
@@ -479,18 +526,34 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
     }
   }
 
+  // monorepo unit (worker_name != null) の per-worker record を repo ごとにまとめる。
+  // Frontends セクションが unit ごとに行を出す (= authoritative な per-worker live を
+  // 表示し、legacy repo-key の stale 値を参照しない) ための入力 (Refs #427)。
+  const perWorkerByRepo = new Map<string, TrafficRecord[]>();
+  for (const rec of trafficRecordsPerWorker) {
+    if (!rec.worker_name) continue;
+    const arr = perWorkerByRepo.get(rec.repo);
+    if (arr) arr.push(rec);
+    else perWorkerByRepo.set(rec.repo, [rec]);
+  }
+  // CF Worker (= version traffic を持つ) 判定。legacy repo-key (trafficByRepo) か
+  // per-worker record (monorepo unit) のどちらかを持てば traffic ありとみなす。
+  // per-worker 移行後に legacy key が無い monorepo を Cloud Run と誤判定しないため。
+  const hasTraffic = (repo: string): boolean =>
+    trafficByRepo.has(repo) || perWorkerByRepo.has(repo);
+
   // Frontends セクションは frontend (= CF Worker) repo だけを出す。wave には
   // backend も混ざるが、**Cloud Run backend (例: rust-alc-api) は除外**する。
   // ただし CF Worker は compat 上 `backend::` を持っていても (auth-worker 等)
   // frontend として残す。判定軸は #268 と同じ: CF Worker は version traffic
-  // (`traffic::` = trafficByRepo) を持ち、Cloud Run backend は持たない。
+  // (`traffic::` = trafficByRepo / per-worker) を持ち、Cloud Run backend は持たない。
   // => 除外条件 = 「`backend::` を持ち、かつ traffic:: が無い (= Cloud Run)」。
   // globalCompat 未取得 (COMPAT_KV 未 bind) 時は判別不能なので全件出す (degrade)。
   const backendRepos = new Set(
     (globalCompat?.backends ?? []).map((b) => b.backend_repo),
   );
   const frontendTracks = allTracks.filter(
-    (t) => !backendRepos.has(t.repo) || trafficByRepo.has(t.repo),
+    (t) => !backendRepos.has(t.repo) || hasTraffic(t.repo),
   );
   // Pending releases は単一真実 (Refs #237): workers=traffic:: の no-traffic
   // version / cloudrun=pending-release:: を統合し、Traffic セクションと一致させる。
@@ -505,7 +568,7 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
   // についてだけ算出する (= migrate job を持つ repo。CF Worker は除外)。GitHub
   // 依存なので fail-soft (computePendingMigrationsForRepos が空 Map を返す)。
   // Refs #173。
-  const migrationRepos = [...backendRepos].filter((r) => !trafficByRepo.has(r));
+  const migrationRepos = [...backendRepos].filter((r) => !hasTraffic(r));
   const migrationsByRepo = await computePendingMigrationsForRepos(
     env,
     migrationRepos,
@@ -537,7 +600,11 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
   // flip) に集約した。完了/失敗した個別 wave は `/release-wave/<id>` 直リンクで
   // 参照可能。Latest wave (= 最新 wave の state) と Current (live) (= traffic
   // 100% の実 deploy) の両方を出す (failed wave の後に flip 済みでも実態が見える)。
-  const frontendSection = renderFrontendSection(frontendTracks, trafficByRepo);
+  const frontendSection = renderFrontendSection(
+    frontendTracks,
+    trafficByRepo,
+    perWorkerByRepo,
+  );
 
   const html = `<!doctype html>
 <html lang="ja">
