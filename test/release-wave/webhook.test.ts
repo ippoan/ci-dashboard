@@ -913,3 +913,91 @@ describe("handleBackendDeployReportWebhook auto-retest", () => {
     expect(dispatchCall).toBeUndefined();
   });
 });
+
+// ============================================================================
+// /webhooks/release-wave/pending-release — staged_image pre-flip retest fan-out
+//   (no-traffic upload 時に staged image を未 test の consumer へ retest、Refs #427)
+// ============================================================================
+
+describe("handlePendingReleaseWebhook staged_image pre-flip retest", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function pendingReq(body: unknown): Request {
+    return jsonRequest({ url: PENDING_URL, body, secret: "expected-secret" });
+  }
+
+  it("fans out pre-flip retest to consumers not on the staged image", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    // consumer は rust-alc-api @ img-old を test 済み → staged img-staged は未 test。
+    const kv = await compatKvWithConsumer("img-old");
+
+    const resp = await handlePendingReleaseWebhook(
+      pendingReq({
+        repo: "ippoan/rust-alc-api",
+        version_id: "v0.0.93",
+        tag: "v0.0.93",
+        staged_image: "img-staged",
+      }),
+      deployEnv(kv),
+    );
+    expect(resp.status).toBe(200);
+    // staged_image が record に persist される。
+    const rec = await getPendingRelease(kv, "ippoan/rust-alc-api");
+    expect(rec!.staged_image).toBe("img-staged");
+    // 未 test consumer に staged image 相手の retest が飛ぶ。
+    const dispatchCall = fetchSpy.mock.calls.find((c) =>
+      String(c[0]).includes("/repos/ippoan/auth-worker/dispatches"),
+    );
+    expect(dispatchCall).toBeDefined();
+    const body = JSON.parse(dispatchCall![1].body) as {
+      event_type: string;
+      client_payload: Record<string, unknown>;
+    };
+    expect(body.event_type).toBe("release-wave-retest");
+    expect(body.client_payload).toMatchObject({
+      backend_repo: "ippoan/rust-alc-api",
+      backend_image: "img-staged",
+    });
+  });
+
+  it("skips consumers that already tested the staged image (idempotent)", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const kv = await compatKvWithConsumer("img-staged");
+    const resp = await handlePendingReleaseWebhook(
+      pendingReq({
+        repo: "ippoan/rust-alc-api",
+        version_id: "v0.0.93",
+        tag: "v0.0.93",
+        staged_image: "img-staged",
+      }),
+      deployEnv(kv),
+    );
+    expect(resp.status).toBe(200);
+    const dispatchCall = fetchSpy.mock.calls.find((c) =>
+      String(c[0]).includes("/dispatches"),
+    );
+    expect(dispatchCall).toBeUndefined();
+  });
+
+  it("does not dispatch when staged_image is omitted (backward-compat)", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const kv = await compatKvWithConsumer("img-old");
+    const resp = await handlePendingReleaseWebhook(
+      pendingReq({
+        repo: "ippoan/rust-alc-api",
+        version_id: "v0.0.93",
+        tag: "v0.0.93",
+      }),
+      deployEnv(kv),
+    );
+    expect(resp.status).toBe(200);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    const rec = await getPendingRelease(kv, "ippoan/rust-alc-api");
+    expect(rec!.staged_image ?? null).toBeNull();
+  });
+});

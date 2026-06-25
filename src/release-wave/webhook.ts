@@ -355,6 +355,11 @@ const pendingReleaseSchema = z.object({
   version_id: z.string().min(1),
   tag: z.string().min(1),
   preview_url: z.string().url().optional(),
+  // flip 前 (no-traffic 0%) production image の識別子 (= deploy した git SHA)。
+  // 設定すると、consumer (frontend) に **flip 前** retest を fan-out して、その
+  // image に対する互換性を flip 前に検証する (Refs ippoan/ci-dashboard#427)。
+  // cloudrun backend の release で渡す。frontend 単独 release では省略。
+  staged_image: z.string().min(1).nullish(),
 });
 
 export async function handlePendingReleaseWebhook(
@@ -363,14 +368,36 @@ export async function handlePendingReleaseWebhook(
 ): Promise<Response> {
   const v = await validateAndAuth(request, env, pendingReleaseSchema);
   if (!v.ok) return v.response;
+  const stagedImage = v.data.staged_image ?? null;
   const record = await recordPendingRelease(env.COMPAT_KV, {
     repo: v.data.repo,
     worker_name: v.data.worker_name ?? null,
     version_id: v.data.version_id,
     tag: v.data.tag,
     preview_url: v.data.preview_url ?? null,
+    staged_image: stagedImage,
     now: new Date().toISOString(),
   });
+
+  // staged_image (= flip 前の no-traffic production image) が渡された場合、その
+  // image を **未 test の consumer に flip 前 retest として fan-out** する
+  // (Refs #427)。これにより「tag → no-traffic upload → 自動 retest → 全 green を
+  // 確認 → flip」になり、壊れた backend が 100% traffic に乗る前に互換性を検証
+  // できる (backend-deploy-report の retest は flip 後に走るので手遅れだった)。
+  // backend-deploy-report と同じ best-effort: dispatch 失敗は dispatchAll が
+  // per-repo に握り潰し、report の 200 応答は止めない。
+  if (stagedImage) {
+    const compat = await computeCompatibility(
+      env.COMPAT_KV,
+      v.data.repo,
+      stagedImage,
+    );
+    const dispatches = decideBackendDeployRetestDispatches(compat);
+    if (dispatches.length > 0) {
+      await dispatchAll(env, dispatches);
+    }
+  }
+
   return jsonResponse(200, { ok: true, record });
 }
 
