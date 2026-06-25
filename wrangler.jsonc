@@ -140,7 +140,7 @@
         // (= synthetic-block 対象にしない、section も auto で tracked 判定)。
         // TODO: webhook / releases-page も isTaglessRepo (auto) に寄せて本 var の
         // 分類役割を廃する。
-        "TAGLESS_REPOS": "ippoan/secrets-inventory,ippoan/secrets-inventory-gcp,ippoan/ci-dashboard,ippoan/HealthConnectReaderWorker,ippoan/claude-md,ippoan/mcp-relay-rs,ippoan/cc-relay,ippoan/claude-skills,ippoan/ci-workflows,ippoan/ref-files-worker,ippoan/claude-hooks,ippoan/cdp-relay,ippoan/release-wave-gcp,ippoan/ui-preview,ippoan/rust-flickr,ippoan/cf-billing-monitor,ippoan/security-notification-app,ohishi-exp/rust-ichibanboshi,ohishi-exp/daiun-salary"
+        "TAGLESS_REPOS": "ippoan/secrets-inventory,ippoan/secrets-inventory-gcp,ippoan/ci-dashboard,ippoan/HealthConnectReaderWorker,ippoan/claude-md,ippoan/mcp-relay-rs,ippoan/cc-relay,ippoan/claude-skills,ippoan/ci-workflows,ippoan/ref-files-worker,ippoan/claude-hooks,ippoan/cdp-relay,ippoan/release-wave-gcp,ippoan/ui-preview,ippoan/rust-flickr,ippoan/cf-billing-monitor,ippoan/security-notification-app,ohishi-exp/rust-ichibanboshi,ohishi-exp/daiun-salary,ohishi-exp/nuxt-ichibanboshi-seikyu"
       },
       "kv_namespaces": [
         {
