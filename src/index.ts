@@ -247,10 +247,16 @@ app.get("/admin/dump-releases-blob", async (c) => {
 //
 //   - `?repo=owner/name`: 単一 repo の view だけを recomputeRepoView で
 //     同期再計算して blob に patch (= ~3-15s で完結)。`/issues KV` cache が
-//     stale な repo を pinpoint で直したい時に使う。
+//     stale な repo を pinpoint で直したい時に使う。**`storedAt` を触らないので
+//     fresh-window を貫通する** → `TAGLESS_REPOS` に新 repo を追加直後など、
+//     full refresh が fresh で bail する状況で新 repo を即座に index へ入れる
+//     正規ルートはこちら (blob に無ければ末尾 append)。詳細は ci-dashboard-map
+//     skill「TAGLESS_REPOS に追加したのに card が出ない」Q&A (#438/#439)。
 //   - parameter 無し: WEBHOOK_QUEUE に releases-index-refresh を 1 件 enqueue
 //     し全 repo の full refresh を queue consumer 経由で走らせる。重複 enqueue
-//     は refresh 側の lock + fresh recheck で無駄撃ち (Refs #337)。
+//     は refresh 側の lock + fresh recheck で無駄撃ち (Refs #337)。**注意: full
+//     refresh は 1h fresh-window 内だと no-op** (refreshReleasesIndexInner が
+//     "fresh" で bail)。即時反映が要る時は上の `?repo=` を使う。
 //
 // GET でも accept する (operator が footer link クリックで kick できる UX)。
 app.all("/admin/force-refresh-releases", async (c) => {
