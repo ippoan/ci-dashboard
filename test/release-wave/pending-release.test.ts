@@ -136,6 +136,55 @@ describe("computeUnifiedPending — flip 済みの stale pending-release:: を�
     expect(out[0]).toMatchObject({ repo, version_id: Z, source: "traffic" });
   });
 
+  // per-worker 移行 (#428) 後に残った legacy repo-key (worker=null) の古い残骸を
+  // version 比較で抑制する (Refs #427)。flip すると空 worker 名で 404 になる厄介者。
+  it("legacy repo-key (worker=null) は同 repo の per-worker が新しければ version 比較で抑制", () => {
+    const repo = "ippoan/nuxt-notify";
+    // legacy: worker=null, v0.0.23 (古い残骸)
+    const legacy: PendingReleaseRecord = {
+      schema_version: 1,
+      repo,
+      version_id: "eb2c721d",
+      tag: "v0.0.23",
+      preview_url: null,
+      uploaded_at: "2026-06-24T10:33:33.000Z",
+    };
+    // per-worker: worker=nuxt-notify, v0.0.25 (新しい真実)
+    const perWorker: PendingReleaseRecord = {
+      schema_version: 1,
+      repo,
+      worker_name: "nuxt-notify",
+      version_id: "2d363eb3",
+      tag: "v0.0.25",
+      preview_url: null,
+      uploaded_at: "2026-06-24T19:55:30.000Z",
+    };
+    const out = computeUnifiedPending([], [legacy, perWorker]);
+    // legacy (v0.0.23) は抑制され、per-worker (v0.0.25) だけが残る。
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({
+      repo,
+      worker_name: "nuxt-notify",
+      version_id: "2d363eb3",
+      tag: "v0.0.25",
+    });
+  });
+
+  it("単一 worker repo (per-worker 無し) の worker=null は抑制しない", () => {
+    const repo = "ippoan/security-notification-app";
+    const legacyOnly: PendingReleaseRecord = {
+      schema_version: 1,
+      repo,
+      version_id: "859e6e82",
+      tag: "v0.0.2",
+      preview_url: null,
+      uploaded_at: "2026-06-15T06:59:17.000Z",
+    };
+    const out = computeUnifiedPending([], [legacyOnly]);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ repo, worker_name: null, tag: "v0.0.2" });
+  });
+
   it("cloudrun (traffic:: 無し) は pending-release:: source でそのまま出す", () => {
     const repo = "ippoan/rust-alc-api";
     const pendingRecords = [pending(repo, "pending-v0-0-82", "v0.0.82", "2026-06-03T22:18:19.000Z")];

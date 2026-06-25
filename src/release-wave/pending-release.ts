@@ -202,6 +202,25 @@ import type { TrafficRecord, TrafficVersion } from "./traffic";
 /** flip 入口の種別。traffic=workers / pending=cloudrun 等。 */
 export type PendingSource = "traffic" | "pending";
 
+/**
+ * release tag (`vX.Y.Z` 等) の semver 比較。a>b→1 / a==b→0 / a<b→-1。
+ * 数値 3 組 (major.minor.patch) だけを見る (先頭 `v` / suffix は無視)。
+ * どちらかが parse 不能なら 0 (= 比較不能、抑制判断は安全側に倒す)。
+ */
+export function cmpSemverTag(a: string | null, b: string | null): number {
+  const parse = (t: string | null): [number, number, number] | null => {
+    const m = /(\d+)\.(\d+)\.(\d+)/.exec(t ?? "");
+    return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+  };
+  const pa = parse(a);
+  const pb = parse(b);
+  if (!pa || !pb) return 0;
+  if (pa[0] !== pb[0]) return pa[0] > pb[0] ? 1 : -1;
+  if (pa[1] !== pb[1]) return pa[1] > pb[1] ? 1 : -1;
+  if (pa[2] !== pb[2]) return pa[2] > pb[2] ? 1 : -1;
+  return 0;
+}
+
 /** Pending releases の 1 行 (統合表現)。 */
 export interface UnifiedPending {
   repo: string;
@@ -304,6 +323,27 @@ export function computeUnifiedPending(
     pendingByKey.set(composite(r.repo, r.worker_name ?? null), r);
   }
 
+  // repo ごとの「per-worker (worker != null) record が持つ最新 tag」。per-worker
+  // 移行 (#428) 後に残った legacy repo-key (worker = null) の古い record を
+  // version 比較で抑制するのに使う (legacy < per-worker の最新なら捨てる)。
+  const perWorkerMaxTagByRepo = new Map<string, string>();
+  const considerPerWorkerTag = (
+    repo: string,
+    worker: string | null,
+    tag: string | null,
+  ): void => {
+    if (!worker || !tag) return;
+    const cur = perWorkerMaxTagByRepo.get(repo);
+    if (cur === undefined || cmpSemverTag(tag, cur) > 0)
+      perWorkerMaxTagByRepo.set(repo, tag);
+  };
+  for (const r of pendingRecords)
+    considerPerWorkerTag(r.repo, r.worker_name ?? null, r.tag);
+  for (const rec of trafficRecords) {
+    const t = currentActiveOf(rec)?.tag ?? null;
+    considerPerWorkerTag(rec.repo, rec.worker_name ?? null, t);
+  }
+
   // traffic:: / pending-release:: のどちらか一方でも持つ全 (repo, worker) を
   // 1 度ずつ処理する。
   const keys = new Set<string>([
@@ -314,6 +354,24 @@ export function computeUnifiedPending(
   for (const k of keys) {
     const tr = trafficByKey.get(k) ?? null;
     const pr = pendingByKey.get(k) ?? null;
+    const repo = (tr ?? pr)!.repo;
+    const worker = (tr?.worker_name ?? pr?.worker_name) ?? null;
+
+    // legacy repo-key (worker = null) の古い残骸を version 比較で抑制する。
+    // per-worker 移行 (#428) 前に書かれた `pending-release::<repo>` /
+    // `traffic::<repo>` (worker 名なし) の record は、flip すると cf_worker_name が
+    // 空のまま `wrangler versions deploy ... --name ""` → `/scripts//deployments`
+    // 404 になる (= UI に出ても押せば失敗、`Flip all` も巻き添え)。同 repo の
+    // per-worker record の最新 tag が legacy の tag 以上なら、legacy は古い残骸
+    // とみなして出さない (Refs #427)。単一 worker repo は per-worker tag が無いので
+    // 抑制されない (= 従来挙動を維持)。
+    if (worker === null) {
+      const legacyTag =
+        pr?.tag ?? (tr ? (noTrafficPromotable(tr)?.tag ?? null) : null);
+      const pwTag = perWorkerMaxTagByRepo.get(repo);
+      if (pwTag && (!legacyTag || cmpSemverTag(pwTag, legacyTag) >= 0)) continue;
+    }
+
     // flip 機構: traffic:: を持つ = workers、持たない = cloudrun 等。
     const source: PendingSource = tr ? "traffic" : "pending";
     const active = tr ? currentActiveOf(tr) : null;
