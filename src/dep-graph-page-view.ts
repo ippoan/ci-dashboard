@@ -107,7 +107,7 @@ ${PWA_HEAD_TAGS}
 </style>
 </head>
 <body>
-${renderTabs("dashboard")}
+${renderTabs("dep-graph")}
 <h1>📈 Dep Graph — ${escapeHtml(def.label)}</h1>
 <div class="desc">${escapeHtml(def.description)}</div>
 <div class="meta">
