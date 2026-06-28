@@ -21,6 +21,7 @@ import { handleCapCatalogPage } from "./cap-catalog-page";
 import { handleFavoritesGet, handleFavoritesPut } from "./cap-catalog-favorites";
 import { handleCiMatrixPage, handleCiMatrixDeviationsJson } from "./ci-matrix-page";
 import { handleCiShapeWebhook } from "./ci-shape-webhook";
+import { handleDepGraphFile } from "./dep-graph-page";
 import { handleLaunch } from "./launch";
 import { handleTagRelease } from "./tag-release";
 import {
@@ -215,6 +216,13 @@ app.get("/ci-matrix/deviations.json", (c) => handleCiMatrixDeviationsJson(c.req.
 // 各 repo の CI から ci-shape-report.yml reusable 経由で薄められた shape JSON
 // を受ける。X-CI-Shape-Secret = RELEASE_WAVE_WEBHOOK_SECRET。Refs #378。
 app.post("/webhooks/ci-shape", (c) => handleCiShapeWebhook(c.req.raw, c.env));
+
+// crate 依存グラフ artifact (dep-graph: deps.svg / deps.dot / meta.json) の
+// 個別 file passthrough。生成側は各 repo の `.github/workflows/dep-graph.yml`
+// (Refs #443)。view 用 page は `/dep-graph/:owner/:repo` (handleDepGraphPage)。
+app.get("/api/dep-graph/:owner/:repo/:file", (c) =>
+  handleDepGraphFile(c.env, c.req.param("owner"), c.req.param("repo"), c.req.param("file")),
+);
 
 // Launch redirect for the open-multirepo skill. Stateless: reconstructs the
 // long claude.ai/code URL from a compact `?i=<issue>` query and 302s to it, so
