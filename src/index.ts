@@ -22,6 +22,7 @@ import { handleFavoritesGet, handleFavoritesPut } from "./cap-catalog-favorites"
 import { handleCiMatrixPage, handleCiMatrixDeviationsJson } from "./ci-matrix-page";
 import { handleCiShapeWebhook } from "./ci-shape-webhook";
 import { handleDepGraphFile } from "./dep-graph-page";
+import { handleDepGraphPage } from "./dep-graph-page-view";
 import { handleLaunch } from "./launch";
 import { handleTagRelease } from "./tag-release";
 import {
@@ -222,6 +223,9 @@ app.post("/webhooks/ci-shape", (c) => handleCiShapeWebhook(c.req.raw, c.env));
 // (Refs #443)。view 用 page は `/dep-graph/:owner/:repo` (handleDepGraphPage)。
 app.get("/api/dep-graph/:owner/:repo/:file", (c) =>
   handleDepGraphFile(c.env, c.req.param("owner"), c.req.param("repo"), c.req.param("file")),
+);
+app.get("/dep-graph/:owner/:repo", (c) =>
+  handleDepGraphPage(c.env, c.req.param("owner"), c.req.param("repo")),
 );
 
 // Launch redirect for the open-multirepo skill. Stateless: reconstructs the
