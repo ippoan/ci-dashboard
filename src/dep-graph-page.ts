@@ -42,10 +42,18 @@ export async function handleDepGraphFile(
         status: 404,
       });
     }
+    // SVG は HTML/JS と同じく browser がスクリプト実行できるドキュメント形式。
+    // dep-graph SVG は graphviz `dot -Tsvg` 出力で実際にはスクリプトを含まないが、
+    // ci-dashboard.ippoan.org と同一 origin で配信するため、defense in depth:
+    //   - CSP `sandbox` で同一 origin であっても script/cookie/storage を遮断
+    //   - `nosniff` で content-type 推測 (image/svg+xml → text/html 化) を防止
+    // `<img src=...>` レンダリング (page-view の使い方) には影響しない。
     const headers: Record<string, string> = {
       "content-type": contentType(file),
       "cache-control": "public, max-age=300",
       "x-cache": got.cached ? "HIT" : "MISS",
+      "x-content-type-options": "nosniff",
+      "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
     };
     return new Response(got.body, { status: 200, headers });
   } catch (e) {

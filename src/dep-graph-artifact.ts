@@ -18,17 +18,8 @@ export type DepGraphFile = (typeof DEP_GRAPH_FILES)[number];
 const ARTIFACT_NAME = "dep-graph";
 const CACHE_TTL_SECONDS = 300; // 5 分
 
-interface DepGraphArtifactKv {
-  get(key: string, type: "arrayBuffer"): Promise<ArrayBuffer | null>;
-  put(
-    key: string,
-    value: ArrayBuffer | string,
-    opts?: { expirationTtl?: number; metadata?: unknown },
-  ): Promise<void>;
-}
-
 export interface DepGraphArtifactEnv extends AuthClientWorkerEnv {
-  CI_STATUS: DepGraphArtifactKv;
+  CI_STATUS: KVNamespace;
 }
 
 interface ListArtifactsResponse {
@@ -139,9 +130,14 @@ export async function getDepGraphFile(
   for (const name of DEP_GRAPH_FILES) {
     const data = entries[name];
     if (!data) continue;
-    await env.CI_STATUS.put(cacheKey(owner, repo, name), data.buffer, {
-      expirationTtl: CACHE_TTL_SECONDS,
-    });
+    // fflate の Uint8Array は SharedArrayBuffer backing でないので cast 安全。
+    // KVNamespace.put が ArrayBufferLike を受け取らない (SharedArrayBuffer reject)
+    // 都合のためだけの cast。
+    await env.CI_STATUS.put(
+      cacheKey(owner, repo, name),
+      data.buffer as ArrayBuffer,
+      { expirationTtl: CACHE_TTL_SECONDS },
+    );
   }
 
   const data = entries[file];
