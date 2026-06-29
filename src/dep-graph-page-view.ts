@@ -104,6 +104,14 @@ ${PWA_HEAD_TAGS}
   .graph-wrap img { max-width: 100%; height: auto; display: block; }
   .actions { margin-top: 8px; font-size: 12px; }
   .actions a { color: #58a6ff; text-decoration: none; margin-right: 12px; }
+  details.legend { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 8px 12px; margin-top: 16px; font-size: 13px; }
+  details.legend > summary { cursor: pointer; color: #c9d1d9; font-weight: 600; user-select: none; }
+  details.legend > summary:hover { color: #58a6ff; }
+  details.legend[open] > summary { margin-bottom: 8px; border-bottom: 1px solid #30363d; padding-bottom: 6px; }
+  details.legend ul { margin: 6px 0; padding-left: 20px; line-height: 1.7; color: #c9d1d9; }
+  details.legend li code { background: #0d1117; border: 1px solid #30363d; border-radius: 3px; padding: 1px 5px; font-size: 12px; }
+  details.legend p { margin: 6px 0; color: #8b949e; }
+  details.legend h3 { font-size: 13px; color: #c9d1d9; margin: 12px 0 4px 0; font-weight: 600; }
 </style>
 </head>
 <body>
@@ -130,6 +138,36 @@ ${meta ? `<img src="${svgUrl}" alt="Dependency graph (${escapeHtml(def.label)})"
   <a href="${dotUrl}" download="${escapeHtml(repo)}-deps.dot">⬇ Download .dot</a>
   <a href="${svgUrl}" download="${escapeHtml(repo)}-deps.svg">⬇ Download .svg</a>
 </div>
+
+<details class="legend">
+  <summary>📖 グラフの見方</summary>
+
+  <h3>記号</h3>
+  <ul>
+    <li><b>箱 (ノード)</b> = workspace 内の crate 1 つ (<code>crates/&lt;name&gt;/</code>)</li>
+    <li><b>矢印 A → B</b> = A が B に <b>依存している</b> (A の <code>Cargo.toml</code> に B が <code>path = "..."</code> で入っている)</li>
+    <li><b>矢印が集まる crate</b> = 多くの crate から使われる <b>共通基盤</b> (例: <code>alc-core</code>)</li>
+    <li><b>矢印が出ていない (leaf)</b> = 他の workspace crate に依存しない単独 crate (例: <code>alc-auth-jwt</code> / <code>alc-csv-parser</code>)</li>
+    <li><b>孤立ノード</b> = workspace の他 crate に依存も被依存も無い crate</li>
+  </ul>
+
+  <h3>除外しているもの (見やすさのため)</h3>
+  <ul>
+    <li><code>rust_test</code> ターゲット (各 crate に 1 つあって倍になるので)</li>
+    <li>external crate (rules_rust crate_universe の <code>tokio</code> / <code>axum</code> / <code>serde</code> 等、数百個ある)</li>
+    <li>暗黙依存 (rust toolchain / proc-macro)</li>
+  </ul>
+
+  <h3>rust-alc-api 特有の読み方</h3>
+  <ul>
+    <li><code>alc-core</code> はほぼ全 crate が向く <b>共通型・util の集積点</b>。ここを変えると影響範囲が広い</li>
+    <li><code>*-api</code> 末尾の crate (<code>tenko-api</code> / <code>carins-api</code> / <code>dtako-api</code> / <code>trouble-api</code> / <code>alc-camera-api</code>) は per-domain の <b>個別 Cloud Run binary</b>。対応する domain crate (<code>alc-tenko</code> / <code>alc-carins</code> 等) を呼ぶ</li>
+    <li><code>gateway</code> が孤立しているのは <b>仕様</b>。HTTP-level reverse proxy で、workspace crate を import せず <code>reqwest</code> で各 API を外部呼び出しする設計 (依存ゼロが正しい)</li>
+  </ul>
+
+  <p>生成方法: <code>bazel query "kind('rust_(library|binary)', deps(//crates/...) intersect //crates/...)"</code> → <code>dot -Tsvg</code>。詳細は <a href="https://github.com/ippoan/rust-alc-api/blob/main/.github/workflows/dep-graph.yml" target="_blank" rel="noopener">dep-graph.yml</a> 参照。</p>
+</details>
+
 ${PWA_REGISTER_SCRIPT}
 </body>
 </html>`;
