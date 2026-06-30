@@ -1,4 +1,4 @@
-// Discord PR close notification (Refs #441 PR1 + PR2).
+// Discord PR close notification (Refs #441 PR1 + PR2 + PR4).
 //
 // PR1 の最小実装: webhook URL を CI_STATUS KV (`discord:prCloseWebhookUrl`)
 // に置き、pull_request の `closed` action で 1 件の embed を送る。
@@ -19,8 +19,17 @@
 //     Hub DO に migrate)。以降の rotate は Hub DO `PUT /discord-webhook-url`
 //     経由 (= PR3 の healChannel() も同 endpoint を叩く)。
 //
-// Failure handling (4xx / fetch error) は send 結果を log に残すだけで
-// webhook pipeline は止めない。404 lazy heal は PR4 で結線する。
+// PR4 (本 PR): `notifyDiscordPrClosed` に 404 lazy heal を結線。Discord は
+// channel 削除を push しないため、死んだ webhook URL は次の send で
+// 404 Unknown Webhook (10015) を返すことでしか検知できない。404 を見たら
+// `healChannel()` (PR3) で新 channel + webhook を再発行し、Hub DO の
+// `PUT /discord-webhook-url` で URL を rotate、`POST /discord-heal-record`
+// で heal 履歴を Hub に記録 (WS で `{type: "discord-heal"}` を broadcast)、
+// そして新 URL に embed を retry する。
+//
+// Bot token / KV settings が未設定なら heal は disabled (= 404 でも何もせず
+// log のみ)。本 pipeline は **常に** 失敗を log のみに留め、webhook 全体を
+// 止めない。
 
 export const WEBHOOK_URL_KV_KEY = "discord:prCloseWebhookUrl";
 
@@ -112,17 +121,120 @@ export async function readPrCloseWebhookUrl(
   }
 }
 
-/** PR close 通知のエントリポイント。URL 未設定なら no-op。送信失敗時は
- *  log を出すのみで、webhook pipeline は止めない。 */
+/** Hub DO の `PUT /discord-webhook-url` で URL を rotate (Refs #441 PR4)。
+ *  PR2 で導入済みの endpoint を呼ぶラッパー。返値は成否 boolean。 */
+export async function writePrCloseWebhookUrl(
+  hub: DurableObjectStub,
+  url: string | null,
+): Promise<boolean> {
+  try {
+    const res = await hub.fetch(new Request("http://hub/discord-webhook-url", {
+      method: "PUT",
+      body: JSON.stringify({ url }),
+    }));
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Discord webhook URL の token 部分を `****` に置換する (Refs #441 PR4)。
+ *  heal 履歴 / WS broadcast / log に URL を残す時に bot 認証相当の
+ *  webhook token を漏らさないため。Discord の実 URL は `/webhooks/<digits>/<token>`
+ *  だが、defense in depth で id 部の文字種は問わない (= test fixture 含め
+ *  常に mask されることを保証)。 */
+export function maskWebhookUrl(url: string): string {
+  return url.replace(/\/webhooks\/([^/]+)\/[^/?]+/, "/webhooks/$1/****");
+}
+
+/** Hub DO に heal record を 1 件記録 (Refs #441 PR4)。Hub 側で append +
+ *  WS broadcast を原子的に行う。失敗は fail-open (log だけ残して return)。 */
+export interface DiscordHealRecord {
+  /** heal を実行した時刻 (ISO 8601)。 */
+  at: string;
+  /** 死亡 detection した URL (token mask 済み)。 */
+  deadUrl: string;
+  /** 再発行された URL (token mask 済み)。 */
+  newUrl: string;
+  /** 再作成された channel name。 */
+  channelName: string;
+  /** 再作成された channel の Discord snowflake ID。 */
+  channelId: string;
+  /** heal の trigger 理由 (e.g. `"404 Unknown Webhook on send"`)。 */
+  reason: string;
+}
+
+async function reportHeal(
+  hub: DurableObjectStub,
+  rec: DiscordHealRecord,
+): Promise<void> {
+  try {
+    await hub.fetch(new Request("http://hub/discord-heal-record", {
+      method: "POST",
+      body: JSON.stringify(rec),
+    }));
+  } catch (err) {
+    console.log(JSON.stringify({
+      msg: "discord-heal-record-failed",
+      error: err instanceof Error ? err.message : String(err),
+    }));
+  }
+}
+
+/** PR close 通知のエントリポイント (Refs #441 PR4 = 404 lazy heal 結線)。
+ *  通常 send → 200 系で return。それ以外:
+ *    - 404 + `botToken` あり: `healChannel()` で新 webhook を再発行し、
+ *      Hub DO storage の URL を更新 → heal を Hub に記録 → 新 URL で retry。
+ *    - 404 + token 無し / heal 失敗 / 404 以外の非 OK: log のみで return。
+ *  どのパスでも throw しない (webhook pipeline は止めない)。
+ *
+ *  `kv` / `botToken` を null にすると heal は無効化 (= PR3 以前と同等挙動)。
+ *  operator が Bot token + KV settings を投入するまでは null を渡す。 */
 export async function notifyDiscordPrClosed(
   hub: DurableObjectStub,
+  kv: KVNamespace | null,
+  botToken: string | null,
   input: PrClosedEmbedInput,
 ): Promise<void> {
   const url = await readPrCloseWebhookUrl(hub);
   if (!url) return;
   const payload = buildPrClosedEmbed(input);
-  const status = await postDiscordWebhook(url, payload);
+  let status = await postDiscordWebhook(url, payload);
   if (status >= 200 && status < 300) return;
+
+  // 404 lazy heal (Refs #441 PR4)。token + KV settings の両方が揃っている
+  // 時だけ試みる。それ以外は素直に log + 諦め。
+  if (status === 404 && botToken && kv) {
+    try {
+      const { healChannel } = await import("./discord-heal");
+      const heal = await healChannel(botToken, kv);
+      if (heal) {
+        const rotated = await writePrCloseWebhookUrl(hub, heal.newUrl);
+        if (rotated) {
+          await reportHeal(hub, {
+            at: new Date().toISOString(),
+            deadUrl: maskWebhookUrl(url),
+            newUrl: maskWebhookUrl(heal.newUrl),
+            channelName: heal.channelName,
+            channelId: heal.channelId,
+            reason: "404 Unknown Webhook on send",
+          });
+          status = await postDiscordWebhook(heal.newUrl, payload);
+          if (status >= 200 && status < 300) return;
+        }
+      }
+    } catch (err) {
+      // healChannel が DiscordApiError 等を throw した時。403 (Bot 権限不足)
+      // 等は operator action 待ちなので loud log で残す。pipeline は止めない。
+      console.log(JSON.stringify({
+        msg: "discord-heal-failed",
+        repo: input.repo,
+        number: input.number,
+        error: err instanceof Error ? err.message : String(err),
+      }));
+    }
+  }
+
   console.log(JSON.stringify({
     msg: "discord-pr-close-notify-failed",
     repo: input.repo,
