@@ -307,6 +307,10 @@ function renderHtml(
     ? renderProjectSection(projectTagged, prs.map, taglessSet)
     : "";
 
+  // 進捗集計バナー (Refs #442 PR3)。progress-checklist 節を持つ issue が
+  // 1 件以上あれば、一覧上部に「N issue · X/Y task 完了」を出す。
+  const progressSummary = renderProgressSummary(computeProgressSummary(repos));
+
   const incompleteBanner = incomplete
     ? `<div class="banner">⚠️ Result was truncated by GitHub search. Showing ${total} issues but more may exist.</div>`
     : "";
@@ -524,6 +528,26 @@ function renderHtml(
        the blue project-chip's "belongs to a board" affordance. Draft PRs
        desaturate to gray so the reader can tell at a glance whether the PR
        is review-ready. */
+    /* 進捗集計バナー (Refs #442 PR3)。/issues 上部に「N issue · X/Y 完了」
+       + 横バーを出す。banner-info と同型の青系で、issue list の手前に置く。 */
+    .progress-summary {
+      background: #1c2433;
+      border: 1px solid #1f6feb88;
+      color: #a5d6ff;
+      border-radius: 6px;
+      padding: 10px 14px;
+      font-size: 13px;
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .progress-summary .pc-bar {
+      width: 180px;
+      height: 8px;
+    }
+    .ps-pct { font-variant-numeric: tabular-nums; font-weight: 600; }
     /* progress-checklist (Refs #442 PR2). アンカー有 issue の本文から
        parseProgressChecklist で抽出した read-only checklist。チェックは
        押せない (= CCoW セッションが正本、書き戻し UI は作らない方針)。 */
@@ -674,6 +698,7 @@ function renderHtml(
   ${issueStaleBanner}
   ${decoLoadingBanner}
   ${prBanner}
+  ${progressSummary}
   ${projectSection}
   ${repos.length === 0 && projectTagged.length === 0
     ? `<div class="empty">🎉 No open issues. Nice work.</div>`
@@ -893,6 +918,43 @@ function renderRow(
     <td class="updated">${escapeHtml(i.updated_at.slice(0, 10))}</td>
     ${renderLaunchCell(i)}
   </tr>`;
+}
+
+/** 全 repo 横断で progress-checklist の合計を計算する (Refs #442 PR3)。
+ *  body 不在 / アンカー無しは無視。issue が project section にも出る場合も
+ *  二重カウントしないよう repos の union だけを集計 (project 側は repos の
+ *  subset として既に居る)。 */
+export function computeProgressSummary(
+  repos: ReadonlyArray<readonly [string, OrgIssue[]]>,
+): { issuesWithChecklist: number; done: number; total: number } {
+  let issuesWithChecklist = 0;
+  let done = 0;
+  let total = 0;
+  for (const [, items] of repos) {
+    for (const i of items) {
+      if (!i.body) continue;
+      const p = parseProgressChecklist(i.body, i.number);
+      if (!p) continue;
+      issuesWithChecklist++;
+      done += p.done;
+      total += p.total;
+    }
+  }
+  return { issuesWithChecklist, done, total };
+}
+
+/** /issues 一覧上部の集計バナー (Refs #442 PR3)。progress-checklist 節を持つ
+ *  issue が 1 件も無ければ空文字 (= バナー出さない)。 */
+export function renderProgressSummary(
+  summary: { issuesWithChecklist: number; done: number; total: number },
+): string {
+  if (summary.issuesWithChecklist === 0) return "";
+  const pct = summary.total > 0 ? Math.round((summary.done / summary.total) * 100) : 0;
+  return `<div class="progress-summary">
+    📊 進捗チェックリスト: ${summary.issuesWithChecklist} issue · ${summary.done}/${summary.total} task 完了
+    <span class="pc-bar"><span class="pc-bar-fill" style="width:${pct}%"></span></span>
+    <span class="ps-pct">${pct}%</span>
+  </div>`;
 }
 
 /** issue 本文の progress-checklist 節を read-only で描画 (Refs #442 PR2、
