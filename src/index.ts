@@ -25,6 +25,7 @@ import { handleDepGraphFile } from "./dep-graph-page";
 import { handleDepGraphPage } from "./dep-graph-page-view";
 import { handleLaunch } from "./launch";
 import { handleTagRelease } from "./tag-release";
+import { handleAutoTagPage, handleAutoTagPagePost } from "./auto-tag-page";
 import {
   handleReleaseWaveTagRelease,
   handleReleaseWaveTagReleaseAll,
@@ -253,6 +254,11 @@ app.post("/api/release-close",
   (c) => handleReleaseClose(c.req.raw, c.env, getHub(c.env), c.executionCtx));
 app.post("/api/release-close-batch",
   (c) => handleReleaseCloseBatch(c.req.raw, c.env, getHub(c.env), c.executionCtx));
+
+// Auto-tag on PR merge 設定画面 (Refs #460)。Cloudflare Access (zone-level)
+// で gate されている前提なので worker 側で追加の認証は行わない。
+app.get("/auto-tag", (c) => handleAutoTagPage(getHub(c.env)));
+app.post("/auto-tag", (c) => handleAutoTagPagePost(c.req.raw, getHub(c.env)));
 
 // /releases blob ダンプ (Refs #407 / #409, bug 1 診断用)。CF Access (zone-level)
 // で gate。Hub DO (`this.ctx.storage`) を直叩きするため strongly consistent。

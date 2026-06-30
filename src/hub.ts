@@ -26,6 +26,10 @@ import {
   WEBHOOK_URL_KV_KEY as DISCORD_WEBHOOK_URL_KV_KEY,
   type DiscordHealRecord,
 } from "./discord";
+import {
+  normalizeAutoTagRepos,
+  type AutoTagReposPutBody,
+} from "./auto-tag";
 
 // Discord PR close 通知用 webhook URL の DO storage key (Refs #441 PR2)。
 // SoT は本 DO の `this.ctx.storage`。旧 PR1 で operator が KV
@@ -38,6 +42,12 @@ const DISCORD_WEBHOOK_URL_DO_KEY = "discord:prCloseWebhookUrl";
 // page load 時の bootstrap で `GET /discord-heal-records` で全件取得する。
 const DISCORD_HEAL_RECORDS_DO_KEY = "discord:healRecords";
 const DISCORD_HEAL_RECORDS_CAP = 50;
+
+// Auto-tag on PR merge (Refs #460)。Hub DO storage に repo full_name の
+// set を持ち、`pull_request.closed` (merged + default branch) で hit したら
+// webhook handler が `dispatchTagRelease(env, repo)` を呼ぶ。SoT を DO に
+// 置く理由は Discord webhook URL と同じく強整合 read のため。
+const AUTO_TAG_REPOS_DO_KEY = "autoTag:repos";
 
 // shape refresh の結果型 (ci-shape-refresh.ts と同形だが、循環 import を避けるため
 // 本ファイル内に再宣言する)。
@@ -231,6 +241,26 @@ export class CIDashboardHub extends DurableObject<Env> {
    *  (PR5) が page load 時に bootstrap で叩く。 */
   private async listDiscordHealRecords(): Promise<DiscordHealRecord[]> {
     return await this.ctx.storage.get<DiscordHealRecord[]>(DISCORD_HEAL_RECORDS_DO_KEY) ?? [];
+  }
+
+  /** Auto-tag 対象 repo の全集合を読む (Refs #460)。未投入は空配列。
+   *  webhook hot path 用の hit check は本配列の `.includes()` で十分 (件数
+   *  小、O(N) でも実害無し)。 */
+  private async getAutoTagRepos(): Promise<string[]> {
+    return await this.ctx.storage.get<string[]>(AUTO_TAG_REPOS_DO_KEY) ?? [];
+  }
+
+  /** Auto-tag set を全置換 (Refs #460)。空配列なら storage から delete
+   *  (見た目を「未投入」と区別しないため = `discord:webhookUrl` と同じ pattern)。
+   *  trim + 重複除去 + sort は `normalizeAutoTagRepos` に集約。 */
+  private async putAutoTagRepos(repos: readonly string[]): Promise<string[]> {
+    const next = normalizeAutoTagRepos(repos);
+    if (next.length === 0) {
+      await this.ctx.storage.delete(AUTO_TAG_REPOS_DO_KEY);
+      return next;
+    }
+    await this.ctx.storage.put(AUTO_TAG_REPOS_DO_KEY, next);
+    return next;
   }
 
   /** apply-close/issue/refs が使う BlobStore adapter。direct DO storage IO で
@@ -648,6 +678,25 @@ export class CIDashboardHub extends DurableObject<Env> {
     // 別経路 (cold start 時に過去履歴を出すため)。
     if (url.pathname === "/discord-heal-records" && request.method === "GET") {
       return Response.json(await this.listDiscordHealRecords());
+    }
+
+    // Auto-tag on PR merge: 対象 repo 集合の read (Refs #460)。
+    // webhook handler が `pull_request.closed` (merged + default branch) の
+    // hot path で `readAutoTagRepos` 経由で叩く。auto-tag-page の UI も
+    // 現在値を pre-check するために bootstrap で叩く。
+    if (url.pathname === "/auto-tag-repos" && request.method === "GET") {
+      return Response.json(await this.getAutoTagRepos());
+    }
+
+    // Auto-tag set の全置換 (Refs #460)。body は `{ repos: string[] }`。
+    // 本 endpoint も Discord webhook URL 系と同じく Hub と Worker の信頼境界
+    // (= 同 isolate からの service binding 内通信) に閉じている前提で
+    // 無認証。Worker 側の `/auto-tag` form handler が Cloudflare Access で
+    // gate される。
+    if (url.pathname === "/auto-tag-repos" && request.method === "PUT") {
+      const body = await request.json<AutoTagReposPutBody>();
+      const next = await this.putAutoTagRepos(body.repos ?? []);
+      return Response.json(next);
     }
 
     // /issues page の live reload trigger (Refs #321)。KV upsert 済みの issue
