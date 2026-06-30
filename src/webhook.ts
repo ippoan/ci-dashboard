@@ -20,7 +20,7 @@ import {
   invalidateRepoCompare,
 } from "./release-cache";
 import { applyPullRequestEvent } from "./pr-map-cache";
-import { notifyDiscordPrClosed } from "./discord";
+import { notifyDiscordPrClosed, notifyDiscordCiFailed } from "./discord";
 import {
   markReleasesIndexStale,
   RELEASES_INDEX_KEY,
@@ -505,6 +505,29 @@ async function processWebhookEvent(
           tag: payload.workflow_run.head_branch,  // explicit tag from head_branch
         }),
       }));
+    }
+
+    // Discord CI failure 通知 (Refs #455)。完了 + conclusion=failure のみ。
+    // PR close と同じ Hub DO storage の webhook URL を共有し、404 lazy heal
+    // も同じ infra を通る。token / URL 未設定なら no-op (fail-open)。
+    // `cancelled` / `timed_out` / `action_required` は本 issue の scope 外。
+    if (
+      payload.action === "completed" &&
+      payload.workflow_run.conclusion === "failure"
+    ) {
+      const botToken = env.DISCORD_BOT_TOKEN
+        ? await env.DISCORD_BOT_TOKEN.get().catch(() => null)
+        : null;
+      await notifyDiscordCiFailed(hub, env.CI_STATUS, botToken, {
+        repo: payload.repository.full_name,
+        workflow: payload.workflow_run.name,
+        branch: payload.workflow_run.head_branch,
+        conclusion: payload.workflow_run.conclusion,
+        actor: payload.workflow_run.actor.login,
+        runUrl: payload.workflow_run.html_url,
+        runId: payload.workflow_run.id,
+        updatedAt: payload.workflow_run.updated_at,
+      });
     }
 
     return;

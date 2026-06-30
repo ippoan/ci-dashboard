@@ -36,6 +36,9 @@ export const WEBHOOK_URL_KV_KEY = "discord:prCloseWebhookUrl";
 // Discord embed 色 (issue #441 の payload 仕様より)。
 export const COLOR_MERGED = 0x7f00ff; // 紫
 export const COLOR_CLOSED = 0xb23b3b; // 赤
+// CI workflow_run failure 用 (Refs #455)。PR close (`COLOR_CLOSED`) と
+// 区別するため、より明るい赤橙にする。
+export const COLOR_CI_FAILED = 0xd93f0b;
 
 export interface PrClosedEmbedInput {
   /** GitHub repository full name (`owner/name`). */
@@ -181,24 +184,25 @@ async function reportHeal(
   }
 }
 
-/** PR close 通知のエントリポイント (Refs #441 PR4 = 404 lazy heal 結線)。
+/** Discord 送信の共通本体 (Refs #441 PR4 / #455)。PR close と CI fail で
+ *  heal/retry の流れが完全に同じなので、payload と log context だけを
+ *  差し替えて再利用する。
+ *
  *  通常 send → 200 系で return。それ以外:
  *    - 404 + `botToken` あり: `healChannel()` で新 webhook を再発行し、
  *      Hub DO storage の URL を更新 → heal を Hub に記録 → 新 URL で retry。
  *    - 404 + token 無し / heal 失敗 / 404 以外の非 OK: log のみで return。
- *  どのパスでも throw しない (webhook pipeline は止めない)。
- *
- *  `kv` / `botToken` を null にすると heal は無効化 (= PR3 以前と同等挙動)。
- *  operator が Bot token + KV settings を投入するまでは null を渡す。 */
-export async function notifyDiscordPrClosed(
+ *  どのパスでも throw しない (webhook pipeline は止めない)。 */
+async function sendDiscordPayload(
   hub: DurableObjectStub,
   kv: KVNamespace | null,
   botToken: string | null,
-  input: PrClosedEmbedInput,
+  payload: DiscordWebhookPayload,
+  failedMsg: string,
+  logContext: Record<string, unknown>,
 ): Promise<void> {
   const url = await readPrCloseWebhookUrl(hub);
   if (!url) return;
-  const payload = buildPrClosedEmbed(input);
   let status = await postDiscordWebhook(url, payload);
   if (status >= 200 && status < 300) return;
 
@@ -228,17 +232,85 @@ export async function notifyDiscordPrClosed(
       // 等は operator action 待ちなので loud log で残す。pipeline は止めない。
       console.log(JSON.stringify({
         msg: "discord-heal-failed",
-        repo: input.repo,
-        number: input.number,
+        ...logContext,
         error: err instanceof Error ? err.message : String(err),
       }));
     }
   }
 
   console.log(JSON.stringify({
-    msg: "discord-pr-close-notify-failed",
-    repo: input.repo,
-    number: input.number,
+    msg: failedMsg,
+    ...logContext,
     status,
   }));
+}
+
+/** PR close 通知のエントリポイント (Refs #441 PR4 = 404 lazy heal 結線)。
+ *  `kv` / `botToken` を null にすると heal は無効化 (= PR3 以前と同等挙動)。
+ *  operator が Bot token + KV settings を投入するまでは null を渡す。 */
+export async function notifyDiscordPrClosed(
+  hub: DurableObjectStub,
+  kv: KVNamespace | null,
+  botToken: string | null,
+  input: PrClosedEmbedInput,
+): Promise<void> {
+  await sendDiscordPayload(
+    hub, kv, botToken, buildPrClosedEmbed(input),
+    "discord-pr-close-notify-failed",
+    { repo: input.repo, number: input.number },
+  );
+}
+
+export interface CiFailedEmbedInput {
+  /** GitHub repository full name (`owner/name`). */
+  repo: string;
+  /** `workflow_run.name` (例: `CI`, `Deploy`, `Release Wave`)。 */
+  workflow: string;
+  /** `workflow_run.head_branch` (branch / tag)。 */
+  branch: string;
+  /** `workflow_run.conclusion` (`failure` を想定。embed の文言用)。 */
+  conclusion: string;
+  /** `workflow_run.actor.login`。 */
+  actor: string;
+  /** `workflow_run.html_url` (Actions run page、embed link target)。 */
+  runUrl: string;
+  /** `workflow_run.id` (log 識別子)。 */
+  runId: number;
+  /** ISO timestamp。`workflow_run.updated_at`。 */
+  updatedAt: string;
+}
+
+/** CI workflow_run 失敗 embed (Refs #455)。PR close と区別するため
+ *  COLOR_CI_FAILED + `❌ <workflow> failed` タイトルにする。 */
+export function buildCiFailedEmbed(input: CiFailedEmbedInput): DiscordWebhookPayload {
+  return {
+    embeds: [{
+      title: `❌ ${input.workflow} failed`,
+      url: input.runUrl,
+      description: `${input.repo} @ ${input.branch} (by ${input.actor})`,
+      color: COLOR_CI_FAILED,
+      fields: [
+        { name: "repo", value: input.repo, inline: true },
+        { name: "workflow", value: input.workflow, inline: true },
+        { name: "branch", value: input.branch, inline: true },
+      ],
+      timestamp: input.updatedAt,
+    }],
+  };
+}
+
+/** CI workflow_run 失敗通知のエントリポイント (Refs #455)。PR close と
+ *  同じ Hub DO の webhook URL + 404 lazy heal infra を共有する。
+ *  `kv` / `botToken` を null にすると heal は無効化 (URL 無しなら no-op)。 */
+export async function notifyDiscordCiFailed(
+  hub: DurableObjectStub,
+  kv: KVNamespace | null,
+  botToken: string | null,
+  input: CiFailedEmbedInput,
+): Promise<void> {
+  await sendDiscordPayload(
+    hub, kv, botToken, buildCiFailedEmbed(input),
+    "discord-ci-failed-notify-failed",
+    { repo: input.repo, workflow: input.workflow, runId: input.runId },
+  );
 }
