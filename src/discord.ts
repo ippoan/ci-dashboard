@@ -36,9 +36,11 @@ export const WEBHOOK_URL_KV_KEY = "discord:prCloseWebhookUrl";
 // Discord embed 色 (issue #441 の payload 仕様より)。
 export const COLOR_MERGED = 0x7f00ff; // 紫
 export const COLOR_CLOSED = 0xb23b3b; // 赤
-// CI workflow_run failure 用 (Refs #455)。PR close (`COLOR_CLOSED`) と
-// 区別するため、より明るい赤橙にする。
-export const COLOR_CI_FAILED = 0xd93f0b;
+// CI workflow_run failure 用 (Refs #455)。Discord の標準 danger/error 色
+// (`0xed4245`、Discord UI 自身が destructive action で使う brand red) で
+// 「エラー」を明確に示す。PR close (`COLOR_CLOSED = 0xb23b3b`、暗赤) と
+// hue は近いが彩度が高いので並べた時に区別できる。
+export const COLOR_CI_FAILED = 0xed4245;
 
 export interface PrClosedEmbedInput {
   /** GitHub repository full name (`owner/name`). */
