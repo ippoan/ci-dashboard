@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { renderProgressChecklist } from "../src/issues-page";
+import {
+  renderProgressChecklist,
+  computeProgressSummary,
+  renderProgressSummary,
+} from "../src/issues-page";
 import type { OrgIssue } from "../src/mcp/tools/issues";
 
 function makeIssue(overrides: Partial<OrgIssue> = {}): OrgIssue {
@@ -118,5 +122,87 @@ describe("renderProgressChecklist", () => {
     expect(html).toContain("進捗 1/1");
     expect(html).toContain("real");
     expect(html).not.toContain("fenced");
+  });
+});
+
+describe("computeProgressSummary (Refs #442 PR3)", () => {
+  it("repo 0 件 → all zero", () => {
+    expect(computeProgressSummary([])).toEqual({
+      issuesWithChecklist: 0, done: 0, total: 0,
+    });
+  });
+
+  it("body 無し / アンカー無し は集計に含まない", () => {
+    const repos: ReadonlyArray<readonly [string, OrgIssue[]]> = [
+      ["a/b", [makeIssue({ number: 1, body: null })]],
+      ["c/d", [makeIssue({ number: 2, body: "plain text" })]],
+    ];
+    expect(computeProgressSummary(repos)).toEqual({
+      issuesWithChecklist: 0, done: 0, total: 0,
+    });
+  });
+
+  it("複数 repo の done/total を合算", () => {
+    const body = (n: number, x: number, y: number) => {
+      const lines = [OPEN(n)];
+      for (let i = 0; i < x; i++) lines.push(`- [x] done${i}`);
+      for (let i = 0; i < y; i++) lines.push(`- [ ] todo${i}`);
+      lines.push(CLOSE(n));
+      return lines.join("\n");
+    };
+    const repos: ReadonlyArray<readonly [string, OrgIssue[]]> = [
+      ["a/b", [
+        makeIssue({ number: 1, body: body(1, 2, 1) }),  // 2/3
+        makeIssue({ number: 2, body: null }),
+      ]],
+      ["c/d", [
+        makeIssue({ number: 3, body: body(3, 0, 4) }),  // 0/4
+        makeIssue({ number: 4, body: body(4, 3, 0) }),  // 3/3
+      ]],
+    ];
+    expect(computeProgressSummary(repos)).toEqual({
+      issuesWithChecklist: 3,
+      done: 5,
+      total: 10,
+    });
+  });
+
+  it("空節 (total=0) も issue カウントには入れる", () => {
+    const body = `${OPEN(1)}\n_未着手_\n${CLOSE(1)}`;
+    const repos: ReadonlyArray<readonly [string, OrgIssue[]]> = [
+      ["a/b", [makeIssue({ number: 1, body })]],
+    ];
+    expect(computeProgressSummary(repos)).toEqual({
+      issuesWithChecklist: 1, done: 0, total: 0,
+    });
+  });
+});
+
+describe("renderProgressSummary (Refs #442 PR3)", () => {
+  it("issue 0 件なら空文字 (バナー出さない)", () => {
+    expect(renderProgressSummary({ issuesWithChecklist: 0, done: 0, total: 0 })).toBe("");
+  });
+
+  it("基本: '<N> issue · <D>/<T> task 完了' + 進捗バー + パーセント", () => {
+    const html = renderProgressSummary({ issuesWithChecklist: 3, done: 5, total: 10 });
+    expect(html).toContain('class="progress-summary"');
+    expect(html).toContain("3 issue");
+    expect(html).toContain("5/10 task 完了");
+    expect(html).toContain('style="width:50%"');
+    expect(html).toContain('class="ps-pct">50%');
+  });
+
+  it("total=0 (空節のみ) → 0% 表示", () => {
+    const html = renderProgressSummary({ issuesWithChecklist: 2, done: 0, total: 0 });
+    expect(html).toContain("2 issue");
+    expect(html).toContain("0/0 task");
+    expect(html).toContain('style="width:0%"');
+    expect(html).toContain("0%");
+  });
+
+  it("100% (= 全 done)", () => {
+    const html = renderProgressSummary({ issuesWithChecklist: 1, done: 4, total: 4 });
+    expect(html).toContain('style="width:100%"');
+    expect(html).toContain("100%");
   });
 });
