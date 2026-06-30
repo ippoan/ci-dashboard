@@ -4,13 +4,16 @@ import worker from "../src/index";
 import type { Env } from "../src/index";
 import {
   buildPrClosedEmbed,
+  buildCiFailedEmbed,
   maskWebhookUrl,
   notifyDiscordPrClosed,
+  notifyDiscordCiFailed,
   readPrCloseWebhookUrl,
   writePrCloseWebhookUrl,
   WEBHOOK_URL_KV_KEY,
   COLOR_MERGED,
   COLOR_CLOSED,
+  COLOR_CI_FAILED,
 } from "../src/discord";
 import { CHANNEL_SETTINGS_KV_KEYS } from "../src/discord-heal";
 
@@ -537,6 +540,208 @@ describe("notifyDiscordPrClosed 404 lazy heal (Refs #441 PR4)", () => {
       .find((s) => s.includes("discord-pr-close-notify-failed"));
     expect(finalLog).toBeTruthy();
     expect(JSON.parse(finalLog!).status).toBe(500);
+  });
+});
+
+describe("buildCiFailedEmbed (Refs #455)", () => {
+  it("failure conclusion → 赤系色 + repo/workflow/branch field + Actions URL", () => {
+    const out = buildCiFailedEmbed({
+      repo: "ippoan/ci-dashboard",
+      workflow: "CI",
+      branch: "main",
+      conclusion: "failure",
+      actor: "yhonda-ohishi",
+      runUrl: "https://github.com/ippoan/ci-dashboard/actions/runs/12345",
+      runId: 12345,
+      updatedAt: "2026-06-30T12:00:00.000Z",
+    });
+    expect(out.embeds).toHaveLength(1);
+    const e = out.embeds[0]!;
+    expect(e.title).toBe("❌ CI failed");
+    expect(e.url).toBe("https://github.com/ippoan/ci-dashboard/actions/runs/12345");
+    expect(e.description).toBe("ippoan/ci-dashboard @ main (by yhonda-ohishi)");
+    expect(e.color).toBe(COLOR_CI_FAILED);
+    expect(e.fields).toContainEqual({ name: "repo", value: "ippoan/ci-dashboard", inline: true });
+    expect(e.fields).toContainEqual({ name: "workflow", value: "CI", inline: true });
+    expect(e.fields).toContainEqual({ name: "branch", value: "main", inline: true });
+    expect(e.timestamp).toBe("2026-06-30T12:00:00.000Z");
+  });
+});
+
+describe("notifyDiscordCiFailed (Refs #455)", () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it("Hub に URL 無しなら fetch を呼ばない (no-op)", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 204 }));
+    await notifyDiscordCiFailed(makeMockHubStub(), null, null, {
+      repo: "ippoan/ci-dashboard", workflow: "CI", branch: "main",
+      conclusion: "failure", actor: "u", runUrl: "https://x", runId: 1,
+      updatedAt: "2026-06-30T00:00:00.000Z",
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("Hub に URL があれば CI fail embed を POST する", async () => {
+    const webhook = "https://discord.com/api/webhooks/123/abc";
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 204 }));
+    await notifyDiscordCiFailed(makeMockHubStub(webhook), null, null, {
+      repo: "ippoan/ci-dashboard", workflow: "CI", branch: "main",
+      conclusion: "failure", actor: "yhonda",
+      runUrl: "https://github.com/ippoan/ci-dashboard/actions/runs/777",
+      runId: 777, updatedAt: "2026-06-30T00:00:00.000Z",
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [calledUrl, init] = fetchSpy.mock.calls[0]!;
+    expect(calledUrl).toBe(webhook);
+    const body = JSON.parse(init!.body as string);
+    expect(body.embeds[0].title).toBe("❌ CI failed");
+    expect(body.embeds[0].color).toBe(COLOR_CI_FAILED);
+  });
+
+  it("Discord が 4xx を返しても throw せず log のみ (discord-ci-failed-notify-failed)", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 500 }));
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    await expect(notifyDiscordCiFailed(
+      makeMockHubStub("https://discord.com/api/webhooks/x/y"), null, null, {
+        repo: "r", workflow: "CI", branch: "main", conclusion: "failure",
+        actor: "u", runUrl: "u", runId: 1, updatedAt: "2026-06-30T00:00:00.000Z",
+      },
+    )).resolves.toBeUndefined();
+    const line = logSpy.mock.calls
+      .map((c) => String(c[0]))
+      .find((s) => s.includes("discord-ci-failed-notify-failed"));
+    expect(line).toBeTruthy();
+    expect(JSON.parse(line!).status).toBe(500);
+    expect(JSON.parse(line!).runId).toBe(1);
+  });
+
+  it("fetch が throw しても throw しない", async () => {
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("network down"));
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    await expect(notifyDiscordCiFailed(
+      makeMockHubStub("https://discord.com/api/webhooks/x/y"), null, null, {
+        repo: "r", workflow: "CI", branch: "main", conclusion: "failure",
+        actor: "u", runUrl: "u", runId: 1, updatedAt: "2026-06-30T00:00:00.000Z",
+      },
+    )).resolves.toBeUndefined();
+  });
+
+  it("404 + token + settings → healChannel → URL rotate → retry → heal record", async () => {
+    const DEAD = "https://discord.com/api/webhooks/old/deadtoken";
+    const NEW_WH = "https://discord.com/api/webhooks/wh-new/tok-new";
+    const NEW_CHANNEL = "9999";
+    const BOT = "Nz...test";
+    // settings seed
+    await env.CI_STATUS.put("discord:guildId", "guild-1");
+    await env.CI_STATUS.put("discord:channelName", "pr-notify");
+    const hub = makeMockHubRich(DEAD);
+    const fetchSpy = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ message: "Unknown Webhook", code: 10015 }), { status: 404 }))
+      .mockResolvedValueOnce(Response.json({ id: NEW_CHANNEL, name: "pr-notify", type: 0 }, { status: 201 }))
+      .mockResolvedValueOnce(Response.json({ id: "wh-new", token: "tok-new", channel_id: NEW_CHANNEL, url: NEW_WH }, { status: 200 }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    await notifyDiscordCiFailed(hub.stub, env.CI_STATUS, BOT, {
+      repo: "x/y", workflow: "CI", branch: "main", conclusion: "failure",
+      actor: "u", runUrl: "u", runId: 99, updatedAt: "2026-06-30T00:00:00.000Z",
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(4);
+    expect(hub.getWebhookUrl()).toBe(NEW_WH);
+    expect(hub.getHealRecords()).toHaveLength(1);
+    expect(fetchSpy.mock.calls[3]![0]).toBe(NEW_WH);
+    // teardown
+    await env.CI_STATUS.delete("discord:guildId");
+    await env.CI_STATUS.delete("discord:channelName");
+  });
+});
+
+describe("webhook workflow_run → Discord CI fail notify integration (Refs #455)", () => {
+  beforeEach(async () => {
+    await env.CI_STATUS.delete(WEBHOOK_URL_KV_KEY);
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  async function postWorkflowRunWebhook(body: string, hub: DurableObjectStub): Promise<void> {
+    const sig = await sign(body, WEBHOOK_SECRET);
+    const ctx = createExecutionContext();
+    await worker.fetch(
+      new Request("http://localhost/webhook", {
+        method: "POST",
+        body,
+        headers: { "X-Hub-Signature-256": sig, "X-GitHub-Event": "workflow_run" },
+      }),
+      minimalEnv(hub),
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+  }
+
+  function makePayload(action: string, conclusion: string | null): string {
+    return JSON.stringify({
+      action,
+      workflow_run: {
+        id: 12345, name: "CI", head_branch: "main",
+        status: action === "completed" ? "completed" : "in_progress",
+        conclusion, html_url: "https://github.com/x/y/actions/runs/12345",
+        actor: { login: "yhonda" },
+        updated_at: "2026-06-30T12:00:00Z",
+        run_started_at: "2026-06-30T11:55:00Z",
+      },
+      repository: { full_name: "x/y" },
+    });
+  }
+
+  it("workflow_run completed + failure → Hub に URL あれば Discord に embed POST", async () => {
+    const webhook = "https://discord.com/api/webhooks/abc/def";
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 204 }));
+    await postWorkflowRunWebhook(makePayload("completed", "failure"), makeMockHubStub(webhook));
+    const discordCalls = fetchSpy.mock.calls.filter((c) => String(c[0]).startsWith(webhook));
+    expect(discordCalls).toHaveLength(1);
+    const sent = JSON.parse(discordCalls[0]![1]!.body as string);
+    expect(sent.embeds[0].title).toBe("❌ CI failed");
+    expect(sent.embeds[0].color).toBe(COLOR_CI_FAILED);
+    expect(sent.embeds[0].url).toBe("https://github.com/x/y/actions/runs/12345");
+    expect(sent.embeds[0].description).toBe("x/y @ main (by yhonda)");
+  });
+
+  it("workflow_run completed + success は Discord を呼ばない", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 204 }));
+    await postWorkflowRunWebhook(
+      makePayload("completed", "success"),
+      makeMockHubStub("https://discord.com/api/webhooks/x/y"),
+    );
+    const discordCalls = fetchSpy.mock.calls.filter((c) =>
+      String(c[0]).startsWith("https://discord.com/api/webhooks/"));
+    expect(discordCalls).toHaveLength(0);
+  });
+
+  it("workflow_run completed + cancelled は Discord を呼ばない (scope 外)", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 204 }));
+    await postWorkflowRunWebhook(
+      makePayload("completed", "cancelled"),
+      makeMockHubStub("https://discord.com/api/webhooks/x/y"),
+    );
+    const discordCalls = fetchSpy.mock.calls.filter((c) =>
+      String(c[0]).startsWith("https://discord.com/api/webhooks/"));
+    expect(discordCalls).toHaveLength(0);
+  });
+
+  it("workflow_run action=requested (まだ完了してない) は Discord を呼ばない", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 204 }));
+    await postWorkflowRunWebhook(
+      makePayload("requested", null),
+      makeMockHubStub("https://discord.com/api/webhooks/x/y"),
+    );
+    const discordCalls = fetchSpy.mock.calls.filter((c) =>
+      String(c[0]).startsWith("https://discord.com/api/webhooks/"));
+    expect(discordCalls).toHaveLength(0);
+  });
+
+  it("Hub に URL 未設定なら failure でも Discord を呼ばない", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 204 }));
+    await postWorkflowRunWebhook(makePayload("completed", "failure"), makeMockHubStub());
+    const discordCalls = fetchSpy.mock.calls.filter((c) =>
+      String(c[0]).startsWith("https://discord.com/api/webhooks/"));
+    expect(discordCalls).toHaveLength(0);
   });
 });
 
