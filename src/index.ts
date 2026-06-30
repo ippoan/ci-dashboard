@@ -109,6 +109,16 @@ export interface Env extends AuthClientWorkerEnv {
    * 場合は inline sample fallback で動く。Refs ippoan/cap-catalog#1 #10。
    */
   CAP_CATALOG_R2?: R2Bucket;
+  /**
+   * Discord PR close 通知の self-heal 用 Bot token (Refs #441 PR3)。
+   * scope: Manage Channels + Manage Webhooks。404 Unknown Webhook を検知
+   * したときに `healChannel()` が新しい channel + webhook を再発行する。
+   * 未設定なら heal 不能 (= 通知は黙って disabled になる) なので **optional**。
+   * 本格運用時は `wrangler.jsonc` の `secrets_store_secrets` に
+   * `binding: "DISCORD_BOT_TOKEN"` を declare し、CF Secrets Store と GCP
+   * Secret Manager の両方に同名 entry を投入する (PR4 で結線予定)。
+   */
+  DISCORD_BOT_TOKEN?: SecretsStoreSecret;
 }
 
 // OAuth flow config — shared between /oauth/login, /oauth/callback, and the
