@@ -195,10 +195,23 @@ function mockHub(kv: KVNamespace): DurableObjectStub {
         return new Response("OK");
       }
 
+      // Auto-tag on PR merge (Refs #460)。test ごとに `autoTagRepos` を
+      // testEnv() 側で set できる shape にしている。default は [] で、
+      // hook が結線されている事を hubCalls の `/auto-tag-repos` GET 出現で
+      // 確認する。dispatchTagRelease 自体は GitHub API を直叩きするため、
+      // test では set 空 → 呼ばれない経路だけを検証する。
+      if (url.pathname === "/auto-tag-repos" && req.method === "GET") {
+        return Response.json(autoTagReposForMockHub);
+      }
+
       return new Response("OK");
     },
   } as unknown as DurableObjectStub;
 }
+
+// テスト中に Hub mock が返す auto-tag 対象 repo の集合。default は空 (= dispatch
+// は発火しない)。dispatch の発火経路は GitHub API mock が要るため別 file で扱う。
+let autoTagReposForMockHub: string[] = [];
 
 function testEnv(): Env {
   const hub = mockHub(env.CI_STATUS);
@@ -726,6 +739,67 @@ describe("POST /webhook", () => {
     );
     await waitOnExecutionContext(ctx);
     expect(await env.CI_STATUS.get("rcache:v1:cmp:ippoan/foo:v1.0.0..main")).toBe("{}");
+  });
+
+  // ───── Auto-tag on PR merge (Refs #460) ─────
+  // hook 結線確認のみ: dispatchTagRelease 自体は GitHub API を直叩きするため
+  // unit test は `test/auto-tag.test.ts` に集約。ここでは「PR merge → default branch
+  // のときに Hub の /auto-tag-repos GET が出る」「それ以外では出ない」だけを確認する。
+  it("merged PR into default branch queries /auto-tag-repos on the hub", async () => {
+    const body = JSON.stringify({
+      action: "closed",
+      pull_request: { number: 50, merged: true, merge_commit_sha: "deadbeef", base: { ref: "main" } },
+      repository: { full_name: "ippoan/foo", default_branch: "main" },
+    });
+    const sig = await sign(body, WEBHOOK_SECRET);
+    const ctx = createExecutionContext();
+    await worker.fetch(
+      new Request("http://localhost/webhook", {
+        method: "POST", body,
+        headers: { "X-Hub-Signature-256": sig, "X-GitHub-Event": "pull_request" },
+      }),
+      testEnv(), ctx,
+    );
+    await waitOnExecutionContext(ctx);
+    expect(hubCalls.filter((c) => c.path === "/auto-tag-repos")).toHaveLength(1);
+  });
+
+  it("closed-but-not-merged PR does NOT query /auto-tag-repos", async () => {
+    const body = JSON.stringify({
+      action: "closed",
+      pull_request: { number: 51, merged: false, merge_commit_sha: null, base: { ref: "main" } },
+      repository: { full_name: "ippoan/foo", default_branch: "main" },
+    });
+    const sig = await sign(body, WEBHOOK_SECRET);
+    const ctx = createExecutionContext();
+    await worker.fetch(
+      new Request("http://localhost/webhook", {
+        method: "POST", body,
+        headers: { "X-Hub-Signature-256": sig, "X-GitHub-Event": "pull_request" },
+      }),
+      testEnv(), ctx,
+    );
+    await waitOnExecutionContext(ctx);
+    expect(hubCalls.filter((c) => c.path === "/auto-tag-repos")).toHaveLength(0);
+  });
+
+  it("PR merged into non-default branch does NOT query /auto-tag-repos", async () => {
+    const body = JSON.stringify({
+      action: "closed",
+      pull_request: { number: 52, merged: true, merge_commit_sha: "cafe", base: { ref: "release/v1" } },
+      repository: { full_name: "ippoan/foo", default_branch: "main" },
+    });
+    const sig = await sign(body, WEBHOOK_SECRET);
+    const ctx = createExecutionContext();
+    await worker.fetch(
+      new Request("http://localhost/webhook", {
+        method: "POST", body,
+        headers: { "X-Hub-Signature-256": sig, "X-GitHub-Event": "pull_request" },
+      }),
+      testEnv(), ctx,
+    );
+    await waitOnExecutionContext(ctx);
+    expect(hubCalls.filter((c) => c.path === "/auto-tag-repos")).toHaveLength(0);
   });
 
   // Regression guard for issue #51: Tag Release directly must NOT fire — the

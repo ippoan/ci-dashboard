@@ -21,6 +21,8 @@ import {
 } from "./release-cache";
 import { applyPullRequestEvent } from "./pr-map-cache";
 import { notifyDiscordPrClosed, notifyDiscordCiFailed } from "./discord";
+import { isAutoTagRepo } from "./auto-tag";
+import { dispatchTagRelease } from "./tag-release";
 import {
   markReleasesIndexStale,
   RELEASES_INDEX_KEY,
@@ -632,6 +634,29 @@ async function processWebhookEvent(
             defaultBranch: payload.repository.default_branch,
           }),
         }));
+      }
+
+      // Auto-tag on merge (Refs #460)。Hub DO に登録された repo であれば、
+      // PR merge 直後に `tag-release.yml` を main 上で workflow_dispatch する。
+      // 失敗 (token 無し / GitHub API non-2xx / Hub 不達) は log のみで pipeline は
+      // 止めない (= Discord 通知と同じ fail-open 方針)。
+      if (await isAutoTagRepo(hub, repo)) {
+        const result = await dispatchTagRelease(env, repo);
+        if (!result.ok) {
+          console.log(JSON.stringify({
+            msg: "auto-tag-dispatch-failed",
+            repo,
+            prNumber: payload.pull_request.number,
+            status: result.status,
+            error: result.error,
+          }));
+        } else {
+          console.log(JSON.stringify({
+            msg: "auto-tag-dispatch-ok",
+            repo,
+            prNumber: payload.pull_request.number,
+          }));
+        }
       }
     }
     return;
