@@ -107,7 +107,7 @@ describe("buildPrClosedEmbed", () => {
     });
     expect(out.embeds).toHaveLength(1);
     const e = out.embeds[0]!;
-    expect(e.title).toBe("#1234 Add fuel surcharge calc engine");
+    expect(e.title).toBe("ohishi-exp/rust-ichibanboshi #1234 Add fuel surcharge calc engine");
     expect(e.url).toBe("https://github.com/ohishi-exp/rust-ichibanboshi/pull/1234");
     expect(e.description).toBe("merged by yhonda-ohishi");
     expect(e.color).toBe(COLOR_MERGED);
@@ -183,7 +183,7 @@ describe("notifyDiscordPrClosed (Hub DO path)", () => {
     expect(init?.method).toBe("POST");
     expect((init?.headers as Record<string, string>)["content-type"]).toBe("application/json");
     const body = JSON.parse(init!.body as string);
-    expect(body.embeds[0].title).toBe("#42 t");
+    expect(body.embeds[0].title).toBe("ippoan/ci-dashboard #42 t");
     expect(body.embeds[0].color).toBe(COLOR_MERGED);
   });
 
@@ -253,7 +253,7 @@ describe("webhook pull_request → Discord notify integration", () => {
     const discordCalls = fetchSpy.mock.calls.filter((c) => String(c[0]).startsWith(webhook));
     expect(discordCalls).toHaveLength(1);
     const sent = JSON.parse(discordCalls[0]![1]!.body as string);
-    expect(sent.embeds[0].title).toBe("#99 Fix something");
+    expect(sent.embeds[0].title).toBe("ippoan/ci-dashboard #99 Fix something");
     expect(sent.embeds[0].description).toBe("merged by yhonda");
     expect(sent.embeds[0].color).toBe(COLOR_MERGED);
   });
@@ -336,7 +336,7 @@ describe("webhook pull_request → Discord notify integration", () => {
       String(c[0]).startsWith("https://discord.com/api/webhooks/"));
     expect(discordCalls).toHaveLength(1);
     const sent = JSON.parse(discordCalls[0]![1]!.body as string);
-    expect(sent.embeds[0].title).toBe("#55 PR #55");
+    expect(sent.embeds[0].title).toBe("ippoan/ci-dashboard #55 PR #55");
     expect(sent.embeds[0].url).toBe("https://github.com/ippoan/ci-dashboard/pull/55");
     expect(sent.embeds[0].description).toBe("closed by unknown");
   });
@@ -557,7 +557,7 @@ describe("buildCiFailedEmbed (Refs #455)", () => {
     });
     expect(out.embeds).toHaveLength(1);
     const e = out.embeds[0]!;
-    expect(e.title).toBe("❌ CI failed");
+    expect(e.title).toBe("ippoan/ci-dashboard ❌ CI failed");
     expect(e.url).toBe("https://github.com/ippoan/ci-dashboard/actions/runs/12345");
     expect(e.description).toBe("ippoan/ci-dashboard @ main (by yhonda-ohishi)");
     expect(e.color).toBe(COLOR_CI_FAILED);
@@ -594,7 +594,7 @@ describe("notifyDiscordCiFailed (Refs #455)", () => {
     const [calledUrl, init] = fetchSpy.mock.calls[0]!;
     expect(calledUrl).toBe(webhook);
     const body = JSON.parse(init!.body as string);
-    expect(body.embeds[0].title).toBe("❌ CI failed");
+    expect(body.embeds[0].title).toBe("ippoan/ci-dashboard ❌ CI failed");
     expect(body.embeds[0].color).toBe(COLOR_CI_FAILED);
   });
 
@@ -697,7 +697,7 @@ describe("webhook workflow_run → Discord CI fail notify integration (Refs #455
     const discordCalls = fetchSpy.mock.calls.filter((c) => String(c[0]).startsWith(webhook));
     expect(discordCalls).toHaveLength(1);
     const sent = JSON.parse(discordCalls[0]![1]!.body as string);
-    expect(sent.embeds[0].title).toBe("❌ CI failed");
+    expect(sent.embeds[0].title).toBe("x/y ❌ CI failed");
     expect(sent.embeds[0].color).toBe(COLOR_CI_FAILED);
     expect(sent.embeds[0].url).toBe("https://github.com/x/y/actions/runs/12345");
     expect(sent.embeds[0].description).toBe("x/y @ main (by yhonda)");
