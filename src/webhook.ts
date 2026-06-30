@@ -535,13 +535,13 @@ async function processWebhookEvent(
     // 不在は applyPullRequestEvent 側が no-op にする。
     await applyPullRequestEvent(env.CI_STATUS, payload);
 
-    // Discord PR close 通知 (Refs #441 PR1)。closed action のみ —
+    // Discord PR close 通知 (Refs #441 PR1 + PR2)。closed action のみ —
     // merged / 単純 close を 1 件の embed で出し分ける。webhook URL は
-    // KV `discord:prCloseWebhookUrl` から読む (未設定なら no-op)。送信
-    // 失敗は log のみ、本 pipeline は止めない。PR3–4 で Secrets Store +
-    // 404 lazy heal に拡張予定。
+    // Hub DO storage から読む (PR2 で KV → DO に SoT 移行、legacy KV は
+    // hub 側で lazy seed)。未設定なら no-op。送信失敗は log のみで本
+    // pipeline は止めない。PR3–4 で Bot token + 404 lazy heal に拡張予定。
     if (payload.action === "closed") {
-      await notifyDiscordPrClosed(env.CI_STATUS, {
+      await notifyDiscordPrClosed(hub, {
         repo,
         number: payload.pull_request.number,
         title: payload.pull_request.title ?? `PR #${payload.pull_request.number}`,

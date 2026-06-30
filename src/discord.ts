@@ -1,18 +1,26 @@
-// Discord PR close notification (Refs #441 PR1).
+// Discord PR close notification (Refs #441 PR1 + PR2).
 //
-// 最小実装: webhook URL を CI_STATUS KV (`discord:prCloseWebhookUrl`) に置き、
-// pull_request の `closed` action で 1 件の embed を送る。Feature B
-// (Bot token + self-heal channel) は PR3–5 で導入する。404 / 429 などの
-// failure handling も PR4 (lazy heal) で本格対応。本 PR1 は send 結果を log
-// に残すだけで、webhook pipeline の失敗を引き起こさない。
+// PR1 の最小実装: webhook URL を CI_STATUS KV (`discord:prCloseWebhookUrl`)
+// に置き、pull_request の `closed` action で 1 件の embed を送る。
 //
-// Operator setup (one-time、PR1 段階の手動配線):
-//   wrangler kv key put --remote \
-//     --namespace-id=ffb983ee8324499f915b11a0b8cf787b \
-//     'discord:prCloseWebhookUrl' '<discord-webhook-url>'
+// PR2 (本 PR): URL の SoT を `CIDashboardHub` DO storage に移した。理由は
+// PR3 以降の self-heal が「死んだ URL → 新 URL」を書き換えた直後に同 DO で
+// 強整合 read する必要があるため (KV global propagation は最大 ~60s で
+// 読み手が古い死 URL を引き続ける窓ができる)。
 //
-// PR2 で Hub DO storage (read-after-write 強整合) に移行するため、本 KV key
-// は移行後 deprecate 予定。
+// KV (`discord:prCloseWebhookUrl`) は **legacy seed** として残す: 旧 PR1
+// で operator が `wrangler kv key put` した値を Hub DO の `getDiscord...`
+// が初回 read で吸い上げ → DO に書き写し → 以後は DO のみが読まれる
+// (releases index v3 → v4 migration と同じ pattern)。
+//
+// 値の更新経路:
+//   - 旧 (PR1): operator が `wrangler kv key put` で KV に書く
+//   - 新 (PR2): operator は KV に書いて 1 回 deploy する (= 初回 send で
+//     Hub DO に migrate)。以降の rotate は Hub DO `PUT /discord-webhook-url`
+//     経由 (= PR3 の healChannel() も同 endpoint を叩く)。
+//
+// Failure handling (4xx / fetch error) は send 結果を log に残すだけで
+// webhook pipeline は止めない。404 lazy heal は PR4 で結線する。
 
 export const WEBHOOK_URL_KV_KEY = "discord:prCloseWebhookUrl";
 
@@ -88,18 +96,29 @@ export async function postDiscordWebhook(
   }
 }
 
-/** KV から webhook URL を読み出す。未設定 (= 通知 disabled) なら null。 */
-export async function readPrCloseWebhookUrl(kv: KVNamespace): Promise<string | null> {
-  return await kv.get(WEBHOOK_URL_KV_KEY);
+/** Hub DO から webhook URL を読み出す (Refs #441 PR2)。Hub 側で legacy KV
+ *  からの lazy migration を行うので、本関数は単純な GET 1 本で OK。
+ *  Hub 到達不能 / 非 OK は null (= 通知 disabled 扱い) で fail-open。 */
+export async function readPrCloseWebhookUrl(
+  hub: DurableObjectStub,
+): Promise<string | null> {
+  try {
+    const res = await hub.fetch(new Request("http://hub/discord-webhook-url"));
+    if (!res.ok) return null;
+    const text = await res.text();
+    return text ? text : null;
+  } catch {
+    return null;
+  }
 }
 
 /** PR close 通知のエントリポイント。URL 未設定なら no-op。送信失敗時は
  *  log を出すのみで、webhook pipeline は止めない。 */
 export async function notifyDiscordPrClosed(
-  kv: KVNamespace,
+  hub: DurableObjectStub,
   input: PrClosedEmbedInput,
 ): Promise<void> {
-  const url = await readPrCloseWebhookUrl(kv);
+  const url = await readPrCloseWebhookUrl(hub);
   if (!url) return;
   const payload = buildPrClosedEmbed(input);
   const status = await postDiscordWebhook(url, payload);
