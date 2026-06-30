@@ -20,6 +20,7 @@ import {
   invalidateRepoCompare,
 } from "./release-cache";
 import { applyPullRequestEvent } from "./pr-map-cache";
+import { notifyDiscordPrClosed } from "./discord";
 import {
   markReleasesIndexStale,
   RELEASES_INDEX_KEY,
@@ -224,6 +225,9 @@ interface PullRequestPayload {
     full_name: string;
     default_branch: string;
   };
+  // Discord PR close 通知 (Refs #441 PR1) の `<verb> by <login>` description 用。
+  // GitHub の実配信には常に載るが、最小 payload (テスト fixture) で省略可。
+  sender?: { login: string };
 }
 
 export interface CIStatus {
@@ -530,6 +534,24 @@ async function processWebhookEvent(
     // draft flip も chip の表示内容を変えるため。対象外 action や cache
     // 不在は applyPullRequestEvent 側が no-op にする。
     await applyPullRequestEvent(env.CI_STATUS, payload);
+
+    // Discord PR close 通知 (Refs #441 PR1)。closed action のみ —
+    // merged / 単純 close を 1 件の embed で出し分ける。webhook URL は
+    // KV `discord:prCloseWebhookUrl` から読む (未設定なら no-op)。送信
+    // 失敗は log のみ、本 pipeline は止めない。PR3–4 で Secrets Store +
+    // 404 lazy heal に拡張予定。
+    if (payload.action === "closed") {
+      await notifyDiscordPrClosed(env.CI_STATUS, {
+        repo,
+        number: payload.pull_request.number,
+        title: payload.pull_request.title ?? `PR #${payload.pull_request.number}`,
+        url: payload.pull_request.html_url
+          ?? `https://github.com/${repo}/pull/${payload.pull_request.number}`,
+        merged: payload.pull_request.merged,
+        sender: payload.sender?.login ?? "unknown",
+        closedAt: payload.pull_request.updated_at ?? new Date().toISOString(),
+      });
+    }
 
     const isMergeToDefault =
       payload.action === "closed" &&
