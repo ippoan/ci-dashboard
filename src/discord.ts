@@ -79,7 +79,7 @@ export function buildPrClosedEmbed(input: PrClosedEmbedInput): DiscordWebhookPay
   const color = input.merged ? COLOR_MERGED : COLOR_CLOSED;
   return {
     embeds: [{
-      title: `#${input.number} ${input.title}`,
+      title: `${input.repo} #${input.number} ${input.title}`,
       url: input.url,
       description: `${state} by ${input.sender}`,
       color,
@@ -287,7 +287,7 @@ export interface CiFailedEmbedInput {
 export function buildCiFailedEmbed(input: CiFailedEmbedInput): DiscordWebhookPayload {
   return {
     embeds: [{
-      title: `❌ ${input.workflow} failed`,
+      title: `${input.repo} ❌ ${input.workflow} failed`,
       url: input.runUrl,
       description: `${input.repo} @ ${input.branch} (by ${input.actor})`,
       color: COLOR_CI_FAILED,
