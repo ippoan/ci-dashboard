@@ -535,13 +535,18 @@ async function processWebhookEvent(
     // 不在は applyPullRequestEvent 側が no-op にする。
     await applyPullRequestEvent(env.CI_STATUS, payload);
 
-    // Discord PR close 通知 (Refs #441 PR1 + PR2)。closed action のみ —
-    // merged / 単純 close を 1 件の embed で出し分ける。webhook URL は
-    // Hub DO storage から読む (PR2 で KV → DO に SoT 移行、legacy KV は
-    // hub 側で lazy seed)。未設定なら no-op。送信失敗は log のみで本
-    // pipeline は止めない。PR3–4 で Bot token + 404 lazy heal に拡張予定。
+    // Discord PR close 通知 (Refs #441 PR1 + PR2 + PR4)。closed action のみ。
+    // PR4 で 404 lazy heal を結線: `env.DISCORD_BOT_TOKEN` (Secrets Store
+    // binding、optional) + KV `discord:guildId` / `discord:channelName` が
+    // 揃っていれば、Discord webhook が 404 (= channel 削除) を返した時に
+    // healChannel が新 channel + webhook を再発行 → URL rotate → retry。
+    // operator が token + KV settings を投入するまでは null を渡し、heal は
+    // skip される (= PR3 以前と同じく log + 諦め)。
     if (payload.action === "closed") {
-      await notifyDiscordPrClosed(hub, {
+      const botToken = env.DISCORD_BOT_TOKEN
+        ? await env.DISCORD_BOT_TOKEN.get().catch(() => null)
+        : null;
+      await notifyDiscordPrClosed(hub, env.CI_STATUS, botToken, {
         repo,
         number: payload.pull_request.number,
         title: payload.pull_request.title ?? `PR #${payload.pull_request.number}`,

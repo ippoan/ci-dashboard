@@ -22,13 +22,22 @@ import {
   type ReleasesIndexBlob,
 } from "./releases-index-cache";
 import type { IssueWebhookPayload } from "./issue-cache";
-import { WEBHOOK_URL_KV_KEY as DISCORD_WEBHOOK_URL_KV_KEY } from "./discord";
+import {
+  WEBHOOK_URL_KV_KEY as DISCORD_WEBHOOK_URL_KV_KEY,
+  type DiscordHealRecord,
+} from "./discord";
 
 // Discord PR close 通知用 webhook URL の DO storage key (Refs #441 PR2)。
 // SoT は本 DO の `this.ctx.storage`。旧 PR1 で operator が KV
 // (`discord:prCloseWebhookUrl`) に投入した値は、初回 read で seed として
 // 吸い上げて DO に書き写す (releases blob の v3 → v4 migration と同 pattern)。
 const DISCORD_WEBHOOK_URL_DO_KEY = "discord:prCloseWebhookUrl";
+
+// Discord self-heal の履歴 (Refs #441 PR4)。最新が先頭、CAP 件で trim。
+// dashboard UI (PR5) が `discord-heal` envelope の live update に加え、
+// page load 時の bootstrap で `GET /discord-heal-records` で全件取得する。
+const DISCORD_HEAL_RECORDS_DO_KEY = "discord:healRecords";
+const DISCORD_HEAL_RECORDS_CAP = 50;
 
 // shape refresh の結果型 (ci-shape-refresh.ts と同形だが、循環 import を避けるため
 // 本ファイル内に再宣言する)。
@@ -52,7 +61,10 @@ type WsEnvelope =
   // /releases page の live reload trigger (Refs #327)。index blob の refresh
   // 完了後に webhook.ts (queue consumer) が /releases-updated 経由で broadcast
   // する — 「集計完了後」なので reload 直後は必ず fresh blob を読む。
-  | { type: "releases-updated"; data: { repo: string } };
+  | { type: "releases-updated"; data: { repo: string } }
+  // Discord self-heal イベント (Refs #441 PR4)。404 で channel が消えた事を
+  // 検知 → 再作成 → URL rotate した時に dashboard UI (PR5) に live で通知。
+  | { type: "discord-heal"; data: DiscordHealRecord };
 
 const ALERT_KEY_PREFIX = "release-alert:";
 const ALERT_TTL_SECONDS = 7 * 86400;
@@ -203,6 +215,22 @@ export class CIDashboardHub extends DurableObject<Env> {
       return;
     }
     await this.ctx.storage.put(DISCORD_WEBHOOK_URL_DO_KEY, url);
+  }
+
+  /** Discord self-heal の record を 1 件 append + CAP 件で trim (Refs #441 PR4)。
+   *  storage put と broadcast を 1 つの DO request 内で原子的に行う。 */
+  private async appendDiscordHealRecord(rec: DiscordHealRecord): Promise<void> {
+    const existing = await this.ctx.storage.get<DiscordHealRecord[]>(
+      DISCORD_HEAL_RECORDS_DO_KEY,
+    ) ?? [];
+    const next = [rec, ...existing].slice(0, DISCORD_HEAL_RECORDS_CAP);
+    await this.ctx.storage.put(DISCORD_HEAL_RECORDS_DO_KEY, next);
+  }
+
+  /** Discord self-heal の record を全件返す (Refs #441 PR4)。dashboard UI
+   *  (PR5) が page load 時に bootstrap で叩く。 */
+  private async listDiscordHealRecords(): Promise<DiscordHealRecord[]> {
+    return await this.ctx.storage.get<DiscordHealRecord[]>(DISCORD_HEAL_RECORDS_DO_KEY) ?? [];
   }
 
   /** apply-close/issue/refs が使う BlobStore adapter。direct DO storage IO で
@@ -593,15 +621,33 @@ export class CIDashboardHub extends DurableObject<Env> {
       return new Response(stored ?? "", { status: 200 });
     }
 
-    // Discord PR close 通知用 webhook URL の write (Refs #441 PR2、PR3 の
-    // healChannel から再利用)。body は `{ url: string | null }`。本 endpoint
-    // 自体は無認証 — Worker 側で gate するか、PR3 で Bot token と一緒に保護
-    // する。本 PR2 段階では Hub と Worker の信頼境界 (= 同 isolate からの
-    // service binding 内通信) に閉じている前提。
+    // Discord PR close 通知用 webhook URL の write (Refs #441 PR2、PR4 の
+    // 404 lazy heal 経路から再利用)。body は `{ url: string | null }`。本
+    // endpoint 自体は無認証 — Worker 側で gate するか、PR3 で Bot token と
+    // 一緒に保護する。本 PR2 段階では Hub と Worker の信頼境界 (= 同 isolate
+    // からの service binding 内通信) に閉じている前提。
     if (url.pathname === "/discord-webhook-url" && request.method === "PUT") {
       const { url: nextUrl } = await request.json<{ url: string | null }>();
       await this.putDiscordPrCloseWebhookUrl(nextUrl ?? null);
       return new Response("OK");
+    }
+
+    // Discord self-heal record の append (Refs #441 PR4)。webhook.ts (queue
+    // consumer) の `notifyDiscordPrClosed` が 404 → healChannel 後に叩く。
+    // body は token mask 済みの `DiscordHealRecord`。DO 内で append + WS
+    // broadcast を原子的に行う (= dashboard UI の live update 一貫性)。
+    if (url.pathname === "/discord-heal-record" && request.method === "POST") {
+      const rec = await request.json<DiscordHealRecord>();
+      await this.appendDiscordHealRecord(rec);
+      this.broadcastEnvelope({ type: "discord-heal", data: rec });
+      return new Response("OK");
+    }
+
+    // Discord self-heal record の全件 read (Refs #441 PR4)。dashboard UI
+    // (PR5) が page load 時の bootstrap で叩く。WS で受ける live event とは
+    // 別経路 (cold start 時に過去履歴を出すため)。
+    if (url.pathname === "/discord-heal-records" && request.method === "GET") {
+      return Response.json(await this.listDiscordHealRecords());
     }
 
     // /issues page の live reload trigger (Refs #321)。KV upsert 済みの issue
