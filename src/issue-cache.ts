@@ -226,6 +226,10 @@ export interface IssueWebhookPayload {
     created_at: string;
     updated_at: string;
     html_url: string;
+    // GitHub の `issues` webhook payload には body が常に載るが、最小 fixture
+    // (test) で省略可能なよう optional。Refs #442 PR2 で /issues SSR が
+    // progress-checklist 描画に使う。
+    body?: string | null;
   };
   repository: { full_name: string };
 }
@@ -243,6 +247,7 @@ export function webhookIssueToOrgIssue(p: IssueWebhookPayload): OrgIssue {
     created_at: p.issue.created_at,
     updated_at: p.issue.updated_at,
     url: p.issue.html_url,
+    body: p.issue.body ?? null,
   };
 }
 

@@ -303,7 +303,23 @@ describe("issue-cache", () => {
         created_at: "2026-05-27T01:00:00Z",
         updated_at: "2026-05-27T02:00:00Z",
         url: "https://github.com/x/y/issues/7",
+        body: null,
       });
+    });
+
+    it("body あり webhook payload を body 込みで正規化 (Refs #442 PR2)", () => {
+      const body = "## 📋 進捗\n<!-- progress-checklist:7 -->\n- [x] done\n<!-- /progress-checklist:7 -->";
+      const issue = webhookIssueToOrgIssue({
+        action: "edited",
+        issue: {
+          number: 7, title: "x", state: "open", user: { login: "a" },
+          labels: [], assignees: [], comments: 0,
+          created_at: "t", updated_at: "t", html_url: "u",
+          body,
+        },
+        repository: { full_name: "x/y" },
+      });
+      expect(issue.body).toBe(body);
     });
 
     it("user が null (deleted account) でも author=空文字で受ける", () => {

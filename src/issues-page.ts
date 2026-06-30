@@ -26,6 +26,7 @@ import {
 import { readPrMapCache } from "./pr-map-cache";
 import { parseTaglessRepos } from "./tagless-repos";
 import { MAIN_ORGS as ORGS, YHONDA_REPOS } from "./scanned-orgs";
+import { parseProgressChecklist } from "./progress-checklist";
 
 // Orgs scanned for Projects v2 (used by `fetchProjectIssueMap`). yhonda-ohishi
 // is included so the user's claude-tooling repos can still be pinned to a
@@ -523,6 +524,58 @@ function renderHtml(
        the blue project-chip's "belongs to a board" affordance. Draft PRs
        desaturate to gray so the reader can tell at a glance whether the PR
        is review-ready. */
+    /* progress-checklist (Refs #442 PR2). アンカー有 issue の本文から
+       parseProgressChecklist で抽出した read-only checklist。チェックは
+       押せない (= CCoW セッションが正本、書き戻し UI は作らない方針)。 */
+    .progress-checklist {
+      margin-top: 6px;
+      font-size: 11px;
+      color: #a5b4c3;
+    }
+    .progress-checklist > summary {
+      cursor: pointer;
+      list-style: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 2px 8px;
+      border: 1px solid #30363d;
+      border-radius: 10px;
+      background: #1c2433;
+      user-select: none;
+    }
+    .progress-checklist > summary::-webkit-details-marker { display: none; }
+    .progress-checklist > summary:hover { background: #232c3d; }
+    .pc-bar {
+      display: inline-block;
+      width: 80px;
+      height: 6px;
+      background: #30363d;
+      border-radius: 3px;
+      overflow: hidden;
+      vertical-align: middle;
+    }
+    .pc-bar-fill {
+      display: block;
+      height: 100%;
+      background: linear-gradient(90deg, #2ea043, #7ee787);
+    }
+    .pc-empty { color: #6e7681; font-style: italic; }
+    .pc-tasks {
+      list-style: none;
+      margin: 6px 0 0 6px;
+      padding: 0;
+    }
+    .pc-tasks li {
+      padding: 1px 0;
+      line-height: 1.5;
+    }
+    .pc-tasks li.done { color: #6e7681; text-decoration: line-through; }
+    .pc-tasks li input[type="checkbox"] {
+      vertical-align: middle;
+      margin-right: 4px;
+      cursor: not-allowed;
+    }
     .pr-chips { margin-top: 4px; }
     .pr-chip {
       display: inline-block;
@@ -835,11 +888,36 @@ function renderRow(
   const trClass = isFixtureIssue(i) ? ' class="fixture"' : "";
   return `<tr${trClass} data-ik="${escapeHtml(`${i.repo}#${i.number}`)}">
     <td class="num"><a href="${escapeHtml(i.url)}" target="_blank" rel="noopener">#${i.number}</a></td>
-    <td class="title">${renderFixtureBadge(i)}<a href="${escapeHtml(i.url)}" target="_blank" rel="noopener">${escapeHtml(i.title)}</a>${labelChips}${renderPrChips(i, prMap)}</td>
+    <td class="title">${renderFixtureBadge(i)}<a href="${escapeHtml(i.url)}" target="_blank" rel="noopener">${escapeHtml(i.title)}</a>${labelChips}${renderPrChips(i, prMap)}${renderProgressChecklist(i)}</td>
     <td class="author">@${escapeHtml(i.author)}</td>
     <td class="updated">${escapeHtml(i.updated_at.slice(0, 10))}</td>
     ${renderLaunchCell(i)}
   </tr>`;
+}
+
+/** issue 本文の progress-checklist 節を read-only で描画 (Refs #442 PR2、
+ *  規約正本 ippoan/claude-skills#82)。アンカー (`<!-- progress-checklist:N -->`
+ *  〜 `<!-- /progress-checklist:N -->`) が無い、または body 未取得の issue
+ *  は何も描画しない。完了率の進捗バーは常時表示、checklist 本体は
+ *  `<details>` で折り畳む。チェックは disabled — ここから書き戻しはしない
+ *  (CCoW の次セッションが正本)。 */
+export function renderProgressChecklist(i: OrgIssue): string {
+  if (!i.body) return "";
+  const parsed = parseProgressChecklist(i.body, i.number);
+  if (!parsed) return "";
+  const { tasks, done, total } = parsed;
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+  const items = tasks.map((t) => {
+    const checked = t.checked ? " checked" : "";
+    const liClass = t.checked ? " class=\"done\"" : "";
+    const indent = `style="margin-left:${t.depth * 16}px"`;
+    return `<li${liClass} ${indent}><input type="checkbox" disabled${checked}> ${escapeHtml(t.label)}</li>`;
+  }).join("");
+  const summary = total > 0
+    ? `<summary>進捗 ${done}/${total}<span class="pc-bar"><span class="pc-bar-fill" style="width:${pct}%"></span></span></summary>`
+    : `<summary>進捗 0/0 <span class="pc-empty">(未着手)</span></summary>`;
+  const body = total > 0 ? `<ul class="pc-tasks">${items}</ul>` : "";
+  return `<details class="progress-checklist">${summary}${body}</details>`;
 }
 
 function renderPrChips(
