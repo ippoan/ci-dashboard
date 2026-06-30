@@ -359,6 +359,21 @@ app.get("/snapshot", async (c) => {
   });
 });
 
+// Discord self-heal の履歴 (Refs #441 PR5)。dashboard UI が page load の
+// bootstrap で叩く。WS で受ける `{type: "discord-heal"}` の live update とは
+// 別経路 (cold start で過去履歴を出すため)。Hub `GET /discord-heal-records`
+// をそのまま転送する thin proxy。
+app.get("/api/discord-heals", async (c) => {
+  const res = await getHub(c.env).fetch(
+    new Request("http://hub/discord-heal-records"),
+  );
+  const body = await res.text();
+  return new Response(body, {
+    status: res.status,
+    headers: { "Content-Type": "application/json" },
+  });
+});
+
 // Tag release
 app.post("/api/tag-release", (c) => handleTagRelease(c.req.raw, c.env));
 // Release Wave ページ (strict CSP / JS 無効) からの form-POST 用。dispatch 後

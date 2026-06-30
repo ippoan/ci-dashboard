@@ -299,6 +299,73 @@ export function handleDashboard(): Response {
       cursor: pointer;
     }
     .refresh-btn:hover { background: #388bfd; }
+    /* Discord self-heal 履歴 (Refs #441 PR5)。404 で channel が消えた事を
+       検知して再作成した時の履歴を表示する。直近 5 件まで visible、それ以上は
+       details の中に畳む。"new" class が付いた要素は 5 秒間ハイライト
+       (WS で push されたばかりの record だと operator が気付けるように)。 */
+    .discord-heals {
+      margin-bottom: 16px;
+    }
+    .discord-heals:empty { display: none; }
+    .discord-heals h3 {
+      font-size: 12px;
+      font-weight: 600;
+      color: #8b949e;
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .discord-heal-item {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      padding: 8px 12px;
+      margin-bottom: 4px;
+      font-size: 12px;
+      color: #c9d1d9;
+      display: flex;
+      gap: 12px;
+      align-items: baseline;
+      flex-wrap: wrap;
+    }
+    .discord-heal-item.new {
+      border-color: #f0c674;
+      background: #2a1f10;
+      animation: heal-flash 5s ease-out forwards;
+    }
+    @keyframes heal-flash {
+      0%   { background: #4a350b; }
+      100% { background: #161b22; }
+    }
+    .discord-heal-item .ts {
+      color: #8b949e;
+      font-variant-numeric: tabular-nums;
+      flex-shrink: 0;
+    }
+    .discord-heal-item .channel {
+      color: #d2a8ff;
+      font-weight: 600;
+    }
+    .discord-heal-item .reason {
+      color: #8b949e;
+    }
+    .discord-heal-item code {
+      background: #0d1117;
+      border: 1px solid #30363d;
+      border-radius: 3px;
+      padding: 1px 6px;
+      font-size: 11px;
+      color: #a5d6ff;
+    }
+    .discord-heal-more {
+      margin-top: 4px;
+    }
+    .discord-heal-more summary {
+      cursor: pointer;
+      color: #8b949e;
+      font-size: 11px;
+      padding: 4px 0;
+    }
   </style>
 </head>
 <body>
@@ -308,6 +375,7 @@ export function handleDashboard(): Response {
     <a class="refresh-btn" href="/" title="ページを再読み込みして最新状態に更新する (ブラウザキャッシュ無視 = ハードリセット)">🔄 更新（ハードリセット）</a>
   </div>
   <div id="release-banner-list" class="release-banners"></div>
+  <div id="discord-heal-list" class="discord-heals"></div>
   <div class="status-bar">
     WS: <span id="sse-status" class="disconnected">connecting...</span>
     &middot; Last update: <span id="last-update">-</span>
@@ -329,9 +397,16 @@ export function handleDashboard(): Response {
     const sseStatus = document.getElementById("sse-status");
     const lastUpdate = document.getElementById("last-update");
     const bannerList = document.getElementById("release-banner-list");
+    const healList = document.getElementById("discord-heal-list");
 
     let lastStatuses = [];
     let activeFilter = null;
+    // 直近の Discord self-heal record (最新が先頭)。bootstrap は
+    // /api/discord-heals、live update は WS envelope { type: "discord-heal" }。
+    // 上限 50 件 (Hub DO の CAP に合わせる)。
+    let healRecords = [];
+    const HEAL_DISPLAY_VISIBLE = 5;
+    const HEAL_CAP = 50;
 
     function escapeHtml(s) {
       return String(s)
@@ -378,6 +453,63 @@ export function handleDashboard(): Response {
           + n + ' open related issue' + (n === 1 ? '' : 's') + ' \\u2192 review</a>'
           + '</div>';
       }).join("");
+    }
+
+    /** Discord self-heal 1 件分の HTML を組み立てる (Refs #441 PR5)。
+     *  webhook URL は token を mask 済みで record に入っている。 */
+    function renderHealItem(rec, isNew) {
+      const ts = new Date(rec.at).toLocaleTimeString();
+      const cls = isNew ? "discord-heal-item new" : "discord-heal-item";
+      return '<div class="' + cls + '">'
+        + '<span class="ts">' + escapeHtml(ts) + '</span>'
+        + '<span>\\uD83E\\uDE7A heal</span>'
+        + '<span class="channel">#' + escapeHtml(rec.channelName) + '</span>'
+        + '<span class="reason">' + escapeHtml(rec.reason) + '</span>'
+        + '<code>' + escapeHtml(rec.newUrl) + '</code>'
+        + '</div>';
+    }
+
+    /** healList を healRecords から描画。先頭 5 件は常時表示、それ以上は
+     *  details の中に畳む。リスト 0 件なら空 (.discord-heals:empty で
+     *  非表示)。newCount = 直近 push されたばかりで "new" class を当てる件数。 */
+    function renderHeals(newCount) {
+      if (!healRecords || healRecords.length === 0) {
+        healList.innerHTML = "";
+        return;
+      }
+      const newN = typeof newCount === "number" ? newCount : 0;
+      const visible = healRecords.slice(0, HEAL_DISPLAY_VISIBLE);
+      const overflow = healRecords.slice(HEAL_DISPLAY_VISIBLE);
+      const visibleHtml = visible.map((rec, i) => renderHealItem(rec, i < newN)).join("");
+      const overflowHtml = overflow.length > 0
+        ? '<details class="discord-heal-more"><summary>+ ' + overflow.length + ' more</summary>'
+          + overflow.map((rec) => renderHealItem(rec, false)).join("")
+          + '</details>'
+        : "";
+      healList.innerHTML = '<h3>\\uD83E\\uDE7A Discord self-heal</h3>'
+        + visibleHtml + overflowHtml;
+    }
+
+    /** /api/discord-heals から過去履歴を取得して描画 (page load の bootstrap)。
+     *  失敗は静かに無視 (heal は本機能ではなく観測 — UI 表示が遅れても害なし)。 */
+    async function loadHeals() {
+      try {
+        const res = await fetch("/api/discord-heals");
+        if (!res.ok) return;
+        const data = await res.json();
+        if (Array.isArray(data)) {
+          healRecords = data.slice(0, HEAL_CAP);
+          renderHeals(0);
+        }
+      } catch { /* ignore */ }
+    }
+
+    /** WS で push された新 record を先頭に挿入して再描画。直近 1 件を "new"
+     *  highlight する。 */
+    function onHealEvent(rec) {
+      if (!rec || typeof rec !== "object") return;
+      healRecords = [rec, ...healRecords].slice(0, HEAL_CAP);
+      renderHeals(1);
     }
 
     function badgeClass(status, conclusion) {
@@ -547,6 +679,8 @@ export function handleDashboard(): Response {
         // Catch up via 1-shot snapshot. WS broadcasts handle subsequent
         // updates — no setInterval polling.
         loadSnapshot();
+        // Discord self-heal の履歴も bootstrap (Refs #441 PR5)。
+        loadHeals();
       };
       ws.onmessage = (e) => {
         if (e.data === "pong") return;
@@ -560,6 +694,13 @@ export function handleDashboard(): Response {
           }
           if (msg && typeof msg === "object" && msg.type === "release-alerts") {
             renderBanners(msg.data);
+            lastUpdate.textContent = new Date().toLocaleTimeString();
+            return;
+          }
+          // Discord self-heal event (Refs #441 PR5)。404 で channel が消えた事を
+          // Hub DO が検知 → 再作成 → URL rotate した瞬間に push される。
+          if (msg && typeof msg === "object" && msg.type === "discord-heal") {
+            onHealEvent(msg.data);
             lastUpdate.textContent = new Date().toLocaleTimeString();
             return;
           }
