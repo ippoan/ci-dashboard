@@ -431,6 +431,10 @@ export interface OrgIssue {
   created_at: string;
   updated_at: string;
   url: string;
+  /** issue 本文 (markdown 生文字列、null = 本文無し)。/issues SSR の
+   *  progress-checklist 描画 (Refs #442 PR2) で参照する。pre-migration な
+   *  既存 KV cache は undefined のことがあるため optional。 */
+  body?: string | null;
 }
 
 export interface FetchOrgIssuesParams {
@@ -504,6 +508,7 @@ export async function fetchOrgIssues(
       created_at: i.created_at,
       updated_at: i.updated_at,
       url: i.html_url,
+      body: i.body ?? null,
     }));
 
   return {
@@ -532,6 +537,9 @@ interface SearchIssueItem {
   html_url: string;
   repository_url: string;
   pull_request?: unknown;
+  /** GitHub Search API は body をデフォルトで返す。Refs #442 PR2: /issues
+   *  カードの progress-checklist 描画用に OrgIssue に保管する。 */
+  body?: string | null;
 }
 
 interface Issue {
