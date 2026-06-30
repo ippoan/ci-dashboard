@@ -22,6 +22,13 @@ import {
   type ReleasesIndexBlob,
 } from "./releases-index-cache";
 import type { IssueWebhookPayload } from "./issue-cache";
+import { WEBHOOK_URL_KV_KEY as DISCORD_WEBHOOK_URL_KV_KEY } from "./discord";
+
+// Discord PR close 通知用 webhook URL の DO storage key (Refs #441 PR2)。
+// SoT は本 DO の `this.ctx.storage`。旧 PR1 で operator が KV
+// (`discord:prCloseWebhookUrl`) に投入した値は、初回 read で seed として
+// 吸い上げて DO に書き写す (releases blob の v3 → v4 migration と同 pattern)。
+const DISCORD_WEBHOOK_URL_DO_KEY = "discord:prCloseWebhookUrl";
 
 // shape refresh の結果型 (ci-shape-refresh.ts と同形だが、循環 import を避けるため
 // 本ファイル内に再宣言する)。
@@ -172,6 +179,30 @@ export class CIDashboardHub extends DurableObject<Env> {
         await this.env.WEBHOOK_QUEUE.send({ kind: "releases-index-kv-backup" });
       } catch { /* fail-open */ }
     }
+  }
+
+  /** Discord PR close 通知用 webhook URL の getter (Refs #441 PR2)。
+   *  DO storage に無ければ legacy KV (PR1 経路) を 1 回だけ seed として読み、
+   *  DO に書き写してから返す。以後 KV は触らない。 */
+  private async getDiscordPrCloseWebhookUrl(): Promise<string | null> {
+    const stored = await this.ctx.storage.get<string>(DISCORD_WEBHOOK_URL_DO_KEY);
+    if (typeof stored === "string" && stored.length > 0) return stored;
+    const legacy = await this.env.CI_STATUS.get(DISCORD_WEBHOOK_URL_KV_KEY);
+    if (legacy) {
+      await this.ctx.storage.put(DISCORD_WEBHOOK_URL_DO_KEY, legacy);
+      return legacy;
+    }
+    return null;
+  }
+
+  /** Discord webhook URL を DO storage に書き込む (Refs #441 PR2 / PR3 で
+   *  healChannel が叩く)。空文字 / null を渡すと delete (= 通知 disabled)。 */
+  private async putDiscordPrCloseWebhookUrl(url: string | null): Promise<void> {
+    if (!url) {
+      await this.ctx.storage.delete(DISCORD_WEBHOOK_URL_DO_KEY);
+      return;
+    }
+    await this.ctx.storage.put(DISCORD_WEBHOOK_URL_DO_KEY, url);
   }
 
   /** apply-close/issue/refs が使う BlobStore adapter。direct DO storage IO で
@@ -550,6 +581,26 @@ export class CIDashboardHub extends DurableObject<Env> {
         }
       }
       if (changed) this.broadcastAlerts();
+      return new Response("OK");
+    }
+
+    // Discord PR close 通知用 webhook URL の read (Refs #441 PR2)。
+    // legacy KV (`discord:prCloseWebhookUrl`) からの lazy migration は
+    // getter 側で行う。URL 未設定は 200 + 空 body (= 通知 disabled、
+    // discord.ts の readPrCloseWebhookUrl が null 扱いにする)。
+    if (url.pathname === "/discord-webhook-url" && request.method === "GET") {
+      const stored = await this.getDiscordPrCloseWebhookUrl();
+      return new Response(stored ?? "", { status: 200 });
+    }
+
+    // Discord PR close 通知用 webhook URL の write (Refs #441 PR2、PR3 の
+    // healChannel から再利用)。body は `{ url: string | null }`。本 endpoint
+    // 自体は無認証 — Worker 側で gate するか、PR3 で Bot token と一緒に保護
+    // する。本 PR2 段階では Hub と Worker の信頼境界 (= 同 isolate からの
+    // service binding 内通信) に閉じている前提。
+    if (url.pathname === "/discord-webhook-url" && request.method === "PUT") {
+      const { url: nextUrl } = await request.json<{ url: string | null }>();
+      await this.putDiscordPrCloseWebhookUrl(nextUrl ?? null);
       return new Response("OK");
     }
 
