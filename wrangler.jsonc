@@ -129,18 +129,27 @@
         }
       ],
       "vars": {
-        // Comma-separated `owner/name`。**「Repo リリース状況」section の tagless
-        // 判定はこのリストではなく release-model.ts が repo config から自動導出する
-        // ようになった** (release-wave.yml も publish 可能な package.json も無い =
-        // tagless)。本 var は (1) discovery (どの repo を一覧に含めるか) と
-        // (2) webhook / releases-page の synthetic-block (PR merge を mini-release
-        // 扱いし merged PR の `Refs #N` を逆引き) の source として残る。
+        // Comma-separated `owner/name`。「Repo リリース状況」section の tagless
+        // 判定は基本 release-model.ts が repo config から自動導出する
+        // (release-wave.yml も publish 可能な package.json も無い = tagless)。
+        // 本 var は (1) discovery (どの repo を一覧に含めるか)、(2) webhook /
+        // releases-page の synthetic-block (PR merge を mini-release 扱いし
+        // merged PR の `Refs #N` を逆引き) の source に加え、(3) auto-detect が
+        // 誤判定する repo の **手動 override** (isTaglessRepo が config 自動判定
+        // より優先してここに列挙された repo を tagless 扱いにする) も兼ねる。
         // wave / npm 駆動の repo (nuxt-notify=wave, nuxt-egov=wave,
-        // mcp-cf-workers=npm, email-receiver=npm) は tag 駆動なので除外した
+        // email-receiver=npm) は tag 駆動なので除外している
         // (= synthetic-block 対象にしない、section も auto で tracked 判定)。
-        // TODO: webhook / releases-page も isTaglessRepo (auto) に寄せて本 var の
-        // 分類役割を廃する。
-        "TAGLESS_REPOS": "ippoan/secrets-inventory,ippoan/secrets-inventory-gcp,ippoan/ci-dashboard,ippoan/HealthConnectReaderWorker,ippoan/claude-md,ippoan/mcp-relay-rs,ippoan/cc-relay,ippoan/claude-skills,ippoan/ci-workflows,ippoan/ref-files-worker,ippoan/claude-hooks,ippoan/cdp-relay,ippoan/release-wave-gcp,ippoan/ui-preview,ippoan/rust-flickr,ippoan/cf-billing-monitor,ippoan/security-notification-app,ohishi-exp/rust-ichibanboshi,ohishi-exp/daiun-salary,ohishi-exp/nuxt-ichibanboshi-seikyu"
+        // `ippoan/mcp-cf-workers` は package.json 上は npm:true (auto-detect) だが、
+        // 実際は dev-release.yml が `dev-*` prerelease tag を自動採番するだけで
+        // stable `v*` tag を dispatch する自前の `tag-release.yml` を持たないため、
+        // auto-detect の「npm あり = self-service で stable tag を切れる」前提が
+        // 崩れる。Release Wave の Tag Release ボタンが存在しない workflow を
+        // dispatch しようとして GitHub API 404 になるため、override で明示的に
+        // tagless に倒す。
+        // TODO: webhook / releases-page も isTaglessRepo (auto+override) に寄せて
+        // 本 var の分類役割を一本化する。
+        "TAGLESS_REPOS": "ippoan/secrets-inventory,ippoan/secrets-inventory-gcp,ippoan/ci-dashboard,ippoan/HealthConnectReaderWorker,ippoan/claude-md,ippoan/mcp-relay-rs,ippoan/cc-relay,ippoan/claude-skills,ippoan/ci-workflows,ippoan/ref-files-worker,ippoan/claude-hooks,ippoan/cdp-relay,ippoan/release-wave-gcp,ippoan/ui-preview,ippoan/rust-flickr,ippoan/cf-billing-monitor,ippoan/security-notification-app,ippoan/mcp-cf-workers,ohishi-exp/rust-ichibanboshi,ohishi-exp/daiun-salary,ohishi-exp/nuxt-ichibanboshi-seikyu"
       },
       "kv_namespaces": [
         {

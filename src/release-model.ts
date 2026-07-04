@@ -1,10 +1,11 @@
 /**
  * repo の「リリースモデル」自動判定。
  *
- * 「Repo リリース状況」section が repo を tagless 扱い (= 一覧から除外) するか
- * どうかを、**手書きの TAGLESS_REPOS リストではなく repo の現行 config から
- * 自動導出**する。手書きリストは tag 駆動 / merge 駆動 を混同して drift する
- * footgun だったため (nuxt-notify の tagless 誤登録 / seikyu の未登録が発端)。
+ * 「Repo リリース状況」section が repo を tagless 扱い (= 一覧・Tag Release
+ * ボタンから除外) するかどうかを、**手書きの TAGLESS_REPOS リストではなく repo
+ * の現行 config から自動導出**するのを基本方針とする。手書きリストは tag 駆動 /
+ * merge 駆動を混同して drift する footgun だったため (nuxt-notify の tagless
+ * 誤登録 / seikyu の未登録が発端)。
  *
  * 判定シグナル (いずれも **current config** = 後から変更可能。タグ実績のような
  * 履歴依存の不可逆シグナルは使わない):
@@ -17,12 +18,18 @@
  * **staging=prod (single-env, PR merge → prod deploy) の merge 駆動 service**
  * と純 infra/config repo が含まれる (どちらも wave/npm 無し)。
  *
+ * ただし `TAGLESS_REPOS` var による **手動 override** は例外的に残す
+ * (`isTaglessRepo` 参照)。「npm あり = 自前の `tag-release.yml` で self-service
+ * stable tag を切れる」という auto-detect の前提が崩れる repo (dev tag しか
+ * 自動採番しない等) の逃げ道。
+ *
  * GitHub contents 呼び出しは release-cache と同じ KV キャッシュ層 (1h TTL) に
  * 載せるので、config 変更 (wave/npm の追加・削除) は最大 1h で反映される。
  */
 
 import type { Env } from "./index";
 import { GitHubApiError, githubApi, parseRepo, tokenForOrg } from "./github-api";
+import { parseTaglessRepos } from "./tagless-repos";
 
 const PREFIX = "rcache:v1:relmodel:";
 // 1h。release-wave.yml / package.json の追加・削除 (= モデル変更) の反映 lag 上限。
@@ -135,12 +142,25 @@ export async function getReleaseModel(
 /**
  * repo が tagless か。判定不能 (token 取得失敗 / GitHub error) のときは
  * **false (= tracked 側、一覧に出す)** に倒す — repo を黙って隠さない。
+ *
+ * `TAGLESS_REPOS` wrangler var に repo が明示列挙されていれば、config 自動判定
+ * より優先して tagless 扱いにする (manual override)。auto-detect (wave/npm) は
+ * 「npm publish 可能な package.json がある = 自前の `tag-release.yml` で
+ * self-service に stable tag を切れる」という前提に立つが、この前提が崩れる
+ * repo (例: `ippoan/mcp-cf-workers` — dev-release.yml が `dev-*` prerelease tag
+ * を自動採番するだけで、stable `v*` tag を dispatch する `tag-release.yml` 自体は
+ * 存在しない) では npm:true と誤検出され、Release Wave の「Tag Release」ボタンが
+ * 存在しない workflow を dispatch しようとして GitHub API 404 になる
+ * (Refs ippoan/mcp-cf-workers, ippoan/ci-dashboard の tag-release 404 事故)。
+ * こうした config-signal だけでは判定しきれない例外の逃げ道として、手書き
+ * override を残す。
  */
 export async function isTaglessRepo(
   env: Env,
   kv: KVNamespace | undefined,
   repo: string,
 ): Promise<boolean> {
+  if (parseTaglessRepos(env.TAGLESS_REPOS).has(repo)) return true;
   try {
     return isTagless(await getReleaseModel(env, kv, repo));
   } catch {
