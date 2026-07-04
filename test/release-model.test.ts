@@ -118,4 +118,20 @@ describe("isTaglessRepo", () => {
     // isTaglessRepo は catch して false (tracked) を返す。
     expect(await isTaglessRepo(env as never, env.CI_STATUS, "ippoan/x")).toBe(false);
   });
+
+  it("TAGLESS_REPOS に列挙された repo は auto-detect (token 取得含む) より先に true を返す (manual override)", async () => {
+    // token 解決すら試みない (fetch を一切呼ばずに true が返る) ことを、
+    // stub 未設定のまま確認する。
+    const overrideEnv = { ...env, TAGLESS_REPOS: "ippoan/mcp-cf-workers" };
+    expect(
+      await isTaglessRepo(overrideEnv as never, env.CI_STATUS, "ippoan/mcp-cf-workers"),
+    ).toBe(true);
+  });
+
+  it("TAGLESS_REPOS に無い repo は従来どおり auto-detect (token 取得不能 → false) に委ねる", async () => {
+    const overrideEnv = { ...env, TAGLESS_REPOS: "ippoan/mcp-cf-workers" };
+    expect(
+      await isTaglessRepo(overrideEnv as never, env.CI_STATUS, "ippoan/other"),
+    ).toBe(false);
+  });
 });
