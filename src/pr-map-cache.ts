@@ -133,8 +133,22 @@ export async function loadPrMap(
   // TAGLESS_REPOS の merged 補完 (Refs #466)。ctx が既に末尾 optional なので
   // 既存 call site を壊さないよう taglessRepos はその後ろに置く。
   taglessRepos: string[] = [],
+  // true なら fresh-window を無視し、refreshPrMap(force=true) を同期 await
+  // してから最新 KV を読む (Refs #466 追補)。単発診断用の force 経路。
+  force = false,
 ): Promise<PrMapResult> {
   const kv = env.CI_STATUS;
+  if (force) {
+    await refreshPrMap(env, mainOrgs, yhondaRepos, taglessRepos, true);
+    const refreshed = await kv.get(PR_MAP_CACHE_KEY, "json") as PrMapCacheEntry | null;
+    return {
+      map: refreshed ? new Map(Object.entries(refreshed.data)) : new Map(),
+      stale: false,
+      refreshing: false,
+      loading: false,
+      error: null,
+    };
+  }
   const cached = await kv.get(PR_MAP_CACHE_KEY, "json") as PrMapCacheEntry | null;
   const now = Date.now();
   if (cached) {
@@ -189,14 +203,22 @@ export async function refreshPrMap(
   mainOrgs: string[],
   yhondaRepos: string[],
   taglessRepos: string[] = [],
+  // true なら fresh-window / 同時実行 lock を無視して必ず実 Search を叩く
+  // (Refs #466 追補)。/admin/force-refresh-releases?repo=… の単発診断用途で、
+  // 1時間 fresh gate のせいで新しいコード (taglessRepos backfill 等) が
+  // 一度も実行されないまま古いキャッシュを返し続ける問題を手動で貫通する。
+  // rate limit backoff だけは force でも尊重する (GitHub 側の都合のため)。
+  force = false,
 ): Promise<void> {
   const kv = env.CI_STATUS;
   if (await getRateLimitBackoff(kv)) return;
-  if (await kv.get(REFRESH_LOCK_KEY)) return;
+  if (!force) {
+    if (await kv.get(REFRESH_LOCK_KEY)) return;
+  }
   await kv.put(REFRESH_LOCK_KEY, "1", { expirationTtl: REFRESH_LOCK_TTL_SECONDS });
-  // lock 取得後に再読: 並走した refresh が先に完走していたら bail。
+  // lock 取得後に再読: 並走した refresh が先に完走していたら bail (force 時は無視)。
   const recheck = await kv.get(PR_MAP_CACHE_KEY, "json") as PrMapCacheEntry | null;
-  if (recheck && Date.now() - recheck.storedAt < PR_MAP_FRESH_SECONDS * 1000) return;
+  if (!force && recheck && Date.now() - recheck.storedAt < PR_MAP_FRESH_SECONDS * 1000) return;
   try {
     const fresh = await fetchAllOpenPrsByIssue(env, mainOrgs, yhondaRepos, taglessRepos);
     const now = Date.now();

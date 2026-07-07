@@ -261,6 +261,9 @@ export type ReleasesIndexRefreshOutcome =
 export async function recomputeRepoView(
   env: ReleasesIndexEnv,
   repo: string,
+  // true なら pr-map の 1時間 fresh-window を無視し、実 Search を同期実行
+  // してから view を計算する (Refs #466 追補)。?forcePrMap=true の診断用途。
+  forcePrMap = false,
 ): Promise<"patched" | "view-null" | "no-blob"> {
   const blob = await readReleasesIndexBlob<RepoView[]>(env);
   if (!blob) return "no-blob";
@@ -274,7 +277,7 @@ export async function recomputeRepoView(
   let prMap: PrMapResult;
   try {
     // TAGLESS_REPOS の merged 補完 (Refs #466) を pr-map fetch に通す。
-    prMap = await loadPrMap(env, MAIN_ORGS, YHONDA_REPOS, undefined, [...tagless]);
+    prMap = await loadPrMap(env, MAIN_ORGS, YHONDA_REPOS, undefined, [...tagless], forcePrMap);
   } catch {
     prMap = { map: new Map(), stale: false, refreshing: false, loading: true, error: null };
   }

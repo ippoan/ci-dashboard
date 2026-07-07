@@ -297,8 +297,13 @@ app.all("/admin/force-refresh-releases", async (c) => {
     if (!/^[\w.-]+\/[\w.-]+$/.test(repoParam)) {
       return Response.json({ ok: false, reason: "invalid repo param" }, { status: 400 });
     }
-    const outcome = await recomputeRepoView(c.env, repoParam);
-    return Response.json({ ok: outcome === "patched", repo: repoParam, outcome });
+    // ?forcePrMap=true: pr-map の 1時間 fresh-window を無視して実 Search を
+    // 同期実行する (Refs #466 追補)。fresh gate のせいで新しいコード
+    // (taglessRepos backfill 等) が実行されないまま古い pr-map を使い続ける
+    // 診断詰まりを貫通するための escape hatch。
+    const forcePrMap = new URL(c.req.raw.url).searchParams.get("forcePrMap") === "true";
+    const outcome = await recomputeRepoView(c.env, repoParam, forcePrMap);
+    return Response.json({ ok: outcome === "patched", repo: repoParam, outcome, forcePrMap });
   }
   if (!c.env.WEBHOOK_QUEUE) {
     return Response.json({ ok: false, reason: "queue binding unavailable" }, { status: 503 });
