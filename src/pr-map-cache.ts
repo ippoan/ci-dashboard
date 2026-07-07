@@ -130,6 +130,9 @@ export async function loadPrMap(
   mainOrgs: string[],
   yhondaRepos: string[],
   ctx?: ExecutionContext,
+  // TAGLESS_REPOS の merged 補完 (Refs #466)。ctx が既に末尾 optional なので
+  // 既存 call site を壊さないよう taglessRepos はその後ろに置く。
+  taglessRepos: string[] = [],
 ): Promise<PrMapResult> {
   const kv = env.CI_STATUS;
   const cached = await kv.get(PR_MAP_CACHE_KEY, "json") as PrMapCacheEntry | null;
@@ -137,7 +140,7 @@ export async function loadPrMap(
   if (cached) {
     const fresh = now - cached.storedAt < PR_MAP_FRESH_SECONDS * 1000;
     if (!fresh) {
-      const p = refreshPrMap(env, mainOrgs, yhondaRepos).catch((err) => {
+      const p = refreshPrMap(env, mainOrgs, yhondaRepos, taglessRepos).catch((err) => {
         console.log(JSON.stringify({
           msg: "pr-map-bg-refresh-failed",
           error: err instanceof Error ? err.message : String(err),
@@ -157,7 +160,7 @@ export async function loadPrMap(
   // Cold start: 旧実装は同期 fetch (4 search) でページ全体を塞いでいた。
   // SSR をブロックせず背景 refresh + loading flag を返し、page 側が
   // /issues/decorations を poll して部分更新する (Refs #323)。
-  const p = refreshPrMap(env, mainOrgs, yhondaRepos).catch(async (err) => {
+  const p = refreshPrMap(env, mainOrgs, yhondaRepos, taglessRepos).catch(async (err) => {
     const { noteGitHubAuthBroken } = await import("./github-backoff");
     await noteGitHubAuthBroken(kv, err);
     console.log(JSON.stringify({
@@ -185,6 +188,7 @@ export async function refreshPrMap(
   env: AuthClientWorkerEnv,
   mainOrgs: string[],
   yhondaRepos: string[],
+  taglessRepos: string[] = [],
 ): Promise<void> {
   const kv = env.CI_STATUS;
   if (await getRateLimitBackoff(kv)) return;
@@ -194,7 +198,7 @@ export async function refreshPrMap(
   const recheck = await kv.get(PR_MAP_CACHE_KEY, "json") as PrMapCacheEntry | null;
   if (recheck && Date.now() - recheck.storedAt < PR_MAP_FRESH_SECONDS * 1000) return;
   try {
-    const fresh = await fetchAllOpenPrsByIssue(env, mainOrgs, yhondaRepos);
+    const fresh = await fetchAllOpenPrsByIssue(env, mainOrgs, yhondaRepos, taglessRepos);
     const now = Date.now();
     // Search truncation ガード (Refs #464): Search は per_page:100 のキャップで
     // window 内の全 merged PR を返しきれない。書き込み前の既存 cache のうち

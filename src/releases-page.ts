@@ -273,7 +273,8 @@ export async function recomputeRepoView(
 
   let prMap: PrMapResult;
   try {
-    prMap = await loadPrMap(env, MAIN_ORGS, YHONDA_REPOS);
+    // TAGLESS_REPOS の merged 補完 (Refs #466) を pr-map fetch に通す。
+    prMap = await loadPrMap(env, MAIN_ORGS, YHONDA_REPOS, undefined, [...tagless]);
   } catch {
     prMap = { map: new Map(), stale: false, refreshing: false, loading: true, error: null };
   }
@@ -435,7 +436,8 @@ async function computeIndexViews(env: ReleasesIndexEnv): Promise<RepoView[]> {
   //    invariant を維持しつつ、warm 後に正しく絞られる)。
   let prMap: PrMapResult;
   try {
-    prMap = await loadPrMap(env, MAIN_ORGS, YHONDA_REPOS);
+    // TAGLESS_REPOS の merged 補完 (Refs #466) を pr-map fetch に通す。
+    prMap = await loadPrMap(env, MAIN_ORGS, YHONDA_REPOS, undefined, [...tagless]);
   } catch {
     // pr-map fetch 失敗 (rate limit 等) は fail-open: 既存挙動 (gate 無し) に
     // degrade して空表示を避ける。次の warm 時に filter が効き始める。

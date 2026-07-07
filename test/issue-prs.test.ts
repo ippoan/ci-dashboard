@@ -1,6 +1,12 @@
 import { appTestEnv } from "./_helpers/app-env";
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { extractIssueRefs, fetchOpenPrsByIssue, fetchAllOpenPrsByIssue } from "../src/issue-prs";
+import {
+  extractIssueRefs,
+  fetchOpenPrsByIssue,
+  fetchAllOpenPrsByIssue,
+  chunkRepos,
+  TAGLESS_REPO_CHUNK,
+} from "../src/issue-prs";
 
 describe("extractIssueRefs()", () => {
   it("extracts bare `#N` refs qualified with the PR's own repo", () => {
@@ -225,5 +231,120 @@ describe("fetchAllOpenPrsByIssue()", () => {
     expect(refs![1]!.number).toBe(10);
     expect(refs![2]!.state).toBe("merged");
     expect(refs![2]!.number).toBe(7);
+  });
+
+  it("splits TAGLESS_REPOS merged search into chunks and never issues an open repo-scope call for them (Refs #466)", async () => {
+    const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      Response.json({ total_count: 0, incomplete_results: false, items: [] }),
+    );
+    // prefix 重複しない 12 repo (12/5 = 3 チャンク)。
+    const tagless = "abcdefghijkl".split("").map((c) => `ippoan/tagless-${c}`);
+    await fetchAllOpenPrsByIssue(appTestEnv(), ["ippoan"], [], tagless);
+
+    const urls = spy.mock.calls.map((c) => decodeURIComponent(String(c[0]!)));
+    // org 広域 open+merged の 2 コール + tagless merged チャンク 3 コール = 5。
+    expect(urls).toHaveLength(5);
+
+    const taglessCalls = urls.filter((u) => u.includes("ippoan/tagless-"));
+    expect(taglessCalls).toHaveLength(3);
+    for (const u of taglessCalls) {
+      // すべて merged / repo スコープ。open (state:open) は 1 件も出さない。
+      expect(u).toContain("is:merged");
+      expect(u).not.toContain("state:open");
+      // 1 チャンクは TAGLESS_REPO_CHUNK 件以下。
+      const count = (u.match(/repo:ippoan\/tagless-/g) ?? []).length;
+      expect(count).toBeLessThanOrEqual(TAGLESS_REPO_CHUNK);
+    }
+    // 全 12 repo がいずれかのチャンクに含まれる (取りこぼし無し)。
+    for (const r of tagless) {
+      expect(taglessCalls.some((u) => u.includes(`repo:${r}`))).toBe(true);
+    }
+  });
+
+  it("backfills a merged PR the org-wide search truncated but the TAGLESS repo-scope search finds (Refs #466)", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (req) => {
+      const url = typeof req === "string" ? req : (req as Request).url;
+      const decoded = decodeURIComponent(url);
+      // org 広域 (org:) は truncation で該当 PR を返さない。repo スコープだけが返す。
+      if (decoded.includes("is:merged") && decoded.includes("repo:ippoan/secrets-inventory")) {
+        return Response.json({
+          total_count: 1, incomplete_results: false,
+          items: [{
+            number: 87, title: "feat: done", state: "closed", body: "Refs #86",
+            html_url: "https://github.com/ippoan/secrets-inventory/pull/87",
+            repository_url: "https://api.github.com/repos/ippoan/secrets-inventory",
+            draft: false, updated_at: "2026-07-04T00:00:00Z", pull_request: {},
+          }],
+        });
+      }
+      return Response.json({ total_count: 0, incomplete_results: false, items: [] });
+    });
+
+    const map = await fetchAllOpenPrsByIssue(
+      appTestEnv(), ["ippoan"], [], ["ippoan/secrets-inventory"],
+    );
+    const refs = map.get("ippoan/secrets-inventory#86");
+    expect(refs).toBeDefined();
+    expect(refs!).toHaveLength(1);
+    expect(refs![0]!.number).toBe(87);
+    expect(refs![0]!.state).toBe("merged");
+  });
+
+  it("dedupes a merged PR returned by BOTH the org-wide and the TAGLESS repo-scope search (Refs #466)", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (req) => {
+      const url = typeof req === "string" ? req : (req as Request).url;
+      const decoded = decodeURIComponent(url);
+      // 両方の merged 検索 (org 広域 + repo スコープ) が同一 PR を返す。
+      if (decoded.includes("is:merged")) {
+        return Response.json({
+          total_count: 1, incomplete_results: false,
+          items: [{
+            number: 87, title: "feat: done", state: "closed", body: "Refs #86",
+            html_url: "https://github.com/ippoan/secrets-inventory/pull/87",
+            repository_url: "https://api.github.com/repos/ippoan/secrets-inventory",
+            draft: false, updated_at: "2026-07-04T00:00:00Z", pull_request: {},
+          }],
+        });
+      }
+      return Response.json({ total_count: 0, incomplete_results: false, items: [] });
+    });
+
+    const map = await fetchAllOpenPrsByIssue(
+      appTestEnv(), ["ippoan"], [], ["ippoan/secrets-inventory"],
+    );
+    const refs = map.get("ippoan/secrets-inventory#86");
+    expect(refs).toBeDefined();
+    // repo+number で dedup され、二重表示にならない。
+    expect(refs!).toHaveLength(1);
+    expect(refs![0]!.number).toBe(87);
+    expect(refs![0]!.state).toBe("merged");
+  });
+});
+
+describe("chunkRepos()", () => {
+  it("splits into chunks of the given size (last chunk may be shorter)", () => {
+    expect(chunkRepos([1, 2, 3, 4, 5, 6, 7], 3)).toEqual([[1, 2, 3], [4, 5, 6], [7]]);
+  });
+
+  it("returns an empty array for empty input", () => {
+    expect(chunkRepos([], 5)).toEqual([]);
+  });
+
+  it("keeps every chunk of the real 21-entry TAGLESS_REPOS under GitHub's 256-char query limit", () => {
+    // wrangler.jsonc の env.staging.vars.TAGLESS_REPOS の実データ (21 件)。
+    const tagless = [
+      "ippoan/secrets-inventory", "ippoan/secrets-inventory-gcp", "ippoan/ci-dashboard",
+      "ippoan/HealthConnectReaderWorker", "ippoan/claude-md", "ippoan/mcp-relay-rs",
+      "ippoan/cc-relay", "ippoan/claude-skills", "ippoan/ci-workflows", "ippoan/ref-files-worker",
+      "ippoan/claude-hooks", "ippoan/cdp-relay", "ippoan/release-wave-gcp", "ippoan/ui-preview",
+      "ippoan/rust-flickr", "ippoan/cf-billing-monitor", "ippoan/security-notification-app",
+      "ippoan/mcp-cf-workers", "ohishi-exp/rust-ichibanboshi", "ohishi-exp/daiun-salary",
+      "ohishi-exp/nuxt-ichibanboshi-seikyu",
+    ];
+    const base = "is:pr archived:false is:merged updated:>=2026-05-08";
+    for (const chunk of chunkRepos(tagless, TAGLESS_REPO_CHUNK)) {
+      const q = [base, ...chunk.map((r) => `repo:${r}`)].join(" ");
+      expect(q.length).toBeLessThanOrEqual(256);
+    }
   });
 });
