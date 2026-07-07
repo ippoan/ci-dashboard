@@ -226,7 +226,7 @@ export async function handleIssuesPage(
 
   const [project, prs, watermark, backoff, authBroken] = await Promise.all([
     loadProjectIssueMapSwr(env, PROJECT_ORGS, ctx),
-    loadPrMap(env, ORGS, YHONDA_REPOS, ctx),
+    loadPrMap(env, ORGS, YHONDA_REPOS, ctx, [...parseTaglessRepos(env.TAGLESS_REPOS)]),
     getIssuesWatermark(kv),
     getRateLimitBackoff(kv),
     getGitHubAuthBroken(kv),

@@ -156,17 +156,45 @@ export async function fetchOpenPrsByIssue(
   return map;
 }
 
-/** Fetch and merge PR → issue maps across the two search shapes the issues
- *  page uses (main orgs + yhonda `repo:` filter) AND the two states we care
- *  about (open + merged). 4 calls in parallel because the two repo shapes
- *  can't be combined in one GitHub search (`repo:` is dropped when `org:` is
- *  also present), and the two states can't be `OR`-ed inside a single
- *  search query either. Merged PRs surface issues whose `Refs #N` work is
- *  done but whose release-close hasn't happened yet (CLAUDE.md flow). */
+/** `repo:` チャンク分割の 1 チャンクあたり repo 数 (Refs #466)。
+ *
+ *  GitHub Search クエリは 256 文字上限。`repo:owner/name` を全 `TAGLESS_REPOS`
+ *  (現状 21 件) 一括で並べると超過するため、複数コールに分割する。最長 repo 名
+ *  (`repo:ohishi-exp/nuxt-ichibanboshi-seikyu` ≈ 41 文字) × 5 + base query
+ *  (`is:pr archived:false is:merged updated:>=YYYY-MM-DD` ≈ 51 文字) でも 256
+ *  文字に収まる保守的な値。`TAGLESS_REPOS` が将来増えても自動でコール数が伸びる。 */
+export const TAGLESS_REPO_CHUNK = 5;
+
+/** repo 配列を size 件ずつのチャンクに分割する (Refs #466)。 */
+export function chunkRepos<T>(repos: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < repos.length; i += size) {
+    chunks.push(repos.slice(i, i + size));
+  }
+  return chunks;
+}
+
+/** Fetch and merge PR → issue maps across the search shapes the issues
+ *  page uses (main orgs + yhonda `repo:` filter + tagless `repo:` filter) AND
+ *  the two states we care about (open + merged). Multiple calls run in parallel
+ *  because the two repo shapes can't be combined in one GitHub search (`repo:`
+ *  is dropped when `org:` is also present), and the two states can't be `OR`-ed
+ *  inside a single search query either. Merged PRs surface issues whose
+ *  `Refs #N` work is done but whose release-close hasn't happened yet
+ *  (CLAUDE.md flow).
+ *
+ *  `taglessRepos` (`TAGLESS_REPOS` wrangler var、Refs #466): org 広域の
+ *  `is:merged` 検索は母数が多く per_page:100 では直近 ~1.5 日分しかカバーできず、
+ *  それより古い merged PR は truncation で **一度も cache に載らず永久に漏れる**
+ *  (secrets-inventory#87 の実例)。tag を切らない repo (= release-close 待ちの
+ *  merged PR が長く残る) は個別 `repo:` スコープなら 1 repo あたりの PR 数が少なく
+ *  truncation しないため、merged state のみ repo スコープ検索を追加して backfill +
+ *  将来防止する。open 側は件数が少なく実害が薄いので org 広域のまま (コスト削減)。 */
 export async function fetchAllOpenPrsByIssue(
   env: AuthClientWorkerEnv,
   mainOrgs: string[],
   yhondaRepos: string[],
+  taglessRepos: string[] = [],
 ): Promise<Map<string, IssuePrRef[]>> {
   const calls: Array<Promise<Map<string, IssuePrRef[]>>> = [
     fetchOpenPrsByIssue(env, { orgs: mainOrgs, state: "open" }),
@@ -176,13 +204,29 @@ export async function fetchAllOpenPrsByIssue(
     calls.push(fetchOpenPrsByIssue(env, { repos: yhondaRepos, state: "open" }));
     calls.push(fetchOpenPrsByIssue(env, { repos: yhondaRepos, state: "merged" }));
   }
+  // TAGLESS_REPOS の merged 補完 (Refs #466)。256 文字上限を避けるためチャンク
+  // 分割して並列に投げる。open は org 広域で十分なので merged のみ。
+  for (const chunk of chunkRepos(taglessRepos, TAGLESS_REPO_CHUNK)) {
+    calls.push(fetchOpenPrsByIssue(env, { repos: chunk, state: "merged" }));
+  }
   const results = await Promise.all(calls);
   const merged = new Map<string, IssuePrRef[]>();
   for (const m of results) {
     for (const [k, prs] of m) {
-      const existing = merged.get(k);
-      if (existing) existing.push(...prs);
-      else merged.set(k, [...prs]);
+      let list = merged.get(k);
+      if (!list) {
+        list = [];
+        merged.set(k, list);
+      }
+      for (const ref of prs) {
+        // repo+number で重複排除 (Refs #466)。TAGLESS_REPOS の repo スコープ検索は
+        // org 広域検索と対象が重複するため、同一 PR が二重に chip 表示されるのを
+        // 防ぐ。判定は pr-map-cache.ts の carryOverWindowedEntries と同一規約。
+        if (list.some((r) => r.repo === ref.repo && r.number === ref.number)) {
+          continue;
+        }
+        list.push(ref);
+      }
     }
   }
   // Sort each list: open first (work still in flight), then merged; within
