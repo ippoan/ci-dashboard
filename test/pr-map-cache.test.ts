@@ -316,13 +316,15 @@ describe("recentPatches carry-over (Refs #330)", () => {
 
   it("10 分より古い patch は再適用されない (search 結果が正)", async () => {
     const oldStoredAt = Date.now() - (__testing.PR_MAP_FRESH_SECONDS + 10) * 1000;
-    // recentPatches に 11 分前の patch を直接 seed
+    // recentPatches に 11 分前の patch を直接 seed。carry-over union に拾われ
+    // ないよう updated_at は window (60日) 外にしておく。
+    const beyondWindow = new Date(Date.now() - (61) * 86400 * 1000).toISOString();
     await env.CI_STATUS.put("issues-page:pr-map:v2", JSON.stringify({
       storedAt: oldStoredAt,
-      data: { "ippoan/x#1": [prRef({ number: 99, state: "merged" })] },
+      data: { "ippoan/x#1": [prRef({ number: 99, state: "merged", updated_at: beyondWindow })] },
       recentPatches: [{
         key: "ippoan/x#1",
-        ref: prRef({ number: 99, state: "merged" }),
+        ref: prRef({ number: 99, state: "merged", updated_at: beyondWindow }),
         at: Date.now() - 11 * 60 * 1000,
       }],
     }));
@@ -335,5 +337,89 @@ describe("recentPatches carry-over (Refs #330)", () => {
     const entry = await readMap();
     // 期限切れ patch は再適用されず、search 結果 (空) が正
     expect(entry!.data["ippoan/x#1"]).toBeUndefined();
+  });
+});
+
+// ───── full refresh が window 内の既存 merged エントリを失わない (Refs #464) ─────
+describe("carry-over union (Refs #464)", () => {
+  const within = (days: number) =>
+    new Date(Date.now() - days * 86400 * 1000).toISOString();
+
+  it("fresh Search に含まれない window 内 merged エントリを refresh 後も保持する", async () => {
+    const oldStoredAt = Date.now() - (__testing.PR_MAP_FRESH_SECONDS + 10) * 1000;
+    // 3 日前 merge の PR (per_page:100 の truncation で Search 結果から溢れた想定)
+    await seedMap({
+      "ippoan/secrets-inventory#87": [
+        prRef({
+          repo: "ippoan/secrets-inventory",
+          number: 87,
+          state: "merged",
+          updated_at: within(3),
+        }),
+      ],
+    }, oldStoredAt);
+
+    stubPrSearch(); // fresh Search は空
+    await refreshPrMap(testEnv(), ORGS, YHONDA);
+
+    const entry = await readMap();
+    const refs = entry!.data["ippoan/secrets-inventory#87"];
+    expect(refs).toBeDefined();
+    expect(refs).toHaveLength(1);
+    expect(refs![0]!.number).toBe(87);
+    expect(refs![0]!.state).toBe("merged");
+  });
+
+  it("window cutoff を過ぎた古いエントリは refresh 後に消える (無制限成長の防止)", async () => {
+    const oldStoredAt = Date.now() - (__testing.PR_MAP_FRESH_SECONDS + 10) * 1000;
+    await seedMap({
+      "ippoan/old#1": [
+        prRef({
+          repo: "ippoan/old",
+          number: 1,
+          state: "merged",
+          updated_at: within(65), // 60 日窓の外
+        }),
+      ],
+    }, oldStoredAt);
+
+    stubPrSearch();
+    await refreshPrMap(testEnv(), ORGS, YHONDA);
+
+    const entry = await readMap();
+    expect(entry!.data["ippoan/old#1"]).toBeUndefined();
+  });
+
+  it("fresh に既にある PR は重複追加しない", async () => {
+    const oldStoredAt = Date.now() - (__testing.PR_MAP_FRESH_SECONDS + 10) * 1000;
+    await seedMap({
+      "ippoan/foo#5": [
+        prRef({ repo: "ippoan/foo", number: 20, state: "merged", updated_at: within(3) }),
+      ],
+    }, oldStoredAt);
+
+    // fresh Search (ippoan merged) が同じ PR (foo#20) を返す
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (req) => {
+      const url = typeof req === "string" ? req : (req as Request).url;
+      const decoded = decodeURIComponent(url);
+      if (decoded.includes("is:merged") && decoded.includes("org:ippoan")) {
+        return Response.json({
+          total_count: 1, incomplete_results: false,
+          items: [{
+            number: 20, title: "feat", state: "closed", body: "Refs #5",
+            html_url: "https://github.com/ippoan/foo/pull/20",
+            repository_url: "https://api.github.com/repos/ippoan/foo",
+            draft: false, updated_at: within(3), pull_request: {},
+          }],
+        });
+      }
+      return Response.json({ total_count: 0, incomplete_results: false, items: [] });
+    });
+
+    await refreshPrMap(testEnv(), ORGS, YHONDA);
+
+    const entry = await readMap();
+    expect(entry!.data["ippoan/foo#5"]).toHaveLength(1);
+    expect(entry!.data["ippoan/foo#5"]![0]!.number).toBe(20);
   });
 });

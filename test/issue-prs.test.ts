@@ -124,6 +124,21 @@ describe("fetchOpenPrsByIssue()", () => {
     expect(map.get("ippoan/foo#5")![0]!.state).toBe("merged");
   });
 
+  it("passes sort=updated & order=desc so recently-updated PRs win the per_page cap (Refs #464)", async () => {
+    const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      Response.json({ total_count: 0, incomplete_results: false, items: [] }),
+    );
+    await fetchOpenPrsByIssue(appTestEnv(), { orgs: ["ippoan"], state: "merged" });
+    const url = new URL(String(spy.mock.calls[0]![0]));
+    expect(url.searchParams.get("sort")).toBe("updated");
+    expect(url.searchParams.get("order")).toBe("desc");
+    // open 側も一貫して付与される。
+    await fetchOpenPrsByIssue(appTestEnv(), { orgs: ["ippoan"], state: "open" });
+    const url2 = new URL(String(spy.mock.calls[1]![0]));
+    expect(url2.searchParams.get("sort")).toBe("updated");
+    expect(url2.searchParams.get("order")).toBe("desc");
+  });
+
   it("uses repo: qualifiers (and omits org:) when `repos` is set", async () => {
     const spy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       Response.json({ total_count: 0, incomplete_results: false, items: [] }),
