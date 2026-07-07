@@ -69,9 +69,17 @@ interface SearchPrsResponse {
 /** Window for `is:merged` PR lookups, in days. Repo's release-close flow
  *  (CLAUDE.md) keeps an issue open until the release tag covering the
  *  merged PR is cut and confirmed; in practice that gap is < 30 days. 60
- *  days is a generous upper bound that still keeps GitHub Search result
- *  size well under the 100-item per_page cap. */
-const MERGED_PR_WINDOW_DAYS = 60;
+ *  days is a generous upper bound.
+ *
+ *  ⚠️ このウィンドウは短縮しないこと (Refs #464)。実測では 60 日ウィンドウ内の
+ *  該当 merged PR は total_count ≈ 2216 件 (~37 件/日) に達し、per_page:100 の
+ *  キャップを遥かに超える。sort=updated を付けても 1 コールで返せるのは直近
+ *  ~2.7 日分のみで、それ以前に merge され release-close 待ちの PR は Search 結果
+ *  から溢れる。ウィンドウを 14 日等に縮めても sort=updated 適用後に返る 100 件は
+ *  変わらず (カバレッジ改善ゼロ)、逆に「merge〜release まで実務上 <30 日」という
+ *  前提を壊す退行になる。真の対策は pr-map-cache.ts 側の union ロジック
+ *  (window 内の既存 merged エントリを full refresh 後も保持する) である。 */
+export const MERGED_PR_WINDOW_DAYS = 60;
 
 /** Single GitHub search call for PRs. `orgs` (`org:` qualifiers) and
  *  `repos` (`repo:` qualifiers) are mutually exclusive — GitHub Search drops
@@ -113,9 +121,15 @@ export async function fetchOpenPrsByIssue(
   }
   const q = parts.join(" ");
 
+  // sort=updated / order=desc: relevance (best-match) の既定順だと直近 merge の
+  // PR が 100 件のキャップから溢れやすい。更新降順にすることで、per_page:100 で
+  // 拾える範囲を「直近更新分」に寄せる (open/merged 両方に一貫して付与)。
+  // ただし母数 (~37 件/日、Refs #464) に対し 100 件は直近 ~2.7 日分しか保証でき
+  // ないため、これ単体では欠落を根絶できない — 真の対策は pr-map-cache.ts の
+  // union ロジック。
   const data = await githubApi<SearchPrsResponse>(
     token, "GET", "/search/issues", undefined,
-    { q, per_page: String(per_page) },
+    { q, per_page: String(per_page), sort: "updated", order: "desc" },
   );
 
   const map = new Map<string, IssuePrRef[]>();

@@ -2,6 +2,7 @@ import {
   fetchAllOpenPrsByIssue,
   extractIssueRefs,
   sortPrRefs,
+  MERGED_PR_WINDOW_DAYS,
   type IssuePrRef,
 } from "./issue-prs";
 import type { AuthClientWorkerEnv } from "@ippoan/auth-client-worker";
@@ -62,6 +63,50 @@ function pruneRecentPatches(
   return (patches ?? [])
     .filter((p) => now - p.at < RECENT_PATCH_WINDOW_MS)
     .slice(-RECENT_PATCH_CAP);
+}
+
+/** full refresh の「cache 全置換」を防ぐ union レイヤー (Refs #464)。
+ *
+ *  真因: `fetchAllOpenPrsByIssue` の GitHub Search は per_page:100 の 1 コール
+ *  (sort=updated 降順) で、60 日ウィンドウ内の該当 merged PR 総数 (~37 件/日) に
+ *  対し直近 ~2.7 日分しか返せない。それ以前に merge され release-close 待ちの PR
+ *  は毎時の full refresh で cache から**消える** (recentPatches の 10 分窓を過ぎた
+ *  後は救えない)。
+ *
+ *  対策: 書き込み前の既存 cache (`previousData`) を走査し、window (cutoff) 内で
+ *  まだ有効な既存エントリのうち fresh 結果に無いもの (同 repo+number) を fresh に
+ *  持ち越す。cutoff を過ぎた古いエントリは持ち越さず自然失効させる (無制限成長の
+ *  防止)。open/merged 両方に適用 (open は数が少なく実害は薄いが同じ truncation
+ *  リスクがあるため一貫させる)。
+ *
+ *  変更した key のリストは呼び出し側で `sortPrRefs` により再ソートすること。
+ *  戻り値は「持ち越しにより変更された key の集合」。 */
+function carryOverWindowedEntries(
+  fresh: Map<string, IssuePrRef[]>,
+  previousData: Record<string, IssuePrRef[]> | undefined,
+  now: number,
+): Set<string> {
+  const touched = new Set<string>();
+  if (!previousData) return touched;
+  const cutoff = now - MERGED_PR_WINDOW_DAYS * 86400 * 1000;
+  for (const [key, refs] of Object.entries(previousData)) {
+    for (const ref of refs) {
+      // window の cutoff を過ぎた (= release-close の実務窓を超えた) 古い
+      // エントリは持ち越さない。parse 不能な updated_at も持ち越さない
+      // (無制限成長を避ける安全側)。
+      const updatedMs = Date.parse(ref.updated_at);
+      if (Number.isNaN(updatedMs) || updatedMs < cutoff) continue;
+      // fresh の同じ key に同一 PR (repo+number) が既にあれば重複回避で skip。
+      const list = fresh.get(key);
+      if (list?.some((r) => r.repo === ref.repo && r.number === ref.number)) {
+        continue;
+      }
+      if (list) list.push(ref);
+      else fresh.set(key, [ref]);
+      touched.add(key);
+    }
+  }
+  return touched;
 }
 
 export interface PrMapResult {
@@ -150,10 +195,18 @@ export async function refreshPrMap(
   if (recheck && Date.now() - recheck.storedAt < PR_MAP_FRESH_SECONDS * 1000) return;
   try {
     const fresh = await fetchAllOpenPrsByIssue(env, mainOrgs, yhondaRepos);
+    const now = Date.now();
+    // Search truncation ガード (Refs #464): Search は per_page:100 のキャップで
+    // window 内の全 merged PR を返しきれない。書き込み前の既存 cache のうち
+    // window 内でまだ有効なエントリを fresh に union してから書く (= 過去に
+    // 見つけた merged PR を full refresh 後も失わない長期的な安全網)。
+    const carried = carryOverWindowedEntries(fresh, recheck?.data, now);
+    for (const key of carried) fresh.get(key)!.sort(sortPrRefs);
     // Search index lag ガード (Refs #330): merge/open 直後の PR は search に
     // まだ載っていないことがある。直近 10 分の webhook patch を fresh 結果に
-    // 再適用してから書く (= lag 窓内は patch が full refresh に勝つ)。
-    const now = Date.now();
+    // 再適用してから書く (= lag 窓内は patch が full refresh に勝つ)。この
+    // recentPatches 機構は即時反映の safety net として引き続き有効で、上の
+    // union (毎時 refresh 後も window 内なら保持) とは別レイヤー。
     const recentPatches = pruneRecentPatches(recheck?.recentPatches, now);
     for (const p of recentPatches) {
       const list = (fresh.get(p.key) ?? []).filter(
