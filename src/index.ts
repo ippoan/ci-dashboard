@@ -68,6 +68,7 @@ import {
   handlePwaServiceWorker,
   handlePwaIcon,
 } from "./pwa";
+import { listDraftPrs } from "./draft-prs";
 
 export { CIDashboardHub } from "./hub";
 export { ReleaseWaveHub } from "./release-wave/do";
@@ -221,6 +222,9 @@ app.get("/cap-catalog", (c) => handleCapCatalogPage(c.env, c.executionCtx));
 // client は localStorage fallback。Refs ippoan/cap-catalog#1。
 app.get("/api/cap-catalog/favorites", (c) => handleFavoritesGet(c.req.raw, c.env));
 app.put("/api/cap-catalog/favorites", (c) => handleFavoritesPut(c.req.raw, c.env));
+// draft PR 一覧 (webhook-fed KV cache)。cc-webreview の side panel が
+// レビュー待ち stock を取得する (Refs #470 / ippoan/cc-webreview-ext#4)。
+app.get("/api/draft-prs", async (c) => c.json(await listDraftPrs(c.env.CI_STATUS)));
 // Reusable workflow 採用状況の 1 ページマトリクス。Refs #377 #378。
 app.get("/ci-matrix", (c) => handleCiMatrixPage(c.req.raw, c.env));
 // 逸脱一覧 JSON ダウンロード。Refs #395。

@@ -20,6 +20,7 @@ import {
   invalidateRepoCompare,
 } from "./release-cache";
 import { applyPullRequestEvent } from "./pr-map-cache";
+import { applyDraftPrEvent } from "./draft-prs";
 import { notifyDiscordPrClosed, notifyDiscordCiFailed } from "./discord";
 import { isAutoTagRepo } from "./auto-tag";
 import { dispatchTagRelease } from "./tag-release";
@@ -222,6 +223,8 @@ interface PullRequestPayload {
     draft?: boolean;
     html_url?: string;
     updated_at?: string;
+    // draft PR 一覧 (Refs #470) の author 表示用。実配信には常に載る。
+    user?: { login?: string };
   };
   repository: {
     full_name: string;
@@ -559,6 +562,10 @@ async function processWebhookEvent(
     // draft flip も chip の表示内容を変えるため。対象外 action や cache
     // 不在は applyPullRequestEvent 側が no-op にする。
     await applyPullRequestEvent(env.CI_STATUS, payload);
+
+    // draft PR stock (cc-webreview の一覧 API 用、Refs #470)。draft flip /
+    // close で集合を更新する。分類できない payload は no-op。
+    await applyDraftPrEvent(env.CI_STATUS, payload);
 
     // Discord PR close 通知 (Refs #441 PR1 + PR2 + PR4)。closed action のみ。
     // PR4 で 404 lazy heal を結線: `env.DISCORD_BOT_TOKEN` (Secrets Store
