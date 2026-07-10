@@ -108,6 +108,16 @@ auth-worker prod: ログイン redirect は preview-<app>.ippoan.org origin で�
 
 ### Phase 3: backend 0% revision への API base override
 
+> **実装メモ (2026-07-10、ippoan/auth-worker#361)**: 対象 2 app (nuxt-trouble /
+> nuxt-dtako-admin) は実コード上どちらも方式 B (`/api/proxy` → auth-worker
+> `/alc-proxy`) だったため、下記の browser 側 override ではなく **server 側**で
+> 実装した。cookie は same-origin `/api/proxy` リクエストに自動付帯するので、
+> auth-client `createAuthWorkerProxyHandler` が cookie → `X-Alc-Preview-Api-Base`
+> header 変換 (auth-client >= 0.2.79)、auth-worker `/alc-proxy` が
+> `ALC_API_PREVIEW_HOST_SUFFIX` に pin 検証して forward 先 + OIDC aud を差し替える
+> (不正値は 400 loud fail)。**browser 側 (`@ippoan/auth-client` composable) の
+> 変更は不要になった**。以下の記述は当初案として残す。
+
 - **仕組み**: preview-router が応答時に override cookie を注入する:
   - backend repo (rust-alc-api) の pending-release から tagged revision URL を解決
   - `Set-Cookie: alc_api_preview_base=<tagged-url>; Path=/; Secure; SameSite=Lax`
