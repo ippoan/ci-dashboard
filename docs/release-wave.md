@@ -189,21 +189,53 @@ revision**。= **本番 DB (Supabase) に接続**、**本番 `JWT_SECRET` を共
 > `JWT_SECRET` の backend preview に通る。CORS は `Any`。redirect_uri が preview を
 > 経由しないので auth-worker 側の登録は不要。
 
-#### 経路 B: ブラウザで preview フロントから入る (= preview に redirect する → 準備が要る)
+#### 経路 B: ブラウザで preview フロントから入る (実装済み、Refs #472)
 
-preview フロントのページを開いてその場で Google ログイン (= redirect_uri が preview
-origin) する場合は、**追加準備が必須**:
+flip 前 frontend version をブラウザで開き、flip 前 backend (0% tagged revision) と
+組合せて full E2E する経路。**preview-router (安定 hostname) 方式で実装済み**
+(plan: `docs/plan-pre-flip-preview-e2e.md`)。
 
-- auth-worker の許可 origin (`origins:<env>` / `origins:dev` / `origins:wt` KV) は
-  **exact match (wildcard 無し、`src/lib/security.ts` `isAllowedRedirectUri`)**。
-  per-release で変わる preview origin (`<hash>-<worker>.workers.dev` 等) を登録しないと
-  redirect_uri が **400 で弾かれログインできない** (`origins:wt` の ephemeral 流用 or
-  安定 preview hostname が必要)。
-- さらに新 frontend を新 backend に向けるなら frontend preview の API base override も要る
-  (= 落とした block B)。
+**配線 (整備済みの前提)**:
+
+- 各 frontend の wrangler に `preview_urls = true` (0% version の workers.dev
+  preview URL が pending-release webhook に載る前提。未 opt-in の repo は
+  preview_url が空で router が 404 を返す)
+- **preview-router**: `preview-<app>.ippoan.org` → 本 worker
+  (`src/release-wave/preview-router.ts`) が `pending-release::<repo>` の
+  workers.dev preview URL へ server-side proxy。app → repo 対応は
+  `PREVIEW_ROUTER_APPS` var (app 追加時は custom domain route も追加)
+- **CF Access**: `release-wave-preview` app (`preview-*.ippoan.org` wildcard、
+  admin email allowlist) が edge で開発者限定に gate
+- **auth-worker**: KV `origins:prod` に `https://preview-<app>.ippoan.org` を
+  静的登録済み (コード変更なし)。`.ippoan.org` 配下なので `logi_auth_token`
+  cookie (Domain=.ippoan.org) もそのまま届く
+- **backend override**: backend repo の pending release (tagged revision URL) が
+  あれば preview-router が `alc_api_preview_base` cookie を注入 → 方式 B app の
+  `/api/proxy/*` に自動付帯 → auth-client `createAuthWorkerProxyHandler` が
+  `X-Alc-Preview-Api-Base` header に変換 → auth-worker `/alc-proxy` が
+  `<tag>---<ALC_API_PREVIEW_HOST_SUFFIX>` (同一 Cloud Run service の tagged
+  revision) に pin 検証して forward 先 + OIDC aud を差し替え。不正値は **400
+  loud fail** (黙って prod に流さない)
+
+**admin の手順**:
+
+1. tag release → frontend + backend の pending が Pending releases に出る
+2. `https://preview-<app>.ippoan.org` を開く (CF Access → Google ログイン)
+3. アプリ側で通常ログイン (auth-worker prod、redirect は preview hostname で完結)
+4. backend pending があれば API は自動で flip 前 backend (tagged revision) に
+   向く (無ければ現行 prod backend のまま = frontend 単独 release の preview)
+5. E2E spot-check → 問題なければ Flip / Flip all
+
+**制約**:
+
+- 対象は方式 B (`/api/proxy` → `/alc-proxy`) の app のみ (nuxt-trouble /
+  nuxt-dtako-admin)。browser 直 fetch app / 他 proxy 経路の app は対象外 (follow-up)
+- backend override は auth-client >= 0.2.79 (`X-Alc-Preview-Api-Base` 変換) を
+  bundle した frontend build であること
+- router は「最新の pending」に proxy する (複数 release の並行検証は scope 外)
 
 → **「本番データで backend を検証」だけなら経路 A (準備なし) で完結**。ブラウザで新 front
-ごと通す full E2E が要るときだけ経路 B の準備に踏み込む。
+ごと通す full E2E が要るときは上の手順で経路 B を使う。
 
 ### preview を admin だけに見せる (block E)
 
