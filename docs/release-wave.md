@@ -180,7 +180,7 @@ revision**。= **本番 DB (Supabase) に接続**、**本番 `JWT_SECRET` を共
 3. その JWT を `Authorization: Bearer <jwt>` で backend preview URL に投げる:
    ```bash
    curl -H "Authorization: Bearer $PROD_JWT" \
-     "https://v1-42-0---rust-alc-api-gateway-<hash>.run.app/api/<path>"
+     "https://v1-42-0---rust-alc-api-<hash>.run.app/api/<path>"
    ```
 4. backend preview は **本番 DB を読む** ので新 backend を本番データで検証できる
    (RLS が admin テナントにスコープ)。問題なければ Flip。
