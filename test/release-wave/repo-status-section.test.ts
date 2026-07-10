@@ -794,15 +794,18 @@ describe("renderBackendRollbackBlock", () => {
   });
 
   it("prefixes the service name when a repo has multiple services", () => {
+    // NOTE: rust-alc-api は #556 で gateway + per-domain を廃止し single-service に
+    // なったため、複数 service の描画パスは合成 repo で検証する (release-wave-targets の
+    // services[] は依然として複数 service を許容する)。
     const trafficByRepo = new Map<string, BackendTrafficRecord>([
       [
-        "ippoan/rust-alc-api",
+        "ippoan/example-multi",
         {
           schema_version: 1,
-          repo: "ippoan/rust-alc-api",
+          repo: "ippoan/example-multi",
           services: [
-            { service: "rust-alc-api", revisions: [{ revision: "api-1", percent: 100, tag: null }] },
-            { service: "rust-alc-api-gateway", revisions: [{ revision: "gw-1", percent: 100, tag: null }] },
+            { service: "example-api", revisions: [{ revision: "api-1", percent: 100, tag: null }] },
+            { service: "example-worker", revisions: [{ revision: "wk-1", percent: 100, tag: null }] },
           ],
           reported_at: "t",
         },
@@ -811,7 +814,7 @@ describe("renderBackendRollbackBlock", () => {
     const html = renderBackendRollbackBlock(
       compat([
         {
-          backend_repo: "ippoan/rust-alc-api",
+          backend_repo: "ippoan/example-multi",
           current_image: "x",
           current_tag: null,
           deployed_at: null,
@@ -821,9 +824,9 @@ describe("renderBackendRollbackBlock", () => {
       ]),
       trafficByRepo,
     );
-    expect(html).toContain("rust-alc-api-gateway"); // 複数 service は service 名を前置
+    expect(html).toContain("example-worker"); // 複数 service は service 名を前置
     expect(html).toContain("api-1");
-    expect(html).toContain("gw-1");
+    expect(html).toContain("wk-1");
   });
 
   it("falls back to the current_image row when no backend-traffic is given", () => {
