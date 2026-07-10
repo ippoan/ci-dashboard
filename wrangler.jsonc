@@ -126,6 +126,22 @@
         {
           "pattern": "ci-dashboard.ippoan.org",
           "custom_domain": true
+        },
+        // flip 前 preview E2E (経路 B) の安定 hostname (Refs #472)。
+        // `preview-<app>.ippoan.org` を preview-router (src/release-wave/
+        // preview-router.ts) が受け、pending release の workers.dev preview URL
+        // へ proxy する。認証は CF Access `release-wave-preview` app
+        // (`preview-*.ippoan.org` wildcard) を **deploy 前に手動 setup** する
+        // こと (docs/release-wave.md「Cloudflare Access setup」節の手順)。
+        // Worker route の wildcard は hostname 先頭にしか置けないため
+        // `preview-*` パターンでは張れず、app ごとに custom_domain を列挙する。
+        {
+          "pattern": "preview-trouble.ippoan.org",
+          "custom_domain": true
+        },
+        {
+          "pattern": "preview-dtako.ippoan.org",
+          "custom_domain": true
         }
       ],
       "vars": {
@@ -149,7 +165,12 @@
         // tagless に倒す。
         // TODO: webhook / releases-page も isTaglessRepo (auto+override) に寄せて
         // 本 var の分類役割を一本化する。
-        "TAGLESS_REPOS": "ippoan/secrets-inventory,ippoan/secrets-inventory-gcp,ippoan/ci-dashboard,ippoan/HealthConnectReaderWorker,ippoan/claude-md,ippoan/mcp-relay-rs,ippoan/cc-relay,ippoan/claude-skills,ippoan/ci-workflows,ippoan/ref-files-worker,ippoan/claude-hooks,ippoan/cdp-relay,ippoan/release-wave-gcp,ippoan/ui-preview,ippoan/rust-flickr,ippoan/cf-billing-monitor,ippoan/security-notification-app,ippoan/mcp-cf-workers,ohishi-exp/rust-ichibanboshi,ohishi-exp/daiun-salary,ohishi-exp/nuxt-ichibanboshi-seikyu"
+        "TAGLESS_REPOS": "ippoan/secrets-inventory,ippoan/secrets-inventory-gcp,ippoan/ci-dashboard,ippoan/HealthConnectReaderWorker,ippoan/claude-md,ippoan/mcp-relay-rs,ippoan/cc-relay,ippoan/claude-skills,ippoan/ci-workflows,ippoan/ref-files-worker,ippoan/claude-hooks,ippoan/cdp-relay,ippoan/release-wave-gcp,ippoan/ui-preview,ippoan/rust-flickr,ippoan/cf-billing-monitor,ippoan/security-notification-app,ippoan/mcp-cf-workers,ohishi-exp/rust-ichibanboshi,ohishi-exp/daiun-salary,ohishi-exp/nuxt-ichibanboshi-seikyu",
+        // flip 前 preview router の app → repo 対応 (Refs #472)。
+        // `preview-<app>.ippoan.org` の <app> をキーに、proxy 先 frontend の
+        // pending-release repo と、override cookie で組合せる backend repo を引く。
+        // app を追加したら上の routes に custom_domain も追加すること。
+        "PREVIEW_ROUTER_APPS": "{\"trouble\":{\"repo\":\"ippoan/nuxt-trouble\",\"backend\":\"ippoan/rust-alc-api\"},\"dtako\":{\"repo\":\"ohishi-exp/nuxt-dtako-admin\",\"worker\":\"dtako-admin\",\"backend\":\"ippoan/rust-alc-api\"}}"
       },
       "kv_namespaces": [
         {

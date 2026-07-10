@@ -69,6 +69,10 @@ import {
   handlePwaIcon,
 } from "./pwa";
 import { listDraftPrs } from "./draft-prs";
+import {
+  matchPreviewHost,
+  handlePreviewRouter,
+} from "./release-wave/preview-router";
 
 export { CIDashboardHub } from "./hub";
 export { ReleaseWaveHub } from "./release-wave/do";
@@ -121,6 +125,13 @@ export interface Env extends AuthClientWorkerEnv {
    * Secret Manager の両方に同名 entry を投入する (PR4 で結線予定)。
    */
   DISCORD_BOT_TOKEN?: SecretsStoreSecret;
+  /**
+   * flip 前 preview E2E (経路 B) の安定 hostname router 設定 (Refs #472)。
+   * JSON: `{"<app>": {"repo": "owner/name", "worker"?, "backend"?}}`。
+   * `preview-<app>.ippoan.org` への request を pending release の workers.dev
+   * preview URL に proxy する。未設定なら router は全 preview hostname で 404。
+   */
+  PREVIEW_ROUTER_APPS?: string;
 }
 
 // OAuth flow config — shared between /oauth/login, /oauth/callback, and the
@@ -559,8 +570,14 @@ app.post("/api/release-wave/backend-rollback", (c) =>
 
 // Queues consumer を載せるため Hono app を module worker 形に包む。
 // `fetch` は従来どおり app に委譲 (tests の worker.fetch も互換)。
+// `preview-<app>.ippoan.org` (flip 前 preview の安定 hostname、Refs #472) 宛
+// だけは Hono routing より前に host で分岐して preview-router へ流す。
 export default {
-  fetch: app.fetch,
+  fetch: (req: Request, env: Env, ctx: ExecutionContext) => {
+    const previewApp = matchPreviewHost(req);
+    if (previewApp !== null) return handlePreviewRouter(req, env, previewApp);
+    return app.fetch(req, env, ctx);
+  },
   queue: (batch: MessageBatch<QueueMessage>, env: Env) =>
     consumeWebhookBatch(batch, env),
 };
