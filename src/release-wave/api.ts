@@ -599,6 +599,7 @@ export type PendingFlipAllResult =
 export async function pendingFlipAllCore(
   env: Env,
   actor: string,
+  filterRepos?: ReadonlySet<string>,
 ): Promise<PendingFlipAllResult> {
   if (!env.COMPAT_KV) {
     return { ok: false, code: "KV_NOT_CONFIGURED", error: "COMPAT_KV is not bound" };
@@ -610,7 +611,11 @@ export async function pendingFlipAllCore(
   // 未 tag version の flip は禁止 (single flip と同じ gate)。tag が無い version は
   // v* tag リリース (= prod テスト gate) を経ていないため、一括 flip でも対象外に
   // する。tag 付き (release 由来) のみ flip する。Refs ippoan/ci-dashboard#237。
-  const unified = all.filter((u) => !!u.tag);
+  // filterRepos を渡すと、その repo 集合に限定して flip する (auto-flip の armed set
+  // 限定発火用、Refs #476)。未指定は従来どおり全 pending を対象にする。
+  const unified = all
+    .filter((u) => !!u.tag)
+    .filter((u) => !filterRepos || filterRepos.has(u.repo));
   if (unified.length === 0) {
     // flip 可能 (tag 付き) 対象が無ければ no-op。未 tag のみ残っていても flip しない。
     return { ok: true, flipped: [] };

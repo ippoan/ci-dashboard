@@ -38,6 +38,11 @@ import {
   type TrafficRecord,
   type TrafficVersion,
 } from "./traffic";
+import {
+  getAutoFlipArm,
+  computeArmProgress,
+  type AutoFlipArmView,
+} from "./auto-flip";
 
 function escapeHtml(s: string): string {
   return s
@@ -62,9 +67,72 @@ const AMBER = "#f29900";
 const GRAY = "#9aa0a6";
 const DARKGRAY = "#5f6368";
 
+/**
+ * 「⚡ Tag Release all + Auto Flip」ボタンと armed 状態の帯を HTML で返す (Refs #476)。
+ *
+ * - armed 中: 進捗「M/N released · expires MM-DD HH:mm」+ 残り repo + Disarm ボタン。
+ *   blocked (compat gate 不通過) なら理由と「自動 flip は止まっている」注記。
+ * - armed 無し: releasable repo が 2 件以上のとき arm ボタンを出す (confirm 付き)。
+ *   1 件以下は個別 Tag Release ボタンで足りるので出さない。
+ */
+export function renderAutoFlipControls(
+  releasableRepos: string[],
+  armView?: AutoFlipArmView | null,
+): string {
+  if (armView) {
+    const { arm, progress } = armView;
+    const disarm = `
+      <form method="post" action="/api/release-wave/auto-flip/disarm" style="margin:0;display:inline-block"
+            onsubmit="return confirm('Auto-flip を解除しますか？ (tag release 済みの分はそのまま残ります)');">
+        <button type="submit" title="armed を解除する (tag release 済みの pending はそのまま)">Disarm</button>
+      </form>`;
+    if (arm.status === "blocked") {
+      return `
+      <div style="margin:8px 0;padding:8px 10px;border-radius:6px;background:#fce8e6;border:1px solid #d93025">
+        <strong>⚡ Auto-flip blocked</strong>
+        <span class="meta">${escapeHtml(arm.blocked_reason ?? "compatibility 未検証")}</span>
+        <div class="meta" style="margin-top:4px">
+          全 repo は release 済みですが compatibility gate で自動 flip を止めました。
+          手動で <strong>Flip all</strong> するか Disarm してください。 ${disarm}
+        </div>
+      </div>`;
+    }
+    const remaining =
+      progress.pendingRepos.length > 0
+        ? `<div class="meta" style="margin-top:4px">残り: ${escapeHtml(progress.pendingRepos.join(", "))}</div>`
+        : "";
+    return `
+      <div style="margin:8px 0;padding:8px 10px;border-radius:6px;background:#e8f0fe;border:1px solid #1a73e8">
+        <strong>⚡ Auto-flip armed</strong>
+        <span class="badge" style="background:${AMBER}">${progress.released}/${progress.total} released</span>
+        <span class="meta">expires ${escapeHtml(shortWhen(arm.expires_at))} UTC</span>
+        ${disarm}
+        <div class="meta" style="margin-top:4px">
+          全 ${progress.total} repo の release が揃うと自動で Flip all します。
+        </div>
+        ${remaining}
+      </div>`;
+  }
+
+  // armed 無し: releasable が 2 件以上のときだけ arm ボタンを出す。
+  if (releasableRepos.length < 2) return "";
+  const list = [...new Set(releasableRepos)].sort();
+  return `
+    <div style="margin:8px 0">
+      <form method="post" action="/api/release-wave/auto-flip/arm" style="margin:0;display:inline-block"
+            onsubmit="return confirm('${list.length} 件の repo を tag release し、全部の release 完了後に自動で Flip all します。よろしいですか？');">
+        <input type="hidden" name="repos" value="${escapeHtml(list.join(","))}">
+        <button type="submit" title="${list.length} repo を一括 tag release し、全 release 完了で自動 flip する">
+          ⚡ Tag Release all + Auto Flip (${list.length})
+        </button>
+      </form>
+    </div>`;
+}
+
 /** 監視対象 repo の tag 状況テーブル + サマリを HTML で返す (tagless は除外)。 */
 export function renderRepoReleaseStatusSection(
   statuses: RepoReleaseStatus[],
+  armView?: AutoFlipArmView | null,
 ): string {
   // tagless repo はリリース対象ではないので一覧から除外する。
   const visible = statuses.filter((s) => !s.tagless);
@@ -137,15 +205,23 @@ export function renderRepoReleaseStatusSection(
           <tbody>${rows}</tbody>
         </table>`;
 
+  // Auto-flip 対象 = release を促すべき repo (未tag / behind)。arm ボタン /
+  // armed 帯を summary の直下に出す (Refs #476)。
+  const releasableRepos = visible.filter(needsRelease).map((s) => s.repo);
+  const autoFlipControls = renderAutoFlipControls(releasableRepos, armView);
+
   return `
     <div class="section">
       <h2>Repo リリース状況${helpMark(
         `監視対象 repo の tag 有無と main HEAD からの乖離 (tagless repo は除外)。
         <span class="badge" style="background:${GREEN}">緑 = tag あり</span>
         <span class="badge" style="background:${RED}">赤 = 未tag</span>
-        の repo を直接 Tag Release できる (tag 採番は各 repo の tag-release.yml)。`,
+        の repo を直接 Tag Release できる (tag 採番は各 repo の tag-release.yml)。
+        「⚡ Tag Release all + Auto Flip」は要リリース repo を一括 tag release し、
+        全 release 完了で自動 Flip all する (Refs #476)。`,
       )}</h2>
       <div style="margin:8px 0">${summary}</div>
+      ${autoFlipControls}
       ${tableOrEmpty}
     </div>`;
 }
@@ -845,7 +921,19 @@ export async function handleReleaseWaveListPageWithRepoStatus(
     }
   }
 
-  const section = renderRepoReleaseStatusSection(statuses);
+  // Auto-flip armed 状態 (Refs #476)。取得失敗時は帯を出さず degrade。
+  let armView: AutoFlipArmView | null = null;
+  try {
+    const arm = await getAutoFlipArm(env);
+    if (arm) {
+      const progress = await computeArmProgress(env, arm);
+      armView = { arm, progress };
+    }
+  } catch {
+    armView = null;
+  }
+
+  const section = renderRepoReleaseStatusSection(statuses, armView);
   let html = await res.text();
   html = injectRepoStatusSection(html, section);
 

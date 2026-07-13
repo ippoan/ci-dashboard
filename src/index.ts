@@ -31,6 +31,10 @@ import {
   handleReleaseWaveTagReleaseAll,
 } from "./release-wave/tag-release-action";
 import { handleReleaseWaveListPageWithRepoStatus } from "./release-wave/repo-status-section";
+import {
+  handleReleaseWaveAutoFlipArm,
+  handleReleaseWaveAutoFlipDisarm,
+} from "./release-wave/auto-flip";
 import { handleMcpRequest } from "./mcp/server";
 import {
   handleContractAppliedWebhook,
@@ -411,6 +415,16 @@ app.post("/api/release-wave/tag-release", (c) =>
 // の tag-release.yml をまとめて dispatch する。
 app.post("/api/release-wave/tag-release-all", (c) =>
   handleReleaseWaveTagReleaseAll(c.req.raw, c.env),
+);
+// Tag Release all + Auto Flip (armed 機構, Refs #476)。form field `repos` の
+// tag-release.yml を一括 dispatch し、armed set を登録する。全 repo の release が
+// pending に揃い compat gate を通れば worker が flip all を自動発火する。
+app.post("/api/release-wave/auto-flip/arm", (c) =>
+  handleReleaseWaveAutoFlipArm(c.req.raw, c.env),
+);
+// armed を手動解除する。
+app.post("/api/release-wave/auto-flip/disarm", (c) =>
+  handleReleaseWaveAutoFlipDisarm(c.req.raw, c.env),
 );
 
 // Recheck
