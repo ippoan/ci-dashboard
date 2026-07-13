@@ -1679,3 +1679,58 @@ describe("consumeWebhookBatch — refresh self-reschedule (Refs #337)", () => {
     expect(sent).toHaveLength(0);
   });
 });
+
+describe("consumeWebhookBatch — auto-flip-recheck routing (Refs #481)", () => {
+  beforeEach(async () => {
+    resetHubCalls();
+    await env.COMPAT_KV.delete("auto-flip-arm::latest");
+    await env.COMPAT_KV.delete("auto-flip::recheck-scheduled");
+    await env.COMPAT_KV.delete("pending-release::ippoan/a");
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  function recheckBatch(acked: string[]) {
+    return {
+      messages: [{
+        body: { kind: "auto-flip-recheck" },
+        attempts: 1,
+        ack: () => acked.push("af"),
+        retry: () => { throw new Error("should not retry"); },
+      }],
+    } as unknown as MessageBatch<import("../src/webhook").QueueMessage>;
+  }
+
+  it("auto-flip-recheck message を runAutoFlipRecheck に振り分けて ack する (未 ready はループ継続)", async () => {
+    // armed [a,b]、pending は a のみ = 未 ready。
+    await env.COMPAT_KV.put("auto-flip-arm::latest", JSON.stringify({
+      schema_version: 1,
+      repos: ["ippoan/a", "ippoan/b"],
+      armed_at: "2026-07-13T00:00:00.000Z",
+      expires_at: "2099-01-01T00:00:00.000Z",
+      actor: "me@example.com",
+      status: "armed",
+      blocked_reason: null,
+    }));
+    await env.COMPAT_KV.put("pending-release::ippoan/a", JSON.stringify({
+      schema_version: 1, repo: "ippoan/a", version_id: "a-vid", tag: "v1.0.0",
+      preview_url: null, uploaded_at: "2026-07-13T00:00:00.000Z",
+    }));
+
+    const sent: Array<{ msg: unknown; opts: unknown }> = [];
+    const queueEnv = {
+      ...testEnv(),
+      COMPAT_KV: env.COMPAT_KV,
+      WEBHOOK_QUEUE: { send: async (msg: unknown, opts: unknown) => { sent.push({ msg, opts }); } },
+    } as unknown as Env;
+    const acked: string[] = [];
+
+    await consumeWebhookBatch(recheckBatch(acked), queueEnv);
+
+    // message は ack される。
+    expect(acked).toEqual(["af"]);
+    // 未 ready なので次の tick を再予約 (ループ継続)。
+    expect(sent).toHaveLength(1);
+    expect(sent[0].msg).toEqual({ kind: "auto-flip-recheck" });
+    expect(sent[0].opts).toEqual({ delaySeconds: 60 });
+  });
+});

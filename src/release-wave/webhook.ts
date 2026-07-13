@@ -27,7 +27,7 @@ import {
   computeCompatibility,
 } from "./compat";
 import { recordPendingRelease } from "./pending-release";
-import { maybeAutoFlip } from "./auto-flip";
+import { maybeAutoFlip, scheduleAutoFlipRecheck } from "./auto-flip";
 import { recordTraffic } from "./traffic";
 import { dispatchAll, decideBackendDeployRetestDispatches } from "./dispatch";
 import {
@@ -420,11 +420,28 @@ export async function handlePendingReleaseWebhook(
     }
   }
 
-  // Auto-flip (armed 機構, Refs #476)。この repo の release が pending に載ったので、
-  // armed set の全 repo が揃ったか判定し、揃って compat gate も通れば flip all を
-  // 自動発火する。best-effort — armed 判定 / flip の失敗で report 200 は止めない。
+  // Auto-flip (armed 機構, Refs #476 / #481)。この repo の release が pending に
+  // 載ったので、armed set の全 repo が揃ったか判定し、揃って compat gate も通れば
+  // flip all を自動発火する。`v.data.repo` を justReleasedRepo hint として渡し、
+  // 自分の書き込みが `kv.list` に未反映でも released 扱いで即 flip できるようにする。
+  // さらに、webhook 到達と切り離した recheck ループを (未起動なら) 予約して、list
+  // ラグ・取りこぼし・flip 失敗を後追いで回収する。best-effort — armed 判定 / flip の
+  // 失敗で report 200 は止めない。
   try {
-    await maybeAutoFlip(env, new Date().toISOString());
+    const outcome = await maybeAutoFlip(
+      env,
+      new Date().toISOString(),
+      v.data.repo,
+    );
+    console.log(
+      JSON.stringify({
+        msg: "auto-flip",
+        trigger: "pending-release",
+        repo: v.data.repo,
+        outcome,
+      }),
+    );
+    await scheduleAutoFlipRecheck(env);
   } catch {
     // armed 機構の失敗は release 報告を妨げない (armed record は残り timeout で中断)。
   }
