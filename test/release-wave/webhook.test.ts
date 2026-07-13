@@ -6,6 +6,7 @@ import {
   handleTrafficReportWebhook,
   handleBackendTrafficReportWebhook,
   handleBackendDeployReportWebhook,
+  handleFrontendTestReportWebhook,
 } from "../../src/release-wave/webhook";
 import { recordFrontendTest } from "../../src/release-wave/compat";
 import { getPendingRelease } from "../../src/release-wave/pending-release";
@@ -47,6 +48,7 @@ function memKv(seed: Record<string, unknown> = {}): KVNamespace {
 type FakeSpies = {
   contractApplied: ReturnType<typeof vi.fn>;
   flipReport: ReturnType<typeof vi.fn>;
+  broadcast: ReturnType<typeof vi.fn>;
 };
 
 function fakeEnv(opts: {
@@ -67,6 +69,8 @@ function fakeEnv(opts: {
     flipReport: vi
       .fn()
       .mockResolvedValue(opts.flipReportReturn ?? { ok: true, data: okState }),
+    // KV 系 report handler が live 更新のため呼ぶ broadcast (Refs #479)。
+    broadcast: vi.fn().mockResolvedValue(undefined),
   };
   const hub = spies as unknown as ReleaseWaveHub;
   const env = {
@@ -999,5 +1003,114 @@ describe("handlePendingReleaseWebhook staged_image pre-flip retest", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
     const rec = await getPendingRelease(kv, "ippoan/rust-alc-api");
     expect(rec!.staged_image ?? null).toBeNull();
+  });
+});
+
+// ============================================================================
+// live 更新 broadcast (Refs #479)
+// ============================================================================
+//
+// KV だけを書く report 系 handler は DO の saveWave を通らないため、live 更新
+// (`/release-wave` を開いているブラウザの部分更新) を発火させるには handler 自身
+// が明示的に ReleaseWaveHub.broadcast() を呼ぶ必要がある。成功時に broadcast が
+// 呼ばれること、および broadcast の失敗が report の 200 を止めないことを検証する。
+
+describe("KV report webhooks broadcast for live update (Refs #479)", () => {
+  const FT_URL =
+    "https://ci-dashboard.ippoan.org/webhooks/release-wave/frontend-test-report";
+
+  it("traffic-report broadcasts on success", async () => {
+    const { env, spies } = fakeEnv({ compatKv: memKv() });
+    const resp = await handleTrafficReportWebhook(
+      jsonRequest({
+        url: TRAFFIC_URL,
+        secret: "expected-secret",
+        body: { repo: "ippoan/x", versions: [{ version_id: "v", percentage: 100 }] },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(200);
+    expect(spies.broadcast).toHaveBeenCalledOnce();
+  });
+
+  it("pending-release broadcasts on success", async () => {
+    const { env, spies } = fakeEnv({ compatKv: memKv() });
+    const resp = await handlePendingReleaseWebhook(
+      jsonRequest({
+        url: PENDING_URL,
+        secret: "expected-secret",
+        body: { repo: "ippoan/x", version_id: "id", tag: "v0.0.1" },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(200);
+    expect(spies.broadcast).toHaveBeenCalledOnce();
+  });
+
+  it("backend-traffic-report broadcasts on success", async () => {
+    const { env, spies } = fakeEnv({ compatKv: memKv() });
+    const resp = await handleBackendTrafficReportWebhook(
+      jsonRequest({
+        url: BACKEND_TRAFFIC_URL,
+        secret: "expected-secret",
+        body: {
+          repo: "ippoan/x",
+          services: [{ service: "x", revisions: [{ revision: "x-1", percent: 100 }] }],
+        },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(200);
+    expect(spies.broadcast).toHaveBeenCalledOnce();
+  });
+
+  it("backend-deploy-report broadcasts on success", async () => {
+    const { env, spies } = fakeEnv({ compatKv: memKv() });
+    const resp = await handleBackendDeployReportWebhook(
+      jsonRequest({
+        url: BD_URL,
+        secret: "expected-secret",
+        body: {
+          repo: "ippoan/x",
+          current_image: "x-00001-abc",
+          deployed_by: "test",
+        },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(200);
+    expect(spies.broadcast).toHaveBeenCalledOnce();
+  });
+
+  it("frontend-test-report broadcasts on success", async () => {
+    const { env, spies } = fakeEnv({ compatKv: memKv() });
+    const resp = await handleFrontendTestReportWebhook(
+      jsonRequest({
+        url: FT_URL,
+        secret: "expected-secret",
+        body: {
+          repo: "ippoan/x",
+          prod_version: "v0.0.1",
+          tested: { backend_repo: "ippoan/y", backend_image: "y-00001-abc" },
+        },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(200);
+    expect(spies.broadcast).toHaveBeenCalledOnce();
+  });
+
+  it("still returns 200 when broadcast throws (best-effort)", async () => {
+    const { env, spies } = fakeEnv({ compatKv: memKv() });
+    spies.broadcast.mockRejectedValueOnce(new Error("DO unreachable"));
+    const resp = await handleTrafficReportWebhook(
+      jsonRequest({
+        url: TRAFFIC_URL,
+        secret: "expected-secret",
+        body: { repo: "ippoan/x", versions: [{ version_id: "v", percentage: 100 }] },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(200);
   });
 });

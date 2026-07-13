@@ -135,6 +135,13 @@ describe("handleReleaseWaveListPage", () => {
     expect(html).toContain('href="/release-wave"');
   });
 
+  it("wraps the dynamic content in #rw-live for partial live updates (Refs #479)", async () => {
+    const env = fakeEnv({ listReturn: [] });
+    const html = await (await handleReleaseWaveListPage(env)).text();
+    // live.js が部分更新で中身を差し替える対象アンカー。
+    expect(html).toContain('class="wave-grid" id="rw-live"');
+  });
+
   it("shows the Pending releases section placeholder when none (Refs #181 / #237)", async () => {
     const env = fakeEnv({ listReturn: [], compatKv: memKv() });
     const html = await (await handleReleaseWaveListPage(env)).text();

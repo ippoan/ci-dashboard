@@ -623,7 +623,7 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
       <a class="refresh-btn" href="/release-wave"
         title="ページを再取得して最新状態に更新する (ブラウザキャッシュ無視 = ハードリセット)">🔄 更新（ハードリセット）</a>
     </div>
-    <div class="wave-grid">
+    <div class="wave-grid" id="rw-live">
       <div class="wave-col">
         ${compatSection}
       </div>
