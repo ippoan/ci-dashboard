@@ -69,6 +69,23 @@ function hubStub(env: Env): DurableObjectStub<ReleaseWaveHub> {
 }
 
 /**
+ * `/release-wave` を開いている全ブラウザに「変わったよ」シグナルを送る (Refs #479)。
+ *
+ * DO state を変える webhook (contract-applied / flip-report) は `saveWave` 経由で
+ * 既に broadcast するが、KV だけを書く report 系 (traffic / pending-release /
+ * backend-deploy / frontend-test / backend-traffic) は DO を通らないため、ここで
+ * 明示的に broadcast して live 更新を発火させる。best-effort — DO 呼び出しの失敗で
+ * report の 200 応答を止めない (次の report / 手動リロードで追従できる)。
+ */
+async function broadcastChange(env: Env): Promise<void> {
+  try {
+    await hubStub(env).broadcast();
+  } catch {
+    // broadcast 失敗は live 更新の取りこぼしに留め、report 自体は成功扱いにする。
+  }
+}
+
+/**
  * 共通 prologue: method check + secret check + body parse + zod validate。
  * 成功時に validated body を返し、失敗時に Response を返す (caller は早期 return)。
  */
@@ -258,6 +275,8 @@ export async function handleFrontendTestReportWebhook(
     },
     now: new Date().toISOString(),
   });
+  // compatibility グラフ (tested/untested) が変わった → live 更新。
+  await broadcastChange(env);
   return jsonResponse(200, { ok: true, record });
 }
 
@@ -318,6 +337,8 @@ export async function handleBackendDeployReportWebhook(
     await dispatchAll(env, dispatches);
   }
 
+  // 新 backend image が prod に出た → 開いている /release-wave を live 更新。
+  await broadcastChange(env);
   return jsonResponse(200, { ok: true, record });
 }
 
@@ -408,6 +429,8 @@ export async function handlePendingReleaseWebhook(
     // armed 機構の失敗は release 報告を妨げない (armed record は残り timeout で中断)。
   }
 
+  // Pending releases / auto-flip 進捗が変わった → 開いている /release-wave を live 更新。
+  await broadcastChange(env);
   return jsonResponse(200, { ok: true, record });
 }
 
@@ -528,6 +551,8 @@ export async function handleTrafficReportWebhook(
     })),
     now: new Date().toISOString(),
   });
+  // Traffic (version split) / Current (live) が変わった → live 更新。
+  await broadcastChange(env);
   return jsonResponse(200, { ok: true, record });
 }
 
@@ -604,5 +629,7 @@ export async function handleBackendTrafficReportWebhook(
     services,
     now: new Date().toISOString(),
   });
+  // Backend traffic / rollback (Cloud Run revision) が変わった → live 更新。
+  await broadcastChange(env);
   return jsonResponse(200, { ok: true, record });
 }
