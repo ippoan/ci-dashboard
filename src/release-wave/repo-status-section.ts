@@ -72,8 +72,8 @@ const DARKGRAY = "#5f6368";
  *
  * - armed 中: 進捗「M/N released · expires MM-DD HH:mm」+ 残り repo + Disarm ボタン。
  *   blocked (compat gate 不通過) なら理由と「自動 flip は止まっている」注記。
- * - armed 無し: releasable repo が 2 件以上のとき arm ボタンを出す (confirm 付き)。
- *   1 件以下は個別 Tag Release ボタンで足りるので出さない。
+ * - armed 無し: releasable repo が 1 件以上なら arm ボタンを出す (confirm 付き)。
+ *   1 件でも「tag release → 完了待ち → 自動 flip」で手動 Flip のクリック待ちを省ける。
  */
 export function renderAutoFlipControls(
   releasableRepos: string[],
@@ -114,8 +114,9 @@ export function renderAutoFlipControls(
       </div>`;
   }
 
-  // armed 無し: releasable が 2 件以上のときだけ arm ボタンを出す。
-  if (releasableRepos.length < 2) return "";
+  // armed 無し: releasable が 1 件以上なら arm ボタンを出す。1 件でも「tag release
+  // → 完了を待って自動 flip」で手動クリック待ちを省ける (Refs #476)。
+  if (releasableRepos.length < 1) return "";
   const list = [...new Set(releasableRepos)].sort();
   return `
     <div style="margin:8px 0">

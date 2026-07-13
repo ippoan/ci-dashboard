@@ -290,8 +290,14 @@ describe("renderAutoFlipControls", () => {
     expect(html).toContain('value="ippoan/a,ippoan/b"');
   });
 
-  it("releasable 1 件以下では arm ボタンを出さない", () => {
-    expect(renderAutoFlipControls(["ippoan/a"], null)).toBe("");
+  it("releasable 1 件でも arm ボタンを出す (flip 高速化)", () => {
+    const html = renderAutoFlipControls(["ippoan/a"], null);
+    expect(html).toContain("/api/release-wave/auto-flip/arm");
+    expect(html).toContain("Tag Release all + Auto Flip (1)");
+    expect(html).toContain('value="ippoan/a"');
+  });
+
+  it("releasable 0 件では arm ボタンを出さない", () => {
     expect(renderAutoFlipControls([], null)).toBe("");
   });
 

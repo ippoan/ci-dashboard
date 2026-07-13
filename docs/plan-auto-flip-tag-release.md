@@ -82,8 +82,9 @@ best-effort (try/catch) で呼ぶ:
 
 ## UI (`renderRepoReleaseStatusSection`)
 
-- 要リリース repo が 2 件以上のとき「⚡ Tag Release all + Auto Flip (N)」ボタンを
+- 要リリース repo が 1 件以上のとき「⚡ Tag Release all + Auto Flip (N)」ボタンを
   出す (form → arm、confirm 付き)。hidden `repos` に needsRelease な repo 集合。
+  1 件でも「tag release → 完了待ち → 自動 flip」で手動 Flip のクリック待ちを省ける。
 - armed record があれば summary 下に帯を出す:
   - `armed`: 「Auto-flip armed: M/N released · expires HH:MM」+ Disarm ボタン。
   - `blocked`: 理由 + Disarm ボタン (自動 flip は止まっている)。
