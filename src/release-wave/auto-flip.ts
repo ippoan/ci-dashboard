@@ -31,6 +31,23 @@ export const AUTO_FLIP_DEFAULT_TTL_SECONDS = 30 * 60;
 /** KV expirationTtl の下限 (Cloudflare KV は 60 秒未満を受け付けない)。 */
 const KV_MIN_TTL_SECONDS = 60;
 
+/**
+ * Queue job (Refs #481): armed 中の auto-flip を webhook 到達と切り離して定期
+ * 再評価する。webhook 駆動だけだと (1) 最後の repo の release が自分の
+ * `kv.list` にまだ反映されず ready 未検知、(2) その後の再トリガー欠如、で armed が
+ * 固着する。既存の `WEBHOOK_QUEUE` に遅延メッセージを流し、armed が clear /
+ * expire するまで再評価ループを自走させる。
+ */
+export interface AutoFlipRecheckMessage {
+  kind: "auto-flip-recheck";
+}
+
+/** recheck の遅延 (秒)。KV list の結果キャッシュ (最大 60s) を跨いで再評価する。 */
+export const AUTO_FLIP_RECHECK_DELAY_SECONDS = 60;
+
+/** 重複予約防止 marker。scheduleReleasesIndexRekick (#337) と同方式。 */
+const AUTO_FLIP_RECHECK_MARKER = "auto-flip::recheck-scheduled";
+
 /** armed 状態の record。KV `auto-flip-arm::latest` に最新 1 件だけ保持。 */
 export interface AutoFlipArmRecord {
   schema_version: typeof SCHEMA_VERSION;
@@ -173,6 +190,7 @@ export type AutoFlipOutcome =
 export async function maybeAutoFlip(
   env: Env,
   now: string,
+  justReleasedRepo?: string | null,
 ): Promise<AutoFlipOutcome> {
   if (!env.COMPAT_KV) return { action: "none" };
   const arm = await getAutoFlipArm(env);
@@ -188,7 +206,16 @@ export async function maybeAutoFlip(
   if (arm.status === "blocked") return { action: "none" };
 
   const progress = await computeArmProgress(env, arm);
-  if (!progress.ready) return { action: "none" };
+  // `kv.list` は最大 60s ラグる (Refs #481)。pending-release webhook が「今 release
+  // した」と確証を持つ repo (= 直前に tag 付き pending-release:: を書いた repo) は、
+  // list 反映を待たず released 扱いにして readiness を判定する。これで「最後の repo
+  // の webhook が自分の list 未反映で ready を取り逃す」共通ケースを即 flip できる。
+  const pendingRepos =
+    justReleasedRepo && arm.repos.includes(justReleasedRepo)
+      ? progress.pendingRepos.filter((r) => r !== justReleasedRepo)
+      : progress.pendingRepos;
+  const ready = arm.repos.length > 0 && pendingRepos.length === 0;
+  if (!ready) return { action: "none" };
 
   // compat gate: 非互換 (checked && !verified) なら自動 flip せず blocked に落とす。
   // checked=false (誰も互換性 test していない) は既存 approve gate と同じく素通し。
@@ -228,6 +255,71 @@ export async function maybeAutoFlip(
   }
   await clearAutoFlipArm(env);
   return { action: "flipped", flipped: result.flipped.length };
+}
+
+// ----------------------------------------------------------------------------
+// Queue 駆動の定期再評価ループ (Refs #481)
+// ----------------------------------------------------------------------------
+
+/**
+ * 次の recheck を遅延 enqueue する。armed が無ければ何もしない (無駄な tick を
+ * 積まない)。重複予約は KV marker で dedup し、arm 時・各 webhook 時・recheck 時に
+ * 何度呼んでも同時に走る chain は 1 本に保つ (scheduleReleasesIndexRekick と同方式)。
+ * queue binding が無い環境 (dev / test) は no-op — その場合 webhook 駆動のみで動く。
+ */
+export async function scheduleAutoFlipRecheck(env: Env): Promise<void> {
+  if (!env.WEBHOOK_QUEUE || !env.COMPAT_KV) return;
+  const arm = await getAutoFlipArm(env);
+  if (!arm || arm.status !== "armed") return; // 監視対象が無ければ予約しない
+  if (await env.COMPAT_KV.get(AUTO_FLIP_RECHECK_MARKER)) return; // 予約済み
+  await env.COMPAT_KV.put(AUTO_FLIP_RECHECK_MARKER, "1", {
+    expirationTtl: KV_MIN_TTL_SECONDS,
+  });
+  try {
+    await env.WEBHOOK_QUEUE.send(
+      { kind: "auto-flip-recheck" },
+      { delaySeconds: AUTO_FLIP_RECHECK_DELAY_SECONDS },
+    );
+  } catch {
+    // 送信失敗は次の webhook / arm の enqueue に委ねる (marker は TTL で自然消滅)。
+  }
+}
+
+/**
+ * recheck queue job の本体。webhook 到達と切り離して maybeAutoFlip を実行し、まだ
+ * armed が残るなら次の tick を予約してループを継続する (armed が clear / expire /
+ * blocked になったら停止)。best-effort — 例外は握り潰し、ループが死なないよう
+ * 続行可能な限り再予約する。
+ */
+export async function runAutoFlipRecheck(env: Env): Promise<void> {
+  // このジョブが消化された = 次の予約を許可するため marker を消す (delay > marker
+  // TTL でなくても確実に再予約できるようにする)。
+  if (env.COMPAT_KV) {
+    try {
+      await env.COMPAT_KV.delete(AUTO_FLIP_RECHECK_MARKER);
+    } catch {
+      // marker 削除失敗は TTL 消滅に委ねる。
+    }
+  }
+  let outcome: AutoFlipOutcome = { action: "none" };
+  try {
+    outcome = await maybeAutoFlip(env, new Date().toISOString());
+  } catch (e) {
+    outcome = {
+      action: "flip_failed",
+      error: e instanceof Error ? e.message : String(e),
+    };
+  }
+  console.log(
+    JSON.stringify({ msg: "auto-flip-recheck", outcome }),
+  );
+  // まだ armed が残る (未 ready / flip 失敗) 場合のみ次の tick を予約する。
+  // flipped / expired / disarmed / blocked では arm が armed でなくなるので停止。
+  try {
+    await scheduleAutoFlipRecheck(env);
+  } catch {
+    // 次の webhook 到達が拾う。
+  }
 }
 
 // ----------------------------------------------------------------------------
@@ -337,6 +429,10 @@ export async function handleReleaseWaveAutoFlipArm(
     actor: actorEmail(req),
     now: new Date().toISOString(),
   });
+
+  // 3. webhook 到達と切り離した再評価ループを起動する (Refs #481)。webhook が
+  // list ラグや取りこぼしで ready を検知し損ねても、この recheck が拾って flip する。
+  await scheduleAutoFlipRecheck(env);
 
   return redirectToList();
 }

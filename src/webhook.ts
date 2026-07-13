@@ -33,6 +33,10 @@ import { extractRefIssues } from "./release-helpers";
 import type { RefsPatchOutcome } from "./releases-index-patch";
 import { noteGitHubAuthBroken } from "./github-backoff";
 import { refreshReleasesIndex } from "./releases-page";
+import {
+  runAutoFlipRecheck,
+  type AutoFlipRecheckMessage,
+} from "./release-wave/auto-flip";
 
 // Queue 経由で consumer に渡す raw event (Refs #318)。body は署名検証済みの
 // raw JSON 文字列をそのまま積む (consumer 側で event 別に parse する)。
@@ -60,7 +64,8 @@ export interface ReleasesIndexKvBackupMessage {
 export type QueueMessage =
   | WebhookQueueMessage
   | ReleasesIndexRefreshMessage
-  | ReleasesIndexKvBackupMessage;
+  | ReleasesIndexKvBackupMessage
+  | AutoFlipRecheckMessage;
 
 // Self-reschedule の重複防止 marker (Refs #337)。60s 遅延 job が既に予約済み
 // なら積み増さない。KV expirationTtl の最小値 60s に合わせる。
@@ -385,12 +390,15 @@ export async function consumeWebhookBatch(
   const eventMessages: Message<QueueMessage>[] = [];
   const refreshMessages: Message<QueueMessage>[] = [];
   const kvBackupMessages: Message<QueueMessage>[] = [];
+  const autoFlipMessages: Message<QueueMessage>[] = [];
   for (const message of batch.messages) {
     if ("kind" in message.body) {
       if (message.body.kind === "releases-index-refresh") {
         refreshMessages.push(message);
       } else if (message.body.kind === "releases-index-kv-backup") {
         kvBackupMessages.push(message);
+      } else if (message.body.kind === "auto-flip-recheck") {
+        autoFlipMessages.push(message);
       } else {
         eventMessages.push(message);
       }
@@ -440,6 +448,23 @@ export async function consumeWebhookBatch(
       // reader (DO 直叩き) は影響を受けない。
       for (const m of kvBackupMessages) m.ack();
     }
+  }
+
+  // auto-flip recheck (Refs #481): webhook 到達と切り離した定期再評価。同 batch に
+  // 複数積まれていても 1 回だけ実行すれば足りる (runAutoFlipRecheck が必要なら次の
+  // tick を再予約する)。best-effort — 失敗しても retry せず ack (ループは
+  // runAutoFlipRecheck 内の再予約 / 次の webhook で継続する)。
+  if (autoFlipMessages.length > 0) {
+    try {
+      await runAutoFlipRecheck(env);
+    } catch (err) {
+      console.log(JSON.stringify({
+        msg: "auto-flip-recheck-failed",
+        attempts: autoFlipMessages[0]?.attempts,
+        error: err instanceof Error ? err.message : String(err),
+      }));
+    }
+    for (const m of autoFlipMessages) m.ack();
   }
 
   if (refreshMessages.length === 0) return;

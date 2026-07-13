@@ -6,8 +6,11 @@ import {
   clearAutoFlipArm,
   computeArmProgress,
   maybeAutoFlip,
+  scheduleAutoFlipRecheck,
+  runAutoFlipRecheck,
   handleReleaseWaveAutoFlipArm,
   handleReleaseWaveAutoFlipDisarm,
+  AUTO_FLIP_RECHECK_DELAY_SECONDS,
   type AutoFlipArmRecord,
 } from "../../src/release-wave/auto-flip";
 import { renderAutoFlipControls } from "../../src/release-wave/repo-status-section";
@@ -275,6 +278,159 @@ describe("maybeAutoFlip", () => {
       action: "none",
     });
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("justReleasedRepo hint で kv.list 未反映の最後の repo を released 扱いにして flip する (Refs #481)", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    // b の pending-release:: がまだ list に無い (= list ラグ再現) 状態。
+    const kv = memKv({
+      "auto-flip-arm::latest": arm(["ippoan/a", "ippoan/b"]),
+      "pending-release::ippoan/a": pending("ippoan/a", "v1.0.0"),
+      "pending-release::ippoan/b": pending("ippoan/b", "v2.0.0"),
+    });
+    const env = envWith(kv);
+    // hint 無しでも memKv は強整合なので flip するが、hint 経路の回帰を固定する:
+    // b を list から見えなくするのは harness では難しいので、hint が readiness を
+    // 満たす経路 (a のみ list + b は hint) を直接検証する。
+    const kvLagging = memKv({
+      "auto-flip-arm::latest": arm(["ippoan/a", "ippoan/b"]),
+      "pending-release::ippoan/a": pending("ippoan/a", "v1.0.0"),
+      // b は未反映 (list に出ない)。
+    });
+    const envLag = envWith(kvLagging);
+    // hint 無し → b が未 release 扱いで none。
+    expect(
+      (await maybeAutoFlip(envLag, "2026-07-13T00:10:00.000Z")).action,
+    ).toBe("none");
+    // hint=b → b を released 扱いにして flip。
+    const out = await maybeAutoFlip(
+      envLag,
+      "2026-07-13T00:10:00.000Z",
+      "ippoan/b",
+    );
+    expect(out.action).toBe("flipped");
+    expect(await getAutoFlipArm(envLag)).toBeNull();
+    // 参考: 完全反映済み env でも flip する。
+    expect((await maybeAutoFlip(env, "2026-07-13T00:10:00.000Z")).action).toBe(
+      "flipped",
+    );
+  });
+
+  it("armed set に無い repo を hint に渡しても readiness には効かない", async () => {
+    const kv = memKv({
+      "auto-flip-arm::latest": arm(["ippoan/a", "ippoan/b"]),
+      "pending-release::ippoan/a": pending("ippoan/a", "v1.0.0"),
+    });
+    const env = envWith(kv);
+    // hint が armed set 外 (ippoan/z) → b は依然未 release なので none。
+    expect(
+      (await maybeAutoFlip(env, "2026-07-13T00:10:00.000Z", "ippoan/z")).action,
+    ).toBe("none");
+  });
+});
+
+// ----------------------------------------------------------------------------
+// Queue 駆動 recheck (Refs #481)
+// ----------------------------------------------------------------------------
+
+/** send spy 付き WEBHOOK_QUEUE を足した env。 */
+function envWithQueue(
+  compatKv: KVNamespace,
+  send: (...args: unknown[]) => unknown,
+): Env {
+  return {
+    ...(envWith(compatKv) as unknown as Record<string, unknown>),
+    WEBHOOK_QUEUE: { send },
+  } as unknown as Env;
+}
+
+describe("scheduleAutoFlipRecheck (Refs #481)", () => {
+  it("armed 中は delaySeconds 付きで auto-flip-recheck を enqueue し marker を立てる", async () => {
+    const send = vi.fn().mockResolvedValue(undefined);
+    const kv = memKv({ "auto-flip-arm::latest": arm(["ippoan/a"]) });
+    const env = envWithQueue(kv, send);
+    await scheduleAutoFlipRecheck(env);
+    expect(send).toHaveBeenCalledOnce();
+    expect(send.mock.calls[0][0]).toEqual({ kind: "auto-flip-recheck" });
+    expect(send.mock.calls[0][1]).toEqual({
+      delaySeconds: AUTO_FLIP_RECHECK_DELAY_SECONDS,
+    });
+    // marker が立つ。
+    expect(await kv.get("auto-flip::recheck-scheduled")).toBe("1");
+  });
+
+  it("marker がある間は重複 enqueue しない (dedup)", async () => {
+    const send = vi.fn().mockResolvedValue(undefined);
+    const kv = memKv({
+      "auto-flip-arm::latest": arm(["ippoan/a"]),
+      "auto-flip::recheck-scheduled": "1",
+    });
+    const env = envWithQueue(kv, send);
+    await scheduleAutoFlipRecheck(env);
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("armed が無ければ enqueue しない", async () => {
+    const send = vi.fn().mockResolvedValue(undefined);
+    const env = envWithQueue(memKv(), send);
+    await scheduleAutoFlipRecheck(env);
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("blocked の arm には予約しない", async () => {
+    const send = vi.fn().mockResolvedValue(undefined);
+    const kv = memKv({
+      "auto-flip-arm::latest": arm(["ippoan/a"], {
+        status: "blocked",
+        blocked_reason: "x",
+      }),
+    });
+    const env = envWithQueue(kv, send);
+    await scheduleAutoFlipRecheck(env);
+    expect(send).not.toHaveBeenCalled();
+  });
+});
+
+describe("runAutoFlipRecheck (Refs #481)", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  // runAutoFlipRecheck は実時刻 (new Date) で expiry 判定するので、テストの arm は
+  // 十分未来の expires_at を持たせて「期限内」を保つ。
+  const NOT_EXPIRED = { expires_at: "2099-01-01T00:00:00.000Z" };
+
+  it("未 ready のままなら marker を消して次の tick を再予約する (ループ継続)", async () => {
+    const send = vi.fn().mockResolvedValue(undefined);
+    const kv = memKv({
+      "auto-flip-arm::latest": arm(["ippoan/a", "ippoan/b"], NOT_EXPIRED),
+      "pending-release::ippoan/a": pending("ippoan/a", "v1.0.0"),
+      // b 未 release → 未 ready。
+      "auto-flip::recheck-scheduled": "1",
+    });
+    const env = envWithQueue(kv, send);
+    await runAutoFlipRecheck(env);
+    // 次の tick を再予約 (marker を消してから enqueue するので送信される)。
+    expect(send).toHaveBeenCalledOnce();
+    expect(await kv.get("auto-flip::recheck-scheduled")).toBe("1");
+  });
+
+  it("全 repo 揃えば flip して armed を clear し、再予約しない (ループ終了)", async () => {
+    const fetchSpy = vi
+      .fn()
+      .mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const send = vi.fn().mockResolvedValue(undefined);
+    const kv = memKv({
+      "auto-flip-arm::latest": arm(["ippoan/a", "ippoan/b"], NOT_EXPIRED),
+      "pending-release::ippoan/a": pending("ippoan/a", "v1.0.0"),
+      "pending-release::ippoan/b": pending("ippoan/b", "v2.0.0"),
+      "auto-flip::recheck-scheduled": "1",
+    });
+    const env = envWithQueue(kv, send);
+    await runAutoFlipRecheck(env);
+    // flip 済み → armed clear → 再予約しない。
+    expect(await getAutoFlipArm(env)).toBeNull();
+    expect(send).not.toHaveBeenCalled();
   });
 });
 
