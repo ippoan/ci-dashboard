@@ -600,6 +600,12 @@ export async function pendingFlipAllCore(
   env: Env,
   actor: string,
   filterRepos?: ReadonlySet<string>,
+  /**
+   * webhook が報告した権威版。auto-flip が「直前に書いた版」を KV から読み直して
+   * stale cache を掴む事故 (Refs #485) を避けるため、当該 repo の flip 対象を
+   * この版に固定する。未指定は従来どおり KV 由来。
+   */
+  authoritative?: readonly PendingReleaseRecord[],
 ): Promise<PendingFlipAllResult> {
   if (!env.COMPAT_KV) {
     return { ok: false, code: "KV_NOT_CONFIGURED", error: "COMPAT_KV is not bound" };
@@ -607,7 +613,7 @@ export async function pendingFlipAllCore(
 
   // Pending releases の単一真実 (workers=traffic:: / cloudrun=pending-release::)
   // を導出する (= 画面の表示と同じ source、Refs #237)。
-  const all = await loadUnifiedPending(env);
+  const all = await loadUnifiedPending(env, authoritative);
   // 未 tag version の flip は禁止 (single flip と同じ gate)。tag が無い version は
   // v* tag リリース (= prod テスト gate) を経ていないため、一括 flip でも対象外に
   // する。tag 付き (release 由来) のみ flip する。Refs ippoan/ci-dashboard#237。
@@ -719,13 +725,34 @@ function unifiedToRecord(u: UnifiedPending): PendingReleaseRecord {
  * Pending releases の単一真実リストをサーバ側で導出する (Refs #237)。
  * page.ts の表示と同じ source: workers=traffic:: / cloudrun=pending-release::。
  */
-export async function loadUnifiedPending(env: Env): Promise<UnifiedPending[]> {
+export async function loadUnifiedPending(
+  env: Env,
+  /**
+   * webhook が報告したばかりの権威版 (repo, worker, version_id, tag)。KV
+   * (`kv.list` / `kv.get` は edge で最大 60s 値をキャッシュする) は書いた直後だと
+   * stale な version を返しうるため、message で運ばれたこの版で (repo, worker)
+   * 単位に上書きし、直前に自分で書いた版を KV から読み直さずに flip 対象を確定
+   * させる (誤 version flip の直接原因を潰す、Refs #485)。
+   */
+  authoritative?: readonly PendingReleaseRecord[],
+): Promise<UnifiedPending[]> {
   if (!env.COMPAT_KV) return [];
   let pending: PendingReleaseRecord[] = [];
   try {
     pending = await listPendingReleases(env.COMPAT_KV);
   } catch {
     pending = [];
+  }
+  if (authoritative && authoritative.length > 0) {
+    // (repo, worker) 複合キーで KV 由来 record を権威版で上書き / 追記する。
+    // computeUnifiedPending の source 判定 (traffic:: 有無)・rollback_to・legacy
+    // 抑制はそのまま通し、version_id / tag だけを stale でない値に固定する。
+    const compositeKey = (r: PendingReleaseRecord): string =>
+      `${r.repo}::${r.worker_name ?? ""}`;
+    const byKey = new Map<string, PendingReleaseRecord>();
+    for (const r of pending) byKey.set(compositeKey(r), r);
+    for (const r of authoritative) byKey.set(compositeKey(r), r);
+    pending = [...byKey.values()];
   }
   // traffic を引く repo = compat グラフ (backend + frontend) ∪ pending repo。
   // pending repo も含めることで、pending source (cloudrun 等で compat グラフに

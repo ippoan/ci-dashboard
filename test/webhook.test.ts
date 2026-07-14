@@ -1280,6 +1280,34 @@ describe("webhook queue ingest (Refs #318)", () => {
     expect(retried).toEqual(["bad"]);
     expect(acked).toEqual(["good"]);
   });
+
+  it("consumeWebhookBatch: auto-flip-flip message は runAutoFlipFlip して ack (Refs #485)", async () => {
+    const acked: string[] = [];
+    // COMPAT_KV 無し (testEnv) → maybeAutoFlip は none で畳むが、routing / ack /
+    // log 経路を通す。armed 判定や flip 発火は auto-flip.test.ts で個別に検証済み。
+    const batch = {
+      messages: [{
+        body: {
+          kind: "auto-flip-flip",
+          authoritative: {
+            schema_version: 1,
+            repo: "ippoan/auth-worker",
+            version_id: "c695fa47-3e0c-46a5-bc56-5244e87ed4f3",
+            tag: "v0.2.113",
+            preview_url: null,
+            uploaded_at: "2026-07-14T07:30:31.000Z",
+          },
+        },
+        attempts: 1,
+        ack: () => acked.push("flip-1"),
+        retry: () => { throw new Error("should not retry"); },
+      }],
+    } as unknown as MessageBatch<import("../src/webhook").QueueMessage>;
+
+    await consumeWebhookBatch(batch, testEnv());
+
+    expect(acked).toEqual(["flip-1"]);
+  });
 });
 
 // ───── /releases index blob の stale 化 + queue refresh job (Refs #325) ─────

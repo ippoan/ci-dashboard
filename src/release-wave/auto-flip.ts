@@ -21,6 +21,7 @@ import type { Env } from "../index";
 import { dispatchTagRelease } from "../tag-release";
 import { computeGlobalCompatibility } from "./compat";
 import { loadUnifiedPending, pendingFlipAllCore } from "./api";
+import type { PendingReleaseRecord } from "./pending-release";
 
 const AUTO_FLIP_ARM_KEY = "auto-flip-arm::latest";
 const SCHEMA_VERSION = 1 as const;
@@ -40,6 +41,21 @@ const KV_MIN_TTL_SECONDS = 60;
  */
 export interface AutoFlipRecheckMessage {
   kind: "auto-flip-recheck";
+}
+
+/**
+ * Queue job (Refs #485): pending-release webhook が「今 release した版」の権威
+ * record を queue に載せ、consumer 側で flip を実行する。webhook が inline で
+ * flip すると、直前に自分で書いた pending-release を KV から読み直す過程で edge
+ * cache の stale な version を掴み、**古い版を 100% に昇格させて arm を成功として
+ * clear する**事故が起きた (auth-worker v0.2.113 で発生、#485)。版そのものを
+ * message で運べば KV 再読みに依存せず正しい版を flip できる。GitHub dispatch を
+ * webhook 応答から切り離す狙いも兼ねる (best-effort、応答をブロックしない)。
+ */
+export interface AutoFlipFlipMessage {
+  kind: "auto-flip-flip";
+  /** webhook が報告した権威版 (KV から読み直さない flip 対象)。 */
+  authoritative: PendingReleaseRecord;
 }
 
 /** recheck の遅延 (秒)。KV list の結果キャッシュ (最大 60s) を跨いで再評価する。 */
@@ -177,7 +193,9 @@ export type AutoFlipOutcome =
   | { action: "expired" }
   | { action: "blocked"; reason: string }
   | { action: "flipped"; flipped: number }
-  | { action: "flip_failed"; error: string };
+  | { action: "flip_failed"; error: string }
+  /** flip を queue に載せた (実 flip は consumer が権威版で実行、Refs #485)。 */
+  | { action: "enqueued" };
 
 /**
  * pending-release webhook 到達時に呼ぶ完了検知 + 自動 flip。
@@ -191,6 +209,12 @@ export async function maybeAutoFlip(
   env: Env,
   now: string,
   justReleasedRepo?: string | null,
+  /**
+   * pending-release webhook が報告した権威版。渡すと当該 repo の flip 対象を
+   * KV 再読みでなくこの版に固定する (stale cache 由来の誤 version flip を防ぐ、
+   * Refs #485)。省略時は従来どおり KV から解決 (recheck ループ / 手動経路)。
+   */
+  justReleasedRecord?: PendingReleaseRecord | null,
 ): Promise<AutoFlipOutcome> {
   if (!env.COMPAT_KV) return { action: "none" };
   const arm = await getAutoFlipArm(env);
@@ -243,10 +267,13 @@ export async function maybeAutoFlip(
   }
 
   // 全 repo release 完了 + gate OK → armed set 限定で flip all。
+  // justReleasedRecord があれば当該 repo の flip 対象をその権威版に固定する
+  // (KV 再読みの stale cache を避ける、Refs #485)。
   const result = await pendingFlipAllCore(
     env,
     `auto-flip (${arm.actor})`,
     new Set(arm.repos),
+    justReleasedRecord ? [justReleasedRecord] : undefined,
   );
   if (!result.ok) {
     // flip 発火失敗。armed は残し、次の webhook / operator に再試行を委ねる
@@ -320,6 +347,53 @@ export async function runAutoFlipRecheck(env: Env): Promise<void> {
   } catch {
     // 次の webhook 到達が拾う。
   }
+}
+
+// ----------------------------------------------------------------------------
+// Queue 駆動の flip (権威版を message で運ぶ、Refs #485)
+// ----------------------------------------------------------------------------
+
+/**
+ * pending-release webhook から呼ぶ。armed 中なら「今 release した権威版」を queue に
+ * 載せ、実 flip は consumer (`runAutoFlipFlip`) に委ねる。これで flip 対象の version を
+ * KV から読み直さず message で運び、edge cache の stale な版を掴む事故 (#485) を防ぐ。
+ *
+ * - armed でなければ no-op (無関係な release で queue を汚さない)。
+ * - queue binding が無い環境 (dev / test) は inline fallback として `maybeAutoFlip` を
+ *   権威版付きで直接呼ぶ (挙動互換 + 同じく正しい版を flip)。
+ * - best-effort — 送信失敗時も inline fallback に落とす。
+ */
+export async function enqueueAutoFlipFlip(
+  env: Env,
+  record: PendingReleaseRecord,
+): Promise<AutoFlipOutcome> {
+  if (!env.COMPAT_KV) return { action: "none" };
+  const arm = await getAutoFlipArm(env);
+  if (!arm || arm.status !== "armed") return { action: "none" };
+  if (!env.WEBHOOK_QUEUE) {
+    // queue が無い環境は従来どおり inline flip (権威版で)。
+    return maybeAutoFlip(env, new Date().toISOString(), record.repo, record);
+  }
+  try {
+    await env.WEBHOOK_QUEUE.send({ kind: "auto-flip-flip", authoritative: record });
+    return { action: "enqueued" };
+  } catch {
+    // 送信失敗は inline fallback (best-effort)。
+    return maybeAutoFlip(env, new Date().toISOString(), record.repo, record);
+  }
+}
+
+/**
+ * `auto-flip-flip` queue job の本体。message が運んだ権威版で当該 repo の flip 対象を
+ * 固定して `maybeAutoFlip` を実行する。arm が既に clear / expired / blocked なら
+ * `maybeAutoFlip` 側が no-op で畳む (idempotent — 同 batch に複数 message があっても
+ * 最初の 1 本が flip して arm を消し、残りは none)。
+ */
+export async function runAutoFlipFlip(
+  env: Env,
+  record: PendingReleaseRecord,
+): Promise<AutoFlipOutcome> {
+  return maybeAutoFlip(env, new Date().toISOString(), record.repo, record);
 }
 
 // ----------------------------------------------------------------------------

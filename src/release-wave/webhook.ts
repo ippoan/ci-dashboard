@@ -27,7 +27,7 @@ import {
   computeCompatibility,
 } from "./compat";
 import { recordPendingRelease } from "./pending-release";
-import { maybeAutoFlip, scheduleAutoFlipRecheck } from "./auto-flip";
+import { enqueueAutoFlipFlip, scheduleAutoFlipRecheck } from "./auto-flip";
 import { recordTraffic } from "./traffic";
 import { dispatchAll, decideBackendDeployRetestDispatches } from "./dispatch";
 import {
@@ -77,7 +77,7 @@ function hubStub(env: Env): DurableObjectStub<ReleaseWaveHub> {
  * 明示的に broadcast して live 更新を発火させる。best-effort — DO 呼び出しの失敗で
  * report の 200 応答を止めない (次の report / 手動リロードで追従できる)。
  */
-async function broadcastChange(env: Env): Promise<void> {
+export async function broadcastChange(env: Env): Promise<void> {
   try {
     await hubStub(env).broadcast();
   } catch {
@@ -428,11 +428,12 @@ export async function handlePendingReleaseWebhook(
   // ラグ・取りこぼし・flip 失敗を後追いで回収する。best-effort — armed 判定 / flip の
   // 失敗で report 200 は止めない。
   try {
-    const outcome = await maybeAutoFlip(
-      env,
-      new Date().toISOString(),
-      v.data.repo,
-    );
+    // 実 flip は queue に載せて consumer で実行する (Refs #485)。inline で flip
+    // すると、直前に書いた pending-release を KV から読み直す過程で edge cache の
+    // stale な version を掴み、古い版を 100% に昇格させて arm を成功として clear
+    // する事故が起きた。版そのもの (record) を message で運べば KV 再読みに依存
+    // せず正しい版を flip できる。
+    const outcome = await enqueueAutoFlipFlip(env, record);
     console.log(
       JSON.stringify({
         msg: "auto-flip",

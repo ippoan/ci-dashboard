@@ -35,8 +35,11 @@ import { noteGitHubAuthBroken } from "./github-backoff";
 import { refreshReleasesIndex } from "./releases-page";
 import {
   runAutoFlipRecheck,
+  runAutoFlipFlip,
   type AutoFlipRecheckMessage,
+  type AutoFlipFlipMessage,
 } from "./release-wave/auto-flip";
+import { broadcastChange } from "./release-wave/webhook";
 
 // Queue 経由で consumer に渡す raw event (Refs #318)。body は署名検証済みの
 // raw JSON 文字列をそのまま積む (consumer 側で event 別に parse する)。
@@ -65,7 +68,8 @@ export type QueueMessage =
   | WebhookQueueMessage
   | ReleasesIndexRefreshMessage
   | ReleasesIndexKvBackupMessage
-  | AutoFlipRecheckMessage;
+  | AutoFlipRecheckMessage
+  | AutoFlipFlipMessage;
 
 // Self-reschedule の重複防止 marker (Refs #337)。60s 遅延 job が既に予約済み
 // なら積み増さない。KV expirationTtl の最小値 60s に合わせる。
@@ -391,6 +395,7 @@ export async function consumeWebhookBatch(
   const refreshMessages: Message<QueueMessage>[] = [];
   const kvBackupMessages: Message<QueueMessage>[] = [];
   const autoFlipMessages: Message<QueueMessage>[] = [];
+  const autoFlipFlipMessages: Message<QueueMessage>[] = [];
   for (const message of batch.messages) {
     if ("kind" in message.body) {
       if (message.body.kind === "releases-index-refresh") {
@@ -399,6 +404,8 @@ export async function consumeWebhookBatch(
         kvBackupMessages.push(message);
       } else if (message.body.kind === "auto-flip-recheck") {
         autoFlipMessages.push(message);
+      } else if (message.body.kind === "auto-flip-flip") {
+        autoFlipFlipMessages.push(message);
       } else {
         eventMessages.push(message);
       }
@@ -465,6 +472,34 @@ export async function consumeWebhookBatch(
       }));
     }
     for (const m of autoFlipMessages) m.ack();
+  }
+
+  // auto-flip flip (Refs #485): pending-release webhook が載せた「権威版」で flip を
+  // 実行する。version を message で運ぶため KV 再読みの stale cache に依存しない。
+  // 各 message は別 repo の権威版を持ちうるので 1 本ずつ処理する (最初の 1 本が
+  // ready なら armed set を flip して arm を clear し、残りは maybeAutoFlip 側で
+  // none に畳まれる = idempotent)。best-effort — 失敗しても retry せず ack。
+  for (const message of autoFlipFlipMessages) {
+    const { authoritative } = message.body as AutoFlipFlipMessage;
+    try {
+      const outcome = await runAutoFlipFlip(env, authoritative);
+      console.log(JSON.stringify({
+        msg: "auto-flip",
+        trigger: "queue-flip",
+        repo: authoritative.repo,
+        outcome,
+      }));
+      // flip が実際に走ったら開いている /release-wave を live 更新する。
+      if (outcome.action === "flipped") await broadcastChange(env);
+    } catch (err) {
+      console.log(JSON.stringify({
+        msg: "auto-flip-flip-failed",
+        repo: authoritative.repo,
+        attempts: message.attempts,
+        error: err instanceof Error ? err.message : String(err),
+      }));
+    }
+    message.ack();
   }
 
   if (refreshMessages.length === 0) return;

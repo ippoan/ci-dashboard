@@ -6,6 +6,8 @@ import {
   clearAutoFlipArm,
   computeArmProgress,
   maybeAutoFlip,
+  enqueueAutoFlipFlip,
+  runAutoFlipFlip,
   scheduleAutoFlipRecheck,
   runAutoFlipRecheck,
   handleReleaseWaveAutoFlipArm,
@@ -13,6 +15,7 @@ import {
   AUTO_FLIP_RECHECK_DELAY_SECONDS,
   type AutoFlipArmRecord,
 } from "../../src/release-wave/auto-flip";
+import type { PendingReleaseRecord } from "../../src/release-wave/pending-release";
 import { renderAutoFlipControls } from "../../src/release-wave/repo-status-section";
 import type { Env } from "../../src/index";
 
@@ -327,6 +330,164 @@ describe("maybeAutoFlip", () => {
     expect(
       (await maybeAutoFlip(env, "2026-07-13T00:10:00.000Z", "ippoan/z")).action,
     ).toBe("none");
+  });
+});
+
+// ----------------------------------------------------------------------------
+// 権威版 flip (Refs #485): KV の stale cache でなく webhook の報告版を flip する
+// ----------------------------------------------------------------------------
+
+/** webhook が報告する権威版 record を作る。 */
+function authRecord(
+  repo: string,
+  versionId: string,
+  tag: string,
+): PendingReleaseRecord {
+  return {
+    schema_version: 1,
+    repo,
+    version_id: versionId,
+    tag,
+    preview_url: null,
+    uploaded_at: "2026-07-13T00:05:00.000Z",
+  };
+}
+
+describe("maybeAutoFlip 権威版 override (Refs #485)", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("KV に stale な version が載っていても、渡された権威版を flip する", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const fetchSpy = vi.fn(async (_url: string, init?: RequestInit) => {
+      if (init?.body) bodies.push(JSON.parse(String(init.body)));
+      return new Response(null, { status: 204 });
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    // KV には古い版 (edge cache 由来の stale を再現) が載っている。
+    const kv = memKv({
+      "auto-flip-arm::latest": arm(["ippoan/a"]),
+      "pending-release::ippoan/a": {
+        schema_version: 1,
+        repo: "ippoan/a",
+        version_id: "stale-vid",
+        tag: "v1.0.0",
+        preview_url: null,
+        uploaded_at: "2026-07-13T00:00:00.000Z",
+      },
+    });
+    const env = envWith(kv);
+    const out = await maybeAutoFlip(
+      env,
+      "2026-07-13T00:10:00.000Z",
+      "ippoan/a",
+      authRecord("ippoan/a", "fresh-vid", "v1.0.1"),
+    );
+    expect(out).toEqual({ action: "flipped", flipped: 1 });
+    // dispatch された flip 対象は KV の stale-vid でなく権威版 fresh-vid。
+    const flip = bodies.find((b) => b.event_type === "release-wave-flip");
+    expect(flip).toBeTruthy();
+    expect(
+      (flip!.client_payload as Record<string, unknown>).previewed_version_id,
+    ).toBe("fresh-vid");
+    expect(
+      (flip!.client_payload as Record<string, unknown>).target_tag,
+    ).toBe("v1.0.1");
+    // arm は clear。
+    expect(await getAutoFlipArm(env)).toBeNull();
+  });
+});
+
+describe("enqueueAutoFlipFlip (Refs #485)", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("armed + queue あり → message を送り inline flip しない", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const sent: Array<unknown> = [];
+    const kv = memKv({ "auto-flip-arm::latest": arm(["ippoan/a"]) });
+    const env = {
+      ...envWith(kv),
+      WEBHOOK_QUEUE: { send: async (m: unknown) => void sent.push(m) },
+    } as unknown as Env;
+    const rec = authRecord("ippoan/a", "fresh-vid", "v1.0.1");
+    const out = await enqueueAutoFlipFlip(env, rec);
+    expect(out).toEqual({ action: "enqueued" });
+    expect(sent).toEqual([{ kind: "auto-flip-flip", authoritative: rec }]);
+    // inline flip (GitHub dispatch) は走らない。
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("armed + queue 無し → inline で権威版 flip する (fallback)", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const fetchSpy = vi.fn(async (_url: string, init?: RequestInit) => {
+      if (init?.body) bodies.push(JSON.parse(String(init.body)));
+      return new Response(null, { status: 204 });
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    const kv = memKv({
+      "auto-flip-arm::latest": arm(["ippoan/a"], {
+        expires_at: "2099-01-01T00:00:00.000Z",
+      }),
+      "pending-release::ippoan/a": pending("ippoan/a", "v1.0.0"),
+    });
+    const env = envWith(kv); // WEBHOOK_QUEUE 無し
+    const out = await enqueueAutoFlipFlip(
+      env,
+      authRecord("ippoan/a", "fresh-vid", "v1.0.1"),
+    );
+    expect(out).toEqual({ action: "flipped", flipped: 1 });
+    const flip = bodies.find((b) => b.event_type === "release-wave-flip");
+    expect(
+      (flip!.client_payload as Record<string, unknown>).previewed_version_id,
+    ).toBe("fresh-vid");
+  });
+
+  it("armed でなければ no-op (send も flip もしない)", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const sent: Array<unknown> = [];
+    const kv = memKv({}); // arm 無し
+    const env = {
+      ...envWith(kv),
+      WEBHOOK_QUEUE: { send: async (m: unknown) => void sent.push(m) },
+    } as unknown as Env;
+    const out = await enqueueAutoFlipFlip(
+      env,
+      authRecord("ippoan/a", "fresh-vid", "v1.0.1"),
+    );
+    expect(out).toEqual({ action: "none" });
+    expect(sent).toEqual([]);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("runAutoFlipFlip (Refs #485)", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("consumer 経路: 権威版で flip して arm を clear する", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const fetchSpy = vi.fn(async (_url: string, init?: RequestInit) => {
+      if (init?.body) bodies.push(JSON.parse(String(init.body)));
+      return new Response(null, { status: 204 });
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    const kv = memKv({
+      "auto-flip-arm::latest": arm(["ippoan/a"], {
+        expires_at: "2099-01-01T00:00:00.000Z",
+      }),
+      "pending-release::ippoan/a": pending("ippoan/a", "v1.0.0"),
+    });
+    const env = envWith(kv);
+    const out = await runAutoFlipFlip(
+      env,
+      authRecord("ippoan/a", "fresh-vid", "v1.0.1"),
+    );
+    expect(out).toEqual({ action: "flipped", flipped: 1 });
+    expect(await getAutoFlipArm(env)).toBeNull();
+    const flip = bodies.find((b) => b.event_type === "release-wave-flip");
+    expect(
+      (flip!.client_payload as Record<string, unknown>).previewed_version_id,
+    ).toBe("fresh-vid");
   });
 });
 
