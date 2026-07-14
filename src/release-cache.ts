@@ -44,7 +44,9 @@ export const TTL_MOVING_COMPARE = 60;
 
 interface TagListItem { name: string; commit: { sha: string } }
 interface RawCommit { sha: string; commit: { message: string } }
-interface CompareResponse { commits: RawCommit[] }
+// files は tag..HEAD の tree 差分 (merge-base 起点、API は最大 300 件で truncate)。
+// 「commit は積まれたが差分ゼロ (revert ペア)」の要リリース誤検知判定に使う (Refs #483)
+interface CompareResponse { commits: RawCommit[]; files?: Array<{ filename: string }> }
 interface PrResponse { head: { ref: string }; body: string | null }
 interface RepoMeta {
   default_branch: string;

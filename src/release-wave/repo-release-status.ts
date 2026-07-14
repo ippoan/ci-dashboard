@@ -41,6 +41,25 @@ export interface RepoReleaseStatus {
   tagless: boolean;
 }
 
+/**
+ * compare 応答から「未リリース commit 数」を数える。
+ *
+ * commit が積まれていても tree 差分がゼロ (追加 → revert のペア等) なら 0
+ * (= 最新扱い) を返す — commit 数だけで数えると実質 no-op の release を
+ * 促してしまう誤検知の修正 (Refs #483。実例: rust-alc-api #570 + #571)。
+ * `files` が欠落している場合 (この field を持たない旧 KV キャッシュ) は
+ * 従来どおり commit 数に fallback する (誤って「最新」扱いにしない)。
+ */
+export function behindFromCompare(cmp: {
+  commits: unknown[];
+  files?: unknown[];
+}): number {
+  if (cmp.commits.length > 0 && cmp.files !== undefined && cmp.files.length === 0) {
+    return 0;
+  }
+  return cmp.commits.length;
+}
+
 /** 監視対象 repo の集合と tagless set を 4 ソースから組む。 */
 async function discoverRepos(
   env: Env,
@@ -130,7 +149,7 @@ async function computeOne(
         latestTag,
         meta.default_branch,
       );
-      behind = cmp.commits.length;
+      behind = behindFromCompare(cmp);
     } catch {
       behind = 0; // compare 失敗時は behind 不明 → 0 扱い (release は促さない)
     }
