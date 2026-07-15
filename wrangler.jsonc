@@ -153,8 +153,8 @@
         // merged PR の `Refs #N` を逆引き) の source に加え、(3) auto-detect が
         // 誤判定する repo の **手動 override** (isTaglessRepo が config 自動判定
         // より優先してここに列挙された repo を tagless 扱いにする) も兼ねる。
-        // wave / npm 駆動の repo (nuxt-notify=wave, nuxt-egov=wave,
-        // email-receiver=npm) は tag 駆動なので除外している
+        // wave / npm 駆動の repo (nuxt-notify=wave, email-receiver=npm)
+        // は tag 駆動なので除外している
         // (= synthetic-block 対象にしない、section も auto で tracked 判定)。
         // `ippoan/mcp-cf-workers` は package.json 上は npm:true (auto-detect) だが、
         // 実際は dev-release.yml が `dev-*` prerelease tag を自動採番するだけで
