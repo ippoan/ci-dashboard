@@ -923,10 +923,12 @@ export async function handleReleaseWaveListPageWithRepoStatus(
   }
 
   // Auto-flip armed 状態 (Refs #476)。取得失敗時は帯を出さず degrade。
+  // arm は DO 置き (Refs #490) で TTL 自動消滅しないため、expires_at 超過は
+  // timeout 済みとして表示しない (削除は次の maybeAutoFlip に委ねる)。
   let armView: AutoFlipArmView | null = null;
   try {
     const arm = await getAutoFlipArm(env);
-    if (arm) {
+    if (arm && new Date().toISOString() <= arm.expires_at) {
       const progress = await computeArmProgress(env, arm);
       armView = { arm, progress };
     }
