@@ -30,6 +30,7 @@ import type {
 } from "./types";
 import { decideDispatches, dispatchAll } from "./dispatch";
 import { computeWaveCompatibility } from "./compat";
+import type { AutoFlipArmRecord } from "./auto-flip";
 
 // ----------------------------------------------------------------------------
 // Storage keys
@@ -41,6 +42,9 @@ const WAVE_KEY_PREFIX = "wave:";
 function waveKey(wave_id: string): string {
   return `${WAVE_KEY_PREFIX}${wave_id}`;
 }
+
+/** auto-flip armed record (最新 1 件のみ、Refs #490)。 */
+const AUTO_FLIP_ARM_KEY = "auto-flip:arm";
 
 // ----------------------------------------------------------------------------
 // RPC input / output shapes
@@ -362,6 +366,33 @@ export class ReleaseWaveHub extends DurableObject<Env> {
   async list(): Promise<WaveState[]> {
     const all = await this.listInternal();
     return all.sort((a, b) => (a.started_at < b.started_at ? 1 : -1));
+  }
+
+  // ============ auto-flip arm (Refs #490) ===========================
+  //
+  // armed record の SoT。KV 置きだと edge cache (~60s) で arm 直後の webhook が
+  // null を読み、recheck queue send 失敗と重なると発火しないまま TTL 消滅する
+  // 窓があった。auto-tag repos set (#460) と同じ理由で DO storage (強整合) に
+  // 置く。timeout は record の `expires_at` を読み手が判定する (KV expirationTtl
+  // の代替。maybeAutoFlip が超過検知で delete する)。
+
+  /** armed record を返す (無ければ null)。expiry 判定は caller に委ねる。 */
+  async getAutoFlipArm(): Promise<AutoFlipArmRecord | null> {
+    const v = await this.ctx.storage.get<AutoFlipArmRecord>(AUTO_FLIP_ARM_KEY);
+    return v ?? null;
+  }
+
+  /** armed record を登録 / 上書きする (arm / blocked 遷移)。 */
+  async putAutoFlipArm(record: AutoFlipArmRecord): Promise<void> {
+    await this.ctx.storage.put(AUTO_FLIP_ARM_KEY, record);
+    // armed 帯の表示が変わった → 開いている /release-wave を live 更新。
+    this.broadcast();
+  }
+
+  /** armed record を消す (flip 完了 / disarm / timeout 中断)。 */
+  async deleteAutoFlipArm(): Promise<void> {
+    await this.ctx.storage.delete(AUTO_FLIP_ARM_KEY);
+    this.broadcast();
   }
 
   // ============ private helpers ====================================

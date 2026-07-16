@@ -53,13 +53,32 @@ const FRESH_TOKEN = {
   expires_at_ms: Date.now() + 3600_000,
 };
 
-function envWith(compatKv?: KVNamespace): Env {
+/** ReleaseWaveHub の auto-flip arm RPC を in-memory で模す fake namespace
+ *  (Refs #490: arm の SoT は KV でなく DO storage)。 */
+function memHub(seedArm: AutoFlipArmRecord | null = null): unknown {
+  const state = { arm: seedArm };
+  const stub = {
+    getAutoFlipArm: async () => state.arm,
+    putAutoFlipArm: async (r: AutoFlipArmRecord) => {
+      state.arm = r;
+    },
+    deleteAutoFlipArm: async () => {
+      state.arm = null;
+    },
+  };
+  return { idFromName: () => ({}), get: () => stub };
+}
+
+function envWith(
+  compatKv?: KVNamespace,
+  armSeed: AutoFlipArmRecord | null = null,
+): Env {
   return {
     COMPAT_KV: compatKv,
     // getGitHubToken の KV cache hit 用 (introspect fetch を回避)。
     CI_STATUS: memKv({ "auth-client-worker:gh-token": FRESH_TOKEN }),
     INTERNAL_SHARED_SECRET: { get: async () => "secret" },
-    RELEASE_WAVE_HUB: { idFromName: () => ({}), get: () => ({}) },
+    RELEASE_WAVE_HUB: memHub(armSeed),
   } as unknown as Env;
 }
 
@@ -204,12 +223,12 @@ describe("maybeAutoFlip", () => {
 
   it("期限超過なら armed を clear して expired", async () => {
     const kv = memKv({
-      "auto-flip-arm::latest": arm(["ippoan/a"], {
-        expires_at: "2026-07-13T00:00:00.000Z",
-      }),
       "pending-release::ippoan/a": pending("ippoan/a", "v1.0.0"),
     });
-    const env = envWith(kv);
+    const env = envWith(
+      kv,
+      arm(["ippoan/a"], { expires_at: "2026-07-13T00:00:00.000Z" }),
+    );
     // now が expires_at より後。
     const out = await maybeAutoFlip(env, "2026-07-13T01:00:00.000Z");
     expect(out).toEqual({ action: "expired" });
@@ -218,10 +237,9 @@ describe("maybeAutoFlip", () => {
 
   it("全 repo 揃っていなければ none", async () => {
     const kv = memKv({
-      "auto-flip-arm::latest": arm(["ippoan/a", "ippoan/b"]),
       "pending-release::ippoan/a": pending("ippoan/a", "v1.0.0"),
     });
-    const env = envWith(kv);
+    const env = envWith(kv, arm(["ippoan/a", "ippoan/b"]));
     const out = await maybeAutoFlip(env, "2026-07-13T00:10:00.000Z");
     expect(out).toEqual({ action: "none" });
     // armed は残る。
@@ -232,11 +250,10 @@ describe("maybeAutoFlip", () => {
     const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetchSpy);
     const kv = memKv({
-      "auto-flip-arm::latest": arm(["ippoan/a", "ippoan/b"]),
       "pending-release::ippoan/a": pending("ippoan/a", "v1.0.0"),
       "pending-release::ippoan/b": pending("ippoan/b", "v2.0.0"),
     });
-    const env = envWith(kv);
+    const env = envWith(kv, arm(["ippoan/a", "ippoan/b"]));
     const out = await maybeAutoFlip(env, "2026-07-13T00:10:00.000Z");
     expect(out).toEqual({ action: "flipped", flipped: 2 });
     // dispatch が 2 repo に飛ぶ。
@@ -251,11 +268,10 @@ describe("maybeAutoFlip", () => {
     const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetchSpy);
     const kv = memKv({
-      "auto-flip-arm::latest": arm(["ippoan/a"]),
       "pending-release::ippoan/a": pending("ippoan/a", "v1.0.0"),
       ...redCompat(),
     });
-    const env = envWith(kv);
+    const env = envWith(kv, arm(["ippoan/a"]));
     const out = await maybeAutoFlip(env, "2026-07-13T00:10:00.000Z");
     expect(out.action).toBe("blocked");
     // dispatch は飛ばない。
@@ -270,13 +286,15 @@ describe("maybeAutoFlip", () => {
     const fetchSpy = vi.fn();
     vi.stubGlobal("fetch", fetchSpy);
     const kv = memKv({
-      "auto-flip-arm::latest": arm(["ippoan/a"], {
+      "pending-release::ippoan/a": pending("ippoan/a", "v1.0.0"),
+    });
+    const env = envWith(
+      kv,
+      arm(["ippoan/a"], {
         status: "blocked",
         blocked_reason: "compatibility 未検証: x",
       }),
-      "pending-release::ippoan/a": pending("ippoan/a", "v1.0.0"),
-    });
-    const env = envWith(kv);
+    );
     expect(await maybeAutoFlip(env, "2026-07-13T00:10:00.000Z")).toEqual({
       action: "none",
     });
@@ -288,20 +306,18 @@ describe("maybeAutoFlip", () => {
     vi.stubGlobal("fetch", fetchSpy);
     // b の pending-release:: がまだ list に無い (= list ラグ再現) 状態。
     const kv = memKv({
-      "auto-flip-arm::latest": arm(["ippoan/a", "ippoan/b"]),
       "pending-release::ippoan/a": pending("ippoan/a", "v1.0.0"),
       "pending-release::ippoan/b": pending("ippoan/b", "v2.0.0"),
     });
-    const env = envWith(kv);
+    const env = envWith(kv, arm(["ippoan/a", "ippoan/b"]));
     // hint 無しでも memKv は強整合なので flip するが、hint 経路の回帰を固定する:
     // b を list から見えなくするのは harness では難しいので、hint が readiness を
     // 満たす経路 (a のみ list + b は hint) を直接検証する。
     const kvLagging = memKv({
-      "auto-flip-arm::latest": arm(["ippoan/a", "ippoan/b"]),
       "pending-release::ippoan/a": pending("ippoan/a", "v1.0.0"),
       // b は未反映 (list に出ない)。
     });
-    const envLag = envWith(kvLagging);
+    const envLag = envWith(kvLagging, arm(["ippoan/a", "ippoan/b"]));
     // hint 無し → b が未 release 扱いで none。
     expect(
       (await maybeAutoFlip(envLag, "2026-07-13T00:10:00.000Z")).action,
@@ -322,10 +338,9 @@ describe("maybeAutoFlip", () => {
 
   it("armed set に無い repo を hint に渡しても readiness には効かない", async () => {
     const kv = memKv({
-      "auto-flip-arm::latest": arm(["ippoan/a", "ippoan/b"]),
       "pending-release::ippoan/a": pending("ippoan/a", "v1.0.0"),
     });
-    const env = envWith(kv);
+    const env = envWith(kv, arm(["ippoan/a", "ippoan/b"]));
     // hint が armed set 外 (ippoan/z) → b は依然未 release なので none。
     expect(
       (await maybeAutoFlip(env, "2026-07-13T00:10:00.000Z", "ippoan/z")).action,
@@ -365,7 +380,6 @@ describe("maybeAutoFlip 権威版 override (Refs #485)", () => {
     vi.stubGlobal("fetch", fetchSpy);
     // KV には古い版 (edge cache 由来の stale を再現) が載っている。
     const kv = memKv({
-      "auto-flip-arm::latest": arm(["ippoan/a"]),
       "pending-release::ippoan/a": {
         schema_version: 1,
         repo: "ippoan/a",
@@ -375,7 +389,7 @@ describe("maybeAutoFlip 権威版 override (Refs #485)", () => {
         uploaded_at: "2026-07-13T00:00:00.000Z",
       },
     });
-    const env = envWith(kv);
+    const env = envWith(kv, arm(["ippoan/a"]));
     const out = await maybeAutoFlip(
       env,
       "2026-07-13T00:10:00.000Z",
@@ -404,9 +418,9 @@ describe("enqueueAutoFlipFlip (Refs #485)", () => {
     const fetchSpy = vi.fn();
     vi.stubGlobal("fetch", fetchSpy);
     const sent: Array<unknown> = [];
-    const kv = memKv({ "auto-flip-arm::latest": arm(["ippoan/a"]) });
+    const kv = memKv();
     const env = {
-      ...envWith(kv),
+      ...envWith(kv, arm(["ippoan/a"])),
       WEBHOOK_QUEUE: { send: async (m: unknown) => void sent.push(m) },
     } as unknown as Env;
     const rec = authRecord("ippoan/a", "fresh-vid", "v1.0.1");
@@ -417,6 +431,28 @@ describe("enqueueAutoFlipFlip (Refs #485)", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  it("arm 直後の webhook でも armed を観測して enqueue する (DO 強整合、Refs #490)", async () => {
+    // KV 置きだった頃は put 直後の get が edge cache (~60s) で null を返し
+    // {action:"none"} で素通りする窓があった。DO 読みでは read-after-write が
+    // 保証されるので、arm → 即 webhook の順でも必ず enqueued になる。
+    const sent: Array<unknown> = [];
+    const env = {
+      ...envWith(memKv()),
+      WEBHOOK_QUEUE: { send: async (m: unknown) => void sent.push(m) },
+    } as unknown as Env;
+    await armAutoFlip(env, {
+      repos: ["ippoan/a"],
+      actor: "me@example.com",
+      now: new Date().toISOString(),
+    });
+    const out = await enqueueAutoFlipFlip(
+      env,
+      authRecord("ippoan/a", "fresh-vid", "v1.0.1"),
+    );
+    expect(out).toEqual({ action: "enqueued" });
+    expect(sent).toHaveLength(1);
+  });
+
   it("armed + queue 無し → inline で権威版 flip する (fallback)", async () => {
     const bodies: Array<Record<string, unknown>> = [];
     const fetchSpy = vi.fn(async (_url: string, init?: RequestInit) => {
@@ -425,12 +461,12 @@ describe("enqueueAutoFlipFlip (Refs #485)", () => {
     });
     vi.stubGlobal("fetch", fetchSpy);
     const kv = memKv({
-      "auto-flip-arm::latest": arm(["ippoan/a"], {
-        expires_at: "2099-01-01T00:00:00.000Z",
-      }),
       "pending-release::ippoan/a": pending("ippoan/a", "v1.0.0"),
     });
-    const env = envWith(kv); // WEBHOOK_QUEUE 無し
+    const env = envWith(
+      kv,
+      arm(["ippoan/a"], { expires_at: "2099-01-01T00:00:00.000Z" }),
+    ); // WEBHOOK_QUEUE 無し
     const out = await enqueueAutoFlipFlip(
       env,
       authRecord("ippoan/a", "fresh-vid", "v1.0.1"),
@@ -472,12 +508,12 @@ describe("runAutoFlipFlip (Refs #485)", () => {
     });
     vi.stubGlobal("fetch", fetchSpy);
     const kv = memKv({
-      "auto-flip-arm::latest": arm(["ippoan/a"], {
-        expires_at: "2099-01-01T00:00:00.000Z",
-      }),
       "pending-release::ippoan/a": pending("ippoan/a", "v1.0.0"),
     });
-    const env = envWith(kv);
+    const env = envWith(
+      kv,
+      arm(["ippoan/a"], { expires_at: "2099-01-01T00:00:00.000Z" }),
+    );
     const out = await runAutoFlipFlip(
       env,
       authRecord("ippoan/a", "fresh-vid", "v1.0.1"),
@@ -499,9 +535,10 @@ describe("runAutoFlipFlip (Refs #485)", () => {
 function envWithQueue(
   compatKv: KVNamespace,
   send: (...args: unknown[]) => unknown,
+  armSeed: AutoFlipArmRecord | null = null,
 ): Env {
   return {
-    ...(envWith(compatKv) as unknown as Record<string, unknown>),
+    ...(envWith(compatKv, armSeed) as unknown as Record<string, unknown>),
     WEBHOOK_QUEUE: { send },
   } as unknown as Env;
 }
@@ -509,8 +546,8 @@ function envWithQueue(
 describe("scheduleAutoFlipRecheck (Refs #481)", () => {
   it("armed 中は delaySeconds 付きで auto-flip-recheck を enqueue し marker を立てる", async () => {
     const send = vi.fn().mockResolvedValue(undefined);
-    const kv = memKv({ "auto-flip-arm::latest": arm(["ippoan/a"]) });
-    const env = envWithQueue(kv, send);
+    const kv = memKv();
+    const env = envWithQueue(kv, send, arm(["ippoan/a"]));
     await scheduleAutoFlipRecheck(env);
     expect(send).toHaveBeenCalledOnce();
     expect(send.mock.calls[0][0]).toEqual({ kind: "auto-flip-recheck" });
@@ -524,10 +561,9 @@ describe("scheduleAutoFlipRecheck (Refs #481)", () => {
   it("marker がある間は重複 enqueue しない (dedup)", async () => {
     const send = vi.fn().mockResolvedValue(undefined);
     const kv = memKv({
-      "auto-flip-arm::latest": arm(["ippoan/a"]),
       "auto-flip::recheck-scheduled": "1",
     });
-    const env = envWithQueue(kv, send);
+    const env = envWithQueue(kv, send, arm(["ippoan/a"]));
     await scheduleAutoFlipRecheck(env);
     expect(send).not.toHaveBeenCalled();
   });
@@ -541,13 +577,12 @@ describe("scheduleAutoFlipRecheck (Refs #481)", () => {
 
   it("blocked の arm には予約しない", async () => {
     const send = vi.fn().mockResolvedValue(undefined);
-    const kv = memKv({
-      "auto-flip-arm::latest": arm(["ippoan/a"], {
-        status: "blocked",
-        blocked_reason: "x",
-      }),
-    });
-    const env = envWithQueue(kv, send);
+    const kv = memKv();
+    const env = envWithQueue(
+      kv,
+      send,
+      arm(["ippoan/a"], { status: "blocked", blocked_reason: "x" }),
+    );
     await scheduleAutoFlipRecheck(env);
     expect(send).not.toHaveBeenCalled();
   });
@@ -563,12 +598,11 @@ describe("runAutoFlipRecheck (Refs #481)", () => {
   it("未 ready のままなら marker を消して次の tick を再予約する (ループ継続)", async () => {
     const send = vi.fn().mockResolvedValue(undefined);
     const kv = memKv({
-      "auto-flip-arm::latest": arm(["ippoan/a", "ippoan/b"], NOT_EXPIRED),
       "pending-release::ippoan/a": pending("ippoan/a", "v1.0.0"),
       // b 未 release → 未 ready。
       "auto-flip::recheck-scheduled": "1",
     });
-    const env = envWithQueue(kv, send);
+    const env = envWithQueue(kv, send, arm(["ippoan/a", "ippoan/b"], NOT_EXPIRED));
     await runAutoFlipRecheck(env);
     // 次の tick を再予約 (marker を消してから enqueue するので送信される)。
     expect(send).toHaveBeenCalledOnce();
@@ -582,12 +616,11 @@ describe("runAutoFlipRecheck (Refs #481)", () => {
     vi.stubGlobal("fetch", fetchSpy);
     const send = vi.fn().mockResolvedValue(undefined);
     const kv = memKv({
-      "auto-flip-arm::latest": arm(["ippoan/a", "ippoan/b"], NOT_EXPIRED),
       "pending-release::ippoan/a": pending("ippoan/a", "v1.0.0"),
       "pending-release::ippoan/b": pending("ippoan/b", "v2.0.0"),
       "auto-flip::recheck-scheduled": "1",
     });
-    const env = envWithQueue(kv, send);
+    const env = envWithQueue(kv, send, arm(["ippoan/a", "ippoan/b"], NOT_EXPIRED));
     await runAutoFlipRecheck(env);
     // flip 済み → armed clear → 再予約しない。
     expect(await getAutoFlipArm(env)).toBeNull();
@@ -716,8 +749,8 @@ describe("handleReleaseWaveAutoFlipArm", () => {
 
 describe("handleReleaseWaveAutoFlipDisarm", () => {
   it("armed を clear して 303", async () => {
-    const kv = memKv({ "auto-flip-arm::latest": arm(["ippoan/a"]) });
-    const env = envWith(kv);
+    const kv = memKv();
+    const env = envWith(kv, arm(["ippoan/a"]));
     const resp = await handleReleaseWaveAutoFlipDisarm(
       formPost("/api/release-wave/auto-flip/disarm", ""),
       env,

@@ -10,7 +10,8 @@ Refs #476 / #137 / #237
 ## 用語
 
 - **armed**: 「Tag Release all + Auto Flip」ボタンで登録された「対象 repo 集合 +
-  期限」の状態。KV `auto-flip-arm::latest` に最新 1 件だけ保持する。
+  期限」の状態。ReleaseWaveHub DO storage (`auto-flip:arm`) に最新 1 件だけ
+  保持する (#490 で KV `auto-flip-arm::latest` から移行)。
 - **完了検知**: 各 repo の release deploy が no-traffic upload 後に叩く
   `POST /webhooks/release-wave/pending-release` の到達。これが `pending-release::`
   (workers は `traffic::`) に載る = その repo の release 完了。
@@ -33,11 +34,14 @@ interface AutoFlipArmRecord {
 }
 ```
 
-KV key は単一 `auto-flip-arm::latest` (直近の 1 orchestration のみ)。
-`kv.put(..., { expirationTtl: 1800 })` で 30 分 TTL。TTL 消滅 =「全部揃わなかった
-のでタイムアウト中断」を KV 自体で表現する (DO alarm / cron 不要)。
-KV TTL のラグに備え `expires_at` を record にも持ち、webhook 到達時に超過を
-検知したら明示 clear する (テスト容易性も兼ねる — in-memory KV は TTL を持たない)。
+record は ReleaseWaveHub DO storage の単一 key `auto-flip:arm` に置く (直近の
+1 orchestration のみ)。当初は KV `auto-flip-arm::latest` + `expirationTtl: 1800`
+だったが、KV get の edge cache (~60s) が「arm 直後の webhook が null を読む →
+recheck queue send 失敗と重なると発火しないまま TTL 消滅」という取りこぼし窓を
+作るため、auto-tag repos set (#460) と同じく DO (強整合) に移した (#490)。
+タイムアウト (30 分) は record の `expires_at` を読み手が判定する:
+webhook / recheck 到達時の `maybeAutoFlip` が超過検知で明示 clear し、UI
+(`repo-status-section`) は超過 record を表示しない (DO alarm / cron 不要)。
 
 ## 完了判定
 

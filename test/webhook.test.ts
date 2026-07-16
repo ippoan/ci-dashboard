@@ -1711,7 +1711,6 @@ describe("consumeWebhookBatch — refresh self-reschedule (Refs #337)", () => {
 describe("consumeWebhookBatch — auto-flip-recheck routing (Refs #481)", () => {
   beforeEach(async () => {
     resetHubCalls();
-    await env.COMPAT_KV.delete("auto-flip-arm::latest");
     await env.COMPAT_KV.delete("auto-flip::recheck-scheduled");
     await env.COMPAT_KV.delete("pending-release::ippoan/a");
   });
@@ -1729,16 +1728,24 @@ describe("consumeWebhookBatch — auto-flip-recheck routing (Refs #481)", () => 
   }
 
   it("auto-flip-recheck message を runAutoFlipRecheck に振り分けて ack する (未 ready はループ継続)", async () => {
-    // armed [a,b]、pending は a のみ = 未 ready。
-    await env.COMPAT_KV.put("auto-flip-arm::latest", JSON.stringify({
-      schema_version: 1,
-      repos: ["ippoan/a", "ippoan/b"],
-      armed_at: "2026-07-13T00:00:00.000Z",
-      expires_at: "2099-01-01T00:00:00.000Z",
-      actor: "me@example.com",
-      status: "armed",
-      blocked_reason: null,
-    }));
+    // armed [a,b]、pending は a のみ = 未 ready。arm の SoT は ReleaseWaveHub DO
+    // (Refs #490) なので、arm RPC を持つ fake hub を差し込む。
+    const armState: { arm: unknown } = {
+      arm: {
+        schema_version: 1,
+        repos: ["ippoan/a", "ippoan/b"],
+        armed_at: "2026-07-13T00:00:00.000Z",
+        expires_at: "2099-01-01T00:00:00.000Z",
+        actor: "me@example.com",
+        status: "armed",
+        blocked_reason: null,
+      },
+    };
+    const armHub = {
+      getAutoFlipArm: async () => armState.arm,
+      putAutoFlipArm: async (r: unknown) => { armState.arm = r; },
+      deleteAutoFlipArm: async () => { armState.arm = null; },
+    };
     await env.COMPAT_KV.put("pending-release::ippoan/a", JSON.stringify({
       schema_version: 1, repo: "ippoan/a", version_id: "a-vid", tag: "v1.0.0",
       preview_url: null, uploaded_at: "2026-07-13T00:00:00.000Z",
@@ -1748,6 +1755,7 @@ describe("consumeWebhookBatch — auto-flip-recheck routing (Refs #481)", () => 
     const queueEnv = {
       ...testEnv(),
       COMPAT_KV: env.COMPAT_KV,
+      RELEASE_WAVE_HUB: { idFromName: () => ({}), get: () => armHub },
       WEBHOOK_QUEUE: { send: async (msg: unknown, opts: unknown) => { sent.push({ msg, opts }); } },
     } as unknown as Env;
     const acked: string[] = [];

@@ -43,9 +43,10 @@ Wave (canary release オーケストレータ)**。`src/index.ts` が全 route �
 
 | ファイル | 役割 |
 |---|---|
-| `do.ts` (`ReleaseWaveHub`) `state.ts` `types.ts` `revision.ts` | legacy wave 状態機械 (SQLite DO)。`start()` を呼ぶ production caller が無く新規 wave を開始する経路は現状ない |
+| `do.ts` (`ReleaseWaveHub`) `state.ts` `types.ts` `revision.ts` | legacy wave 状態機械 (SQLite DO)。`start()` を呼ぶ production caller が無く新規 wave を開始する経路は現状ない。auto-flip armed record の SoT (強整合 storage、#490) もここ |
 | `webhook.ts` | GitHub Actions step が叩く shared-secret webhook (pending-release / flip-report / contract-applied / *-report / traffic-report)。`stage-report` は撤去済み |
 | `compat.ts` `compat-api.ts` | frontend ↔ backend image の compatibility 突合 (COMPAT_KV) |
+| `auto-flip.ts` | Tag Release all + Auto Flip (armed 機構、#476/#481/#485/#490)。arm は ReleaseWaveHub DO 置き (KV の ~60s edge cache 窓を回避)、timeout は record の `expires_at` 判定、完了検知は pending-release webhook + queue recheck ループ、flip 対象版は queue message の権威版 |
 | `api.ts` `page.ts` `dispatch.ts` `traffic.ts` `pending-release.ts` `tag-release-action.ts` `repo-*.ts` | admin UI action / dispatch / traffic split |
 
 ## entrypoint (`src/index.ts` の route)

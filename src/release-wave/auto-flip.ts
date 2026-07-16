@@ -8,10 +8,11 @@
  * 使う。armed set の全 repo が pending に揃い、compat gate を通過した時点で
  * ci-dashboard worker が `pendingFlipAllCore` を armed set 限定で発火する。
  *
- * timeout は KV `expirationTtl` で表現する (DO alarm / cron 不要)。全部揃わない
- * まま TTL 到達で armed record が消滅 = タイムアウト中断。KV TTL のラグと
- * in-memory KV (test) 非対応に備え、`expires_at` を record にも持ち webhook
- * 到達時に超過を明示検知して clear する。
+ * armed record の SoT は ReleaseWaveHub DO storage (強整合、Refs #490)。以前は
+ * COMPAT_KV に置いていたが、KV get の edge cache (~60s) が arm 直後の webhook に
+ * null を読ませる窓を作り、recheck queue send 失敗と重なると発火しないまま TTL
+ * 消滅した。timeout は record の `expires_at` で判定する (webhook / recheck 到達
+ * 時に超過を明示検知して clear。UI も超過 record は表示しない)。
  *
  * 監視は worker 側 (webhook 駆動) — セッション / ブラウザ非依存。設計の詳細は
  * docs/plan-auto-flip-tag-release.md を参照。
@@ -22,8 +23,8 @@ import { dispatchTagRelease } from "../tag-release";
 import { computeGlobalCompatibility } from "./compat";
 import { loadUnifiedPending, pendingFlipAllCore } from "./api";
 import type { PendingReleaseRecord } from "./pending-release";
+import type { ReleaseWaveHub } from "./do";
 
-const AUTO_FLIP_ARM_KEY = "auto-flip-arm::latest";
 const SCHEMA_VERSION = 1 as const;
 
 /** armed set の既定 TTL (秒)。全部揃わなければこの時間でタイムアウト中断。 */
@@ -31,6 +32,12 @@ export const AUTO_FLIP_DEFAULT_TTL_SECONDS = 30 * 60;
 
 /** KV expirationTtl の下限 (Cloudflare KV は 60 秒未満を受け付けない)。 */
 const KV_MIN_TTL_SECONDS = 60;
+
+/** ReleaseWaveHub singleton stub (webhook.ts / api.ts の hubStub と同じ解決)。 */
+function hubStub(env: Env): DurableObjectStub<ReleaseWaveHub> {
+  const id = env.RELEASE_WAVE_HUB.idFromName("singleton");
+  return env.RELEASE_WAVE_HUB.get(id) as DurableObjectStub<ReleaseWaveHub>;
+}
 
 /**
  * Queue job (Refs #481): armed 中の auto-flip を webhook 到達と切り離して定期
@@ -64,7 +71,7 @@ export const AUTO_FLIP_RECHECK_DELAY_SECONDS = 60;
 /** 重複予約防止 marker。scheduleReleasesIndexRekick (#337) と同方式。 */
 const AUTO_FLIP_RECHECK_MARKER = "auto-flip::recheck-scheduled";
 
-/** armed 状態の record。KV `auto-flip-arm::latest` に最新 1 件だけ保持。 */
+/** armed 状態の record。ReleaseWaveHub DO storage に最新 1 件だけ保持。 */
 export interface AutoFlipArmRecord {
   schema_version: typeof SCHEMA_VERSION;
   /** arm 時に needsRelease だった repo 集合 ("owner/name"、昇順・重複排除済み)。 */
@@ -81,7 +88,7 @@ export interface AutoFlipArmRecord {
   blocked_reason: string | null;
 }
 
-/** armed record を登録する (最新で上書き、expirationTtl で timeout を表現)。 */
+/** armed record を登録する (最新で上書き。timeout は expires_at の読み手判定)。 */
 export async function armAutoFlip(
   env: Env,
   input: { repos: string[]; actor: string; now: string; ttlSeconds?: number },
@@ -100,18 +107,20 @@ export async function armAutoFlip(
     status: "armed",
     blocked_reason: null,
   };
-  await env.COMPAT_KV.put(AUTO_FLIP_ARM_KEY, JSON.stringify(record), {
-    expirationTtl: Math.max(KV_MIN_TTL_SECONDS, ttl),
-  });
+  await hubStub(env).putAutoFlipArm(record);
   return record;
 }
 
-/** 現在の armed record を取得 (無ければ null)。 */
+/**
+ * 現在の armed record を取得 (無ければ null)。DO 読みなので arm 直後でも
+ * 取りこぼさない (Refs #490)。expires_at 超過の判定は caller が行う
+ * (maybeAutoFlip は超過検知で clear、UI は表示だけ抑止する)。
+ */
 export async function getAutoFlipArm(
   env: Env,
 ): Promise<AutoFlipArmRecord | null> {
   if (!env.COMPAT_KV) return null;
-  const v = await env.COMPAT_KV.get<AutoFlipArmRecord>(AUTO_FLIP_ARM_KEY, "json");
+  const v = await hubStub(env).getAutoFlipArm();
   if (!v || v.schema_version !== SCHEMA_VERSION) return null;
   return v;
 }
@@ -119,28 +128,22 @@ export async function getAutoFlipArm(
 /** armed record を消す (flip 完了 / disarm / timeout 中断)。 */
 export async function clearAutoFlipArm(env: Env): Promise<void> {
   if (!env.COMPAT_KV) return;
-  await env.COMPAT_KV.delete(AUTO_FLIP_ARM_KEY);
+  await hubStub(env).deleteAutoFlipArm();
 }
 
-/** armed を blocked に落とす (compat gate 不通過)。残 TTL を保って上書き。 */
+/** armed を blocked に落とす (compat gate 不通過)。expires_at 据え置きで上書き。 */
 export async function setAutoFlipArmBlocked(
   env: Env,
   arm: AutoFlipArmRecord,
   reason: string,
-  now: string,
 ): Promise<void> {
   if (!env.COMPAT_KV) return;
-  const remainingSec = Math.floor(
-    (Date.parse(arm.expires_at) - Date.parse(now)) / 1000,
-  );
   const record: AutoFlipArmRecord = {
     ...arm,
     status: "blocked",
     blocked_reason: reason,
   };
-  await env.COMPAT_KV.put(AUTO_FLIP_ARM_KEY, JSON.stringify(record), {
-    expirationTtl: Math.max(KV_MIN_TTL_SECONDS, remainingSec),
-  });
+  await hubStub(env).putAutoFlipArm(record);
 }
 
 /** armed set の release 進捗。 */
@@ -262,7 +265,7 @@ export async function maybeAutoFlip(
     gateReason = null;
   }
   if (gateReason) {
-    await setAutoFlipArmBlocked(env, arm, gateReason, now);
+    await setAutoFlipArmBlocked(env, arm, gateReason);
     return { action: "blocked", reason: gateReason };
   }
 
