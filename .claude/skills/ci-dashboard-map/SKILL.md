@@ -30,21 +30,21 @@ Wave (canary release オーケストレータ)**。`src/index.ts` が全 route �
 | **MCP server** | `src/mcp/server.ts` + `src/mcp/tools/*` | `/mcp` (stateless Streamable HTTP)。下表参照 |
 | **Release Wave** | `src/release-wave/*` (`do.ts` = `ReleaseWaveHub`) | canary flip / compatibility 突合 / webhook / page / api。下記参照 |
 
-### MCP tools (`src/mcp/tools/*`, 計 ~46 tool)
+### MCP tools (`src/mcp/tools/*`, 計 ~48 tool)
 
 | file | tools (件数) |
 |---|---|
 | `actions.ts` (6) / `pulls.ts` (3) / `releases.ts` (3) | workflow run / PR / release 操作 |
 | `issues.ts` (11) / `projects.ts` (8) | cross-org issue / Projects v2 (`list_org_issues` 等。check-issue skill が consume) |
 | `logs.ts` (2) / `commits.ts` (2) / `repository.ts` (3) | job log / commit / repo |
-| `release-wave.ts` (8) | `release_wave_start/stage/flip/approve/rollback/abort/status` 等 |
+| `release-wave.ts` (10) | 現行: `release_wave_pending_state/pending_flip/pending_flip_all` (pending release flip、wave state machine 非経由)。legacy: `release_wave_status/approve/flip/rollback/abort/fail/contract_applied` (`release_wave_start`/`_stage` は stage phase 撤去で削除済み、Refs ippoan/ci-workflows#96①。新規 wave 開始経路が無い、詳細は `docs/release-wave.md`) |
 
 ### Release Wave (`src/release-wave/`)
 
 | ファイル | 役割 |
 |---|---|
-| `do.ts` (`ReleaseWaveHub`) `state.ts` `types.ts` `revision.ts` | wave 状態機械 (SQLite DO) |
-| `webhook.ts` | GitHub Actions step が叩く shared-secret webhook (contract-applied / stage / flip / *-report / pending-release / traffic) |
+| `do.ts` (`ReleaseWaveHub`) `state.ts` `types.ts` `revision.ts` | legacy wave 状態機械 (SQLite DO)。`start()` を呼ぶ production caller が無く新規 wave を開始する経路は現状ない |
+| `webhook.ts` | GitHub Actions step が叩く shared-secret webhook (pending-release / flip-report / contract-applied / *-report / traffic-report)。`stage-report` は撤去済み |
 | `compat.ts` `compat-api.ts` | frontend ↔ backend image の compatibility 突合 (COMPAT_KV) |
 | `api.ts` `page.ts` `dispatch.ts` `traffic.ts` `pending-release.ts` `tag-release-action.ts` `repo-*.ts` | admin UI action / dispatch / traffic split |
 

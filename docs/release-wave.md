@@ -13,33 +13,52 @@ frontend ↔ backend image 互換性突合 (#157) の KV write shape 仕様は
 
 ## アーキテクチャ全体図
 
+**現在の主要経路は Pending release flip** (下記)。旧来の wave state machine
+(start→stage→approve→flip の wave 単位フロー) は stage phase 撤去
+(Refs ippoan/ci-workflows#96①) で `release_wave_start` / `release_wave_stage`
+tool ごと削除済みで、**新規 wave を開始する経路が現状存在しない**
+(`ReleaseWaveHub` DO の `start()` / `createWave()` を呼ぶ production caller が
+ソース中に無い)。`approve` / `rollback` / `abort` / `fail` の tool・Admin UI
+ボタン自体は残っているが、対象になる wave が作られないため実質的に稼働してい
+ない可能性が高い (要検証、別 issue で判断)。
+
 ```
 operator (Cloudflare Access edge gate)
     │
-    ├─ Admin UI: GET /release-wave, /release-wave/:wave_id
-    │   └─ Action buttons: POST /api/release-wave/:wave_id/{approve|rollback|abort}
+    ├─ Admin UI: GET /release-wave
+    │   └─ Action buttons:
+    │       POST /api/release-wave/pending-release/flip        (1 repo flip)
+    │       POST /api/release-wave/pending-release/flip-all    (全 repo 一括 flip)
+    │       POST /api/release-wave/pending-release/flip-group-rollback
+    │       POST /api/release-wave/traffic-rollback / backend-rollback
+    │       (legacy) POST /api/release-wave/:wave_id/{approve|rollback|abort|fail}
     │
     └─ MCP tools (Claude Code, OAuth via auth-worker):
-        release_wave_start / _stage / _status / _approve / _flip /
-        _rollback / _abort / _contract_applied
+        release_wave_pending_state / _pending_flip / _pending_flip_all
+        (+ legacy wave 系: _status / _approve / _flip / _rollback / _abort /
+         _fail / _contract_applied — 上記の通り新規 wave 開始経路なし)
 
-GitHub Actions step (= release-wave-handler reusable):
+GitHub Actions step (release-wave-handler / frontend-ci reusable):
     │
-    └─ HTTP webhook (shared secret):
+    └─ HTTP webhook (shared secret, X-Release-Wave-Webhook-Secret):
+        POST /webhooks/release-wave/pending-release      (tag push 後の
+          no-traffic version 報告 = 旧 stage-report 相当)
+        POST /webhooks/release-wave/flip-report
         POST /webhooks/release-wave/contract-applied
+        POST /webhooks/release-wave/frontend-test-report
+        POST /webhooks/release-wave/backend-deploy-report
+        POST /webhooks/release-wave/traffic-report / backend-traffic-report
 
-           ↓ (どちらの経路も)
+           ↓
 
-      ReleaseWaveHub DO (1 singleton)
-      ├─ storage: wave:{wave_id} JSON records
-      └─ pure state machine (state.ts) で transition
+      COMPAT_KV: pending-release::<repo> record (pending-release.ts)
+      (legacy: ReleaseWaveHub DO の wave:{wave_id} record / state.ts state machine)
 
-           ↓ (state=flipping / rollback 時)
+           ↓ (flip 時)
 
-      release-wave-gcp (Cloud Run proxy):
+      release-wave-gcp (Cloud Run proxy) / wrangler versions deploy (Workers):
         /cloudrun/flip-traffic
         /cloudrun/rollback
-        /cloudrun/stage-check
 ```
 
 ---
@@ -301,38 +320,50 @@ CF Access wildcard (`preview-*.ippoan.org`、上の「Cloudflare Access setup」
 ## MCP tool 経由の運用 (Claude Code / 他 MCP client)
 
 `https://ci-dashboard.ippoan.org/mcp` に OAuth (auth-worker delegation) で
-ログインすると以下 8 tool が叩ける:
+ログインすると以下 10 tool が叩ける (`src/mcp/tools/release-wave.ts`)。
+
+### 現行の主要経路 (wave state machine を経由しない)
 
 | tool | 用途 |
 |---|---|
-| `release_wave_start` | 新規 wave 開始 |
-| `release_wave_stage` | repo handler からの stage 完了 callback |
-| `release_wave_status` | 現状取得 (read-only) |
+| `release_wave_pending_state` | Pending releases の診断 (read-only、`/release-wave` の表示と同一 source) |
+| `release_wave_pending_flip` | 1 repo の pending release (no-traffic version) を 100% traffic へ flip |
+| `release_wave_pending_flip_all` | 全 pending release を一括 flip (`/release-wave` の「Flip all」相当、flip-group を記録し一括 rollback 可能にする) |
+
+### legacy: wave state machine 系 (新規 wave 開始経路なし、上記注記参照)
+
+| tool | 用途 |
+|---|---|
+| `release_wave_status` | wave の現状取得 (read-only) |
 | `release_wave_approve` | admin 承認 (pending-approval → flipping) |
-| `release_wave_flip` | repo handler からの flip 完了 callback |
+| `release_wave_flip` | repo handler からの flip 完了 callback (operator が直接叩く口ではない) |
 | `release_wave_rollback` | 旧 revision 戻し (`--force` で unsafe override) |
 | `release_wave_abort` | flip 前の中止 |
+| `release_wave_fail` | stuck wave を強制的に failed へ落とす |
 | `release_wave_contract_applied` | GitHub Actions step からの contract 通知 |
 
-Admin UI ボタンと MCP tool は同じ DO RPC を呼ぶので **どちらから操作しても
+Admin UI ボタンと MCP tool は同じ実装を呼ぶので **どちらから操作しても
 同じ結果**。Admin UI は人間 operator 用 (= 視覚的なステート確認 + ワンクリック
 action)、MCP tool は自動化 / IDE 統合用。
 
 ---
 
-## GitHub Actions step 経由の運用 (release-wave-handler reusable + 3 webhook)
+## GitHub Actions step 経由の運用 (release-wave-handler / frontend-ci reusable + webhook)
 
-GitHub Actions が release-wave 機構と連携する経路は以下 3 endpoint の shared
-secret 認証 HTTP webhook で統一されている (= MCP OAuth を Actions で動かさ
-ない設計)。すべて `X-Release-Wave-Webhook-Secret` header + JSON body。
+GitHub Actions が release-wave 機構と連携する経路は shared secret 認証 HTTP
+webhook で統一されている (= MCP OAuth を Actions で動かさない設計)。すべて
+`X-Release-Wave-Webhook-Secret` header + JSON body (`src/release-wave/webhook.ts`)。
 
-| endpoint | 用途 | DO method |
-|---|---|---|
-| `POST /webhooks/release-wave/stage-report` | release-wave-handler の stage 完了 callback | `stageReport` |
-| `POST /webhooks/release-wave/flip-report`  | flip 完了 callback                          | `flipReport` |
-| `POST /webhooks/release-wave/contract-applied` | contract migration deploy 後の通知       | `contractApplied` |
-| `POST /webhooks/release-wave/frontend-test-report` | frontend CI green 時の compatibility 記録 (KV write) | — (COMPAT_KV) |
-| `POST /webhooks/release-wave/backend-deploy-report` | backend deploy 成功時の compatibility 記録 (KV write) | — (COMPAT_KV) |
+| endpoint | 用途 |
+|---|---|
+| `POST /webhooks/release-wave/pending-release` | frontend-ci が tag push を検知して no-traffic version を報告 (= 旧 stage-report 相当。stage phase 撤去後、stage 完了通知はここに一本化された) |
+| `POST /webhooks/release-wave/flip-report` | (legacy wave 系) flip 完了 callback |
+| `POST /webhooks/release-wave/contract-applied` | contract migration deploy 後の通知 |
+| `POST /webhooks/release-wave/frontend-test-report` | frontend CI green 時の compatibility 記録 (KV write) |
+| `POST /webhooks/release-wave/backend-deploy-report` | backend deploy 成功時の compatibility 記録 (KV write) |
+| `POST /webhooks/release-wave/traffic-report` | Cloudflare Workers の version traffic split 報告 |
+| `POST /webhooks/release-wave/backend-traffic-report` | Cloud Run の traffic split 報告 |
+| `GET /webhooks/release-wave/backend-current-image` | 現 production backend image の解決 (CF Access を経由しない機械可読 read) |
 
 compatibility 系 2 endpoint の body / KV shape は
 [`docs/release-wave-compatibility-kv.md`](release-wave-compatibility-kv.md) を参照。
@@ -340,22 +371,26 @@ compatibility 系 2 endpoint の body / KV shape は
 `GET /compatibility?backend_repo=&backend_target_image=` /
 `GET /backend-current-image?repo=` で取得する。
 
-### stage-report body
+### pending-release body
 
 ```json
 {
-  "wave_id": "wave_2026_05_27_01",
-  "repo": "ippoan/rust-alc-api",
-  "ok": true,
-  "preview_url": "https://preview-rust-alc-api.ippoan.org",
-  "flip_from_revision": "rust-alc-api-00041-zzz"
+  "repo": "ippoan/nuxt-trouble",
+  "worker_name": "nuxt-trouble",
+  "version_id": "0d3f2b7e-....-uuid",
+  "tag": "v1.2.3",
+  "preview_url": "https://preview-trouble.ippoan.org"
 }
 ```
 
-`ok=false` 時は `error` フィールドで失敗詳細を渡し、`preview_url` /
-`flip_from_revision` は省略可。
+`worker_name` は monorepo unit のみ指定 (単一 worker repo は省略)。
+`version_id` は cloudflare-workers なら `wrangler versions upload` の UUID、
+cloudrun なら revision tag (例 `pending-v0-0-79`)。`preview_url` は省略可。
+backend (cloudrun) の場合はさらに `staged_image` (flip 前 no-traffic image の
+git SHA) を渡すと、未 test の consumer への flip 前 retest が自動 fan-out
+される (Refs #427)。
 
-### flip-report body
+### flip-report body (legacy wave 系)
 
 ```json
 {
@@ -398,37 +433,55 @@ caller repo (e.g. `rust-alc-api`) の migration deploy workflow に以下 step �
 
 ## 日常運用フロー
 
-### 通常の wave (= 失敗なし)
+### 通常のリリース (= 失敗なし、現行の pending release flip 経路)
 
-1. operator が `release_wave_start` MCP tool で wave 開始 (`flip_policy:
-   "manual-approval"` 推奨)
-2. 各 repo の release-wave-handler が tag を打ち、stage deploy を実行 →
-   `release_wave_stage` で callback (preview_url + flip_from_revision)
-3. 全 repo staged → wave が `pending-approval` 遷移
-4. operator が preview URL を `preview-*.ippoan.org` でブラウザ確認 (CF Access
-   経由で Google OAuth)
-5. Admin UI で **Approve & Flip** ボタン押下 (or MCP `release_wave_approve`)
-6. 各 repo handler が flip 実行 → `release_wave_flip` callback
-7. 全 repo flipped → wave が `flipped` 遷移
-8. operator が contract migration を別 PR で deploy → migration step が
-   `/webhooks/release-wave/contract-applied` に通知 → `rollback.safe` が
-   `false` に flip
+1. operator が対象 repo の tag を打つ (`/release-wave` の「Repo リリース状況」
+   セクションの **Tag Release** ボタン、または各 repo で `tag-release.yml` を
+   手動 `workflow_dispatch`)
+2. tag push を検知した release CI (frontend-ci / go-ci 等) が no-traffic
+   version を deploy し、`POST /webhooks/release-wave/pending-release` で
+   ci-dashboard に報告 → `/release-wave` の「Pending releases」に一覧表示
+   される
+3. operator が preview URL (`preview-*.ippoan.org`、CF Access 経由の Google
+   OAuth) でブラウザ確認
+4. Admin UI の **Flip** (1 repo) / **Flip all** (全 repo 一括。MCP
+   `release_wave_pending_flip` / `release_wave_pending_flip_all`) ボタン押下
+5. 各 repo の release-wave-handler が実際の flip
+   (`wrangler versions deploy <id>@100%` / cloudrun flip-traffic) を
+   GitHub Actions 上で実行する。**callback は無い**ため、結果は Actions run
+   を直接確認する
+6. flip-all の場合は flip-group が記録され、後でまとめて rollback できる
 
-### 失敗 / rollback
+補足 (auto-flip, Refs #476/#481): `POST /api/release-wave/auto-flip/arm` で
+repo 群を armed にしておくと、指定した全 repo が pending release に載った
+時点で flip-all が自動発火する。
 
-- **flip 前 (staging / pending-approval)**: **Abort** ボタン (or MCP
+### 失敗 / rollback (pending release flip 経路)
+
+- frontend 単独 rollback: `POST /api/release-wave/traffic-rollback`
+- backend 単独 rollback: `POST /api/release-wave/backend-rollback`
+- flip-all で作った flip-group をまとめて戻す:
+  `POST /api/release-wave/pending-release/flip-group-rollback`
+
+### legacy: wave state machine (新規開始経路なし)
+
+以下は `ReleaseWaveHub` DO の `wave_id` 単位 state machine を経由する旧
+フロー。`release_wave_start` tool 削除 (stage phase 撤去、Refs
+ippoan/ci-workflows#96①) 後、**`createWave()` を呼ぶ production caller が
+無く新規 wave を作る経路が存在しない**ため、`approve`/`rollback`/`abort`/
+`fail` 系の tool・Admin UI ボタン自体は残っているものの実質使う機会が無いと
+考えられる (dead code かどうかは未検証。削除する場合は別 issue で判断する)。
+
+- **flip 前 (pending-approval)**: **Abort** ボタン (or MCP
   `release_wave_abort`) で中止
 - **flip 後 (rollback.safe=true)**: **Rollback** ボタン (or MCP
   `release_wave_rollback`) で旧 revision に戻す
 - **flip 後 (rollback.safe=false)**: rollback はデフォルト refuse。Admin UI
   には警告と `(force)` ラベル付きボタンが出るので、operator が DB を手動
   復旧する覚悟があれば押す (= force=true を裏で渡す)
-
-### Wave 進行中の serial enforcement
-
-- 1 wave が `staging` / `pending-approval` / `flipping` のうちに 2 つ目の
-  wave を `start` しようとすると `WAVE_IN_PROGRESS` で reject される
-- 1 wave が `flipped` 以降は新 wave 可 (= hotfix wave をすぐ走らせるパターン)
+- serial enforcement: 1 wave が `staging` / `pending-approval` / `flipping`
+  のうちに 2 つ目の wave を `start` しようとすると `WAVE_IN_PROGRESS` で
+  reject される設計だが、上記の通り `start` 自体を呼ぶ経路が無い
 
 ---
 
@@ -436,11 +489,13 @@ caller repo (e.g. `rust-alc-api`) の migration deploy workflow に以下 step �
 
 | 症状 | 原因の可能性 | 対応 |
 |---|---|---|
-| MCP tool が `WAVE_IN_PROGRESS` を返す | 別 wave が in-progress | `release_wave_status` で確認、必要なら abort/rollback |
+| Pending releases にいつまでも出てこない | release CI が `pending-release` webhook を打てていない (secret 不一致等) | 対象 repo の release CI run log を確認 |
+| flip ボタンを押しても反映されない | flip は callback 無しの fire-and-forget | 対象 repo の GitHub Actions run を直接確認 |
 | Admin UI で button が disabled | 現 state でその操作が無効 | hover の title 説明を確認、別 button を使う |
 | 通知 webhook が 401 | secret 不一致 / 古い rotation 値 | secrets-rotate-pipe で 3 所同期再投入 |
 | preview-*.ippoan.org が 403 | CF Access policy 未追加 / email allowlist 外 | 本ドキュメントの "preview-* wildcard" セクション参照 |
-| flip 後 rollback が refuse | contract migration 適用済 | Admin UI の警告を確認、必要なら force 押下 (DB 手動復旧前提) |
+| (legacy) MCP tool が `WAVE_IN_PROGRESS` を返す | 別 wave が in-progress | `release_wave_status` で確認、必要なら abort/rollback |
+| (legacy) flip 後 rollback が refuse | contract migration 適用済 | Admin UI の警告を確認、必要なら force 押下 (DB 手動復旧前提) |
 
 ## Repo リリース状況 / 直接 Tag Release (Refs #137)
 
