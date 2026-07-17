@@ -26,6 +26,7 @@ import { handleDepGraphPage } from "./dep-graph-page-view";
 import { handleLaunch } from "./launch";
 import { handleTagRelease } from "./tag-release";
 import { handleAutoTagPage, handleAutoTagPagePost } from "./auto-tag-page";
+import { handleAutoTagToggle } from "./auto-tag";
 import {
   handleReleaseWaveTagRelease,
   handleReleaseWaveTagReleaseAll,
@@ -278,6 +279,10 @@ app.post("/api/release-close-batch",
 // で gate されている前提なので worker 側で追加の認証は行わない。
 app.get("/auto-tag", (c) => handleAutoTagPage(getHub(c.env)));
 app.post("/auto-tag", (c) => handleAutoTagPagePost(c.req.raw, getHub(c.env)));
+
+// /release-wave 埋め込みトグル (Refs #492)。repo 1 件だけを on/off する。
+app.post("/api/release-wave/auto-tag/toggle", (c) =>
+  handleAutoTagToggle(c.req.raw, c.env));
 
 // /releases blob ダンプ (Refs #407 / #409, bug 1 診断用)。CF Access (zone-level)
 // で gate。Hub DO (`this.ctx.storage`) を直叩きするため strongly consistent。

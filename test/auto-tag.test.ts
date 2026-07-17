@@ -4,7 +4,9 @@ import {
   readAutoTagRepos,
   writeAutoTagRepos,
   isAutoTagRepo,
+  handleAutoTagToggle,
 } from "../src/auto-tag";
+import type { Env } from "../src/index";
 
 interface MockHub {
   stub: DurableObjectStub;
@@ -125,5 +127,59 @@ describe("isAutoTagRepo", () => {
     const h = makeMockHub(["ippoan/foo"]);
     h.setReject("throw");
     expect(await isAutoTagRepo(h.stub, "ippoan/foo")).toBe(false);
+  });
+});
+
+describe("handleAutoTagToggle (POST /api/release-wave/auto-tag/toggle, Refs #492)", () => {
+  function makeEnv(h: MockHub): Env {
+    return {
+      CI_HUB: {
+        idFromName: () => ({}),
+        get: () => h.stub,
+      },
+    } as unknown as Env;
+  }
+
+  function toggleRequest(repo: string, enable: "1" | "0"): Request {
+    return new Request("http://localhost/api/release-wave/auto-tag/toggle", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ repo, enable }).toString(),
+    });
+  }
+
+  it("enable=1 adds only the target repo without touching others", async () => {
+    const h = makeMockHub(["ippoan/existing"]);
+    const res = await handleAutoTagToggle(toggleRequest("ippoan/new", "1"), makeEnv(h));
+    expect(res.status).toBe(303);
+    expect(res.headers.get("Location")).toBe("/release-wave");
+    expect(h.get()).toEqual(["ippoan/existing", "ippoan/new"]);
+  });
+
+  it("enable=0 removes only the target repo, leaving others intact", async () => {
+    const h = makeMockHub(["ippoan/a", "ippoan/b"]);
+    const res = await handleAutoTagToggle(toggleRequest("ippoan/a", "0"), makeEnv(h));
+    expect(res.status).toBe(303);
+    expect(h.get()).toEqual(["ippoan/b"]);
+  });
+
+  it("is idempotent: enabling an already-enabled repo is a no-op", async () => {
+    const h = makeMockHub(["ippoan/a"]);
+    await handleAutoTagToggle(toggleRequest("ippoan/a", "1"), makeEnv(h));
+    expect(h.get()).toEqual(["ippoan/a"]);
+  });
+
+  it("no-ops (redirect only, no write) when repo is missing/blank", async () => {
+    const h = makeMockHub(["ippoan/a"]);
+    const res = await handleAutoTagToggle(toggleRequest("  ", "1"), makeEnv(h));
+    expect(res.status).toBe(303);
+    expect(h.get()).toEqual(["ippoan/a"]);
+  });
+
+  it("returns 502 when the hub write fails (fail-closed, doesn't silently drop the intent)", async () => {
+    const h = makeMockHub(["ippoan/a"]);
+    h.setReject("non-ok");
+    const res = await handleAutoTagToggle(toggleRequest("ippoan/b", "1"), makeEnv(h));
+    expect(res.status).toBe(502);
   });
 });

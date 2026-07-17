@@ -43,6 +43,7 @@ import {
   computeArmProgress,
   type AutoFlipArmView,
 } from "./auto-flip";
+import { readAutoTagRepos } from "../auto-tag";
 
 function escapeHtml(s: string): string {
   return s
@@ -130,10 +131,34 @@ export function renderAutoFlipControls(
     </div>`;
 }
 
+/**
+ * repo 1 件分の Auto-tag on/off トグル (badge + 反対状態へのボタン) を返す
+ * (Refs #492)。ON = PR merge の度に `tag-release.yml` を自動 dispatch する
+ * (Refs #460)。一括編集は `/auto-tag` に残す。
+ */
+export function renderAutoTagToggle(repo: string, on: boolean): string {
+  const badge = on
+    ? `<span class="badge" style="background:${GREEN}">ON</span>`
+    : `<span class="badge" style="background:${GRAY}">OFF</span>`;
+  const label = on ? "OFF にする" : "ON にする";
+  return `
+    <div style="display:flex;align-items:center;gap:6px">
+      ${badge}
+      <form method="post" action="/api/release-wave/auto-tag/toggle" style="margin:0">
+        <input type="hidden" name="repo" value="${escapeHtml(repo)}">
+        <input type="hidden" name="enable" value="${on ? "0" : "1"}">
+        <button type="submit" title="PR merge の度に ${escapeHtml(repo)} の tag-release.yml を自動 dispatch するかを切り替える (Refs #460)">
+          Auto-tag ${label}
+        </button>
+      </form>
+    </div>`;
+}
+
 /** 監視対象 repo の tag 状況テーブル + サマリを HTML で返す (tagless は除外)。 */
 export function renderRepoReleaseStatusSection(
   statuses: RepoReleaseStatus[],
   armView?: AutoFlipArmView | null,
+  autoTagRepos?: ReadonlySet<string>,
 ): string {
   // tagless repo はリリース対象ではないので一覧から除外する。
   const visible = statuses.filter((s) => !s.tagless);
@@ -186,11 +211,14 @@ export function renderRepoReleaseStatusSection(
            </form>`
         : `<span class="meta">—</span>`;
 
+      const autoTagCell = renderAutoTagToggle(s.repo, !!autoTagRepos?.has(s.repo));
+
       return `
         <tr>
           <td style="border-left:4px solid ${border};padding-left:8px">${escapeHtml(s.repo)}</td>
           <td>${tagBadge}</td>
           <td>${statusCell}</td>
+          <td>${autoTagCell}</td>
           <td class="actions">${action}</td>
         </tr>`;
     })
@@ -201,7 +229,11 @@ export function renderRepoReleaseStatusSection(
       ? `<p class="meta">リリース対象の repo はありません。</p>`
       : `<table>
           <thead>
-            <tr><th>Repo</th><th>Latest Tag</th><th>状況</th><th>Action</th></tr>
+            <tr><th>Repo</th><th>Latest Tag</th><th>状況</th><th>Auto-tag${helpMark(
+              `ON なら PR が default branch に merge される度に、この repo の
+              tag-release.yml を自動 dispatch する (Refs #460)。一覧編集は
+              <a href="/auto-tag">/auto-tag</a> でも可能。`,
+            )}</th><th>Action</th></tr>
           </thead>
           <tbody>${rows}</tbody>
         </table>`;
@@ -219,7 +251,8 @@ export function renderRepoReleaseStatusSection(
         <span class="badge" style="background:${RED}">赤 = 未tag</span>
         の repo を直接 Tag Release できる (tag 採番は各 repo の tag-release.yml)。
         「⚡ Tag Release all + Auto Flip」は要リリース repo を一括 tag release し、
-        全 release 完了で自動 Flip all する (Refs #476)。`,
+        全 release 完了で自動 Flip all する (Refs #476)。
+        「Auto-tag」列は PR merge の度に自動 tag release するかの継続設定 (Refs #460)。`,
       )}</h2>
       <div style="margin:8px 0">${summary}</div>
       ${autoFlipControls}
@@ -936,7 +969,20 @@ export async function handleReleaseWaveListPageWithRepoStatus(
     armView = null;
   }
 
-  const section = renderRepoReleaseStatusSection(statuses, armView);
+  // Auto-tag 対象 set (Refs #460 / #492)。Hub 不達時は空集合で degrade
+  // (= 全 repo が OFF 扱いで表示されるだけ。write 経路には影響しない)。
+  let autoTagRepos: Set<string> = new Set();
+  if (env.CI_HUB) {
+    try {
+      const hubId = env.CI_HUB.idFromName("singleton");
+      const hub = env.CI_HUB.get(hubId);
+      autoTagRepos = new Set(await readAutoTagRepos(hub));
+    } catch {
+      autoTagRepos = new Set();
+    }
+  }
+
+  const section = renderRepoReleaseStatusSection(statuses, armView, autoTagRepos);
   let html = await res.text();
   html = injectRepoStatusSection(html, section);
 

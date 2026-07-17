@@ -11,6 +11,7 @@ import {
   renderFlipGuardSelfTest,
   promotableZeroVersions,
   handleReleaseWaveListPageWithRepoStatus,
+  renderAutoTagToggle,
 } from "../../src/release-wave/repo-status-section";
 import type { TrafficRecord } from "../../src/release-wave/traffic";
 import type { WaveCompatibility } from "../../src/release-wave/compat";
@@ -196,6 +197,61 @@ describe("renderRepoReleaseStatusSection", () => {
   it("handles empty repo list", () => {
     const html = renderRepoReleaseStatusSection([]);
     expect(html).toContain("リリース対象の repo はありません");
+  });
+
+  // Auto-tag on/off トグル (Refs #492)。
+  it("shows Auto-tag ON badge + OFF button for a repo in the auto-tag set", () => {
+    const html = renderRepoReleaseStatusSection(
+      [status({ repo: "ippoan/foo", hasTag: true, latestTag: "v1.0.0", behind: 0 })],
+      null,
+      new Set(["ippoan/foo"]),
+    );
+    expect(html).toContain(">ON<");
+    expect(html).toContain("Auto-tag OFF にする");
+    expect(html).toContain('action="/api/release-wave/auto-tag/toggle"');
+    expect(html).toContain('name="enable" value="0"');
+  });
+
+  it("shows Auto-tag OFF badge + ON button for a repo NOT in the auto-tag set", () => {
+    const html = renderRepoReleaseStatusSection(
+      [status({ repo: "ippoan/bar", hasTag: true, latestTag: "v1.0.0", behind: 0 })],
+      null,
+      new Set(["ippoan/other"]),
+    );
+    expect(html).toContain(">OFF<");
+    expect(html).toContain("Auto-tag ON にする");
+    expect(html).toContain('name="enable" value="1"');
+  });
+
+  it("defaults every repo to Auto-tag OFF when autoTagRepos is omitted", () => {
+    const html = renderRepoReleaseStatusSection([
+      status({ repo: "ippoan/foo", hasTag: false }),
+    ]);
+    expect(html).toContain("Auto-tag ON にする");
+    expect(html).not.toContain("Auto-tag OFF にする");
+  });
+});
+
+describe("renderAutoTagToggle", () => {
+  it("ON state: green badge + button that submits enable=0", () => {
+    const html = renderAutoTagToggle("ippoan/foo", true);
+    expect(html).toContain(">ON<");
+    expect(html).toContain('name="repo" value="ippoan/foo"');
+    expect(html).toContain('name="enable" value="0"');
+    expect(html).toContain("OFF にする");
+  });
+
+  it("OFF state: gray badge + button that submits enable=1", () => {
+    const html = renderAutoTagToggle("ippoan/foo", false);
+    expect(html).toContain(">OFF<");
+    expect(html).toContain('name="enable" value="1"');
+    expect(html).toContain("ON にする");
+  });
+
+  it("escapes repo name in both the hidden input and the title", () => {
+    const html = renderAutoTagToggle('a/<b>"&', false);
+    expect(html).not.toContain("<b>");
+    expect(html).toContain("&lt;b&gt;");
   });
 });
 
