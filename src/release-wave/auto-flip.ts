@@ -16,6 +16,10 @@
  *
  * 監視は worker 側 (webhook 駆動) — セッション / ブラウザ非依存。設計の詳細は
  * docs/plan-auto-flip-tag-release.md を参照。
+ *
+ * `runContinuousAutoFlip` (末尾、Refs #494) は上記の 1 回限りバッチ arm とは
+ * 別の機構: Auto-tag ON (Refs #460) の repo 単体を対象に、release 完了ごとに
+ * 継続的に (TTL 無し・他 repo 非依存で) flip する。
  */
 
 import type { Env } from "../index";
@@ -24,6 +28,7 @@ import { computeGlobalCompatibility } from "./compat";
 import { loadUnifiedPending, pendingFlipAllCore } from "./api";
 import type { PendingReleaseRecord } from "./pending-release";
 import type { ReleaseWaveHub } from "./do";
+import { isAutoTagRepo } from "../auto-tag";
 
 const SCHEMA_VERSION = 1 as const;
 
@@ -37,6 +42,42 @@ const KV_MIN_TTL_SECONDS = 60;
 function hubStub(env: Env): DurableObjectStub<ReleaseWaveHub> {
   const id = env.RELEASE_WAVE_HUB.idFromName("singleton");
   return env.RELEASE_WAVE_HUB.get(id) as DurableObjectStub<ReleaseWaveHub>;
+}
+
+/** CI_HUB (Hub DO) singleton stub。auto-tag flag (`autoTag:repos`、Refs #460) の
+ *  read に使う (auto-tag.ts / index.ts の getHub と同じ解決)。 */
+function ciHubStub(env: Env): DurableObjectStub {
+  const id = env.CI_HUB.idFromName("singleton");
+  return env.CI_HUB.get(id);
+}
+
+/**
+ * global compatibility gate 判定を単体関数に抽出 (`maybeAutoFlip` と
+ * `runContinuousAutoFlip` (Refs #494) で共有)。非互換 (checked && !verified) な
+ * ら理由文字列、互換 / 判定不能 (compat 取得失敗) なら null を返す。
+ *
+ * 呼び出し側の fail-open / fail-closed の判断は関数の外で行う: `maybeAutoFlip`
+ * (手動 arm 起点) は null (判定不能) を素通しとして扱うが、`runContinuousAutoFlip`
+ * (完全自動) は COMPAT_KV 未 bind 時点で呼ばずスキップする (fail-closed)。
+ */
+async function computeCompatGateReason(env: Env): Promise<string | null> {
+  try {
+    const compat = await computeGlobalCompatibility(env.COMPAT_KV!);
+    if (compat.checked && !compat.verified) {
+      const reds = compat.backends.flatMap((b) =>
+        b.matrix
+          .filter((m) => !m.tested_against_target)
+          .map((m) => `${m.frontend}→${b.backend_repo}`),
+      );
+      return (
+        `compatibility 未検証: ` +
+        (reds.slice(0, 8).join(", ") + (reds.length > 8 ? " …" : ""))
+      );
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -248,22 +289,7 @@ export async function maybeAutoFlip(
   // checked=false (誰も互換性 test していない) は既存 approve gate と同じく素通し。
   // compat 取得失敗時は gate をかけられないため blocked にはせず素通しする
   // (loud fail させると全 auto-flip が止まる。既存 UI も compat 失敗は degrade)。
-  let gateReason: string | null = null;
-  try {
-    const compat = await computeGlobalCompatibility(env.COMPAT_KV);
-    if (compat.checked && !compat.verified) {
-      const reds = compat.backends.flatMap((b) =>
-        b.matrix
-          .filter((m) => !m.tested_against_target)
-          .map((m) => `${m.frontend}→${b.backend_repo}`),
-      );
-      gateReason =
-        `compatibility 未検証: ` +
-        (reds.slice(0, 8).join(", ") + (reds.length > 8 ? " …" : ""));
-    }
-  } catch {
-    gateReason = null;
-  }
+  const gateReason = await computeCompatGateReason(env);
   if (gateReason) {
     await setAutoFlipArmBlocked(env, arm, gateReason);
     return { action: "blocked", reason: gateReason };
@@ -285,6 +311,54 @@ export async function maybeAutoFlip(
   }
   await clearAutoFlipArm(env);
   return { action: "flipped", flipped: result.flipped.length };
+}
+
+// ----------------------------------------------------------------------------
+// Auto-tag ON repo の継続 auto-flip (Refs #494)
+// ----------------------------------------------------------------------------
+
+/** `runContinuousAutoFlip` の結果 (log / test 用の判別 union)。 */
+export type ContinuousAutoFlipOutcome =
+  | { action: "skip"; reason: "not-auto-tag" | "no-compat-kv" }
+  | { action: "blocked"; reason: string }
+  | { action: "flipped" }
+  | { action: "flip_failed"; error: string };
+
+/**
+ * Auto-tag ON (`autoTag:repos`、Refs #460) の repo の pending release を、
+ * release 完了 (pending-release webhook 到達) の度に即 flip する (Refs #494)。
+ *
+ * `armAutoFlip` の 1 回限りバッチ arm (#476) とは完全に独立: 他 repo の足並みを
+ * 待たず、TTL も持たず、repo 単体を対象に毎 release で判定する継続監視。
+ *
+ * compat gate (global compatibility、`computeCompatGateReason` を armed 機構と
+ * 共有) に引っかかれば flip せず skip する。**手動 arm と異なり判定不能
+ * (COMPAT_KV 未 bind) でも fail-closed でスキップする** — armed は operator が
+ * 明示的にボタンを押す確認ステップを経ているが、こちらは release の度に完全
+ * 無人で発火するため、gate をかけられない状況で自動的に traffic を切り替えない
+ * 方を安全側とする。skip した release は自動リトライしない (次の release /
+ * 既存の手動 Flip ボタンに委ねる。継続的な再評価ループは持たない)。
+ */
+export async function runContinuousAutoFlip(
+  env: Env,
+  record: PendingReleaseRecord,
+): Promise<ContinuousAutoFlipOutcome> {
+  if (!env.CI_HUB) return { action: "skip", reason: "not-auto-tag" };
+  const flagged = await isAutoTagRepo(ciHubStub(env), record.repo);
+  if (!flagged) return { action: "skip", reason: "not-auto-tag" };
+
+  if (!env.COMPAT_KV) return { action: "skip", reason: "no-compat-kv" };
+  const gateReason = await computeCompatGateReason(env);
+  if (gateReason) return { action: "blocked", reason: gateReason };
+
+  const result = await pendingFlipAllCore(
+    env,
+    `auto-tag-flip (${record.repo})`,
+    new Set([record.repo]),
+    [record],
+  );
+  if (!result.ok) return { action: "flip_failed", error: result.error };
+  return { action: "flipped" };
 }
 
 // ----------------------------------------------------------------------------

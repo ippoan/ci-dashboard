@@ -133,8 +133,10 @@ export function renderAutoFlipControls(
 
 /**
  * repo 1 件分の Auto-tag on/off トグル (badge + 反対状態へのボタン) を返す
- * (Refs #492)。ON = PR merge の度に `tag-release.yml` を自動 dispatch する
- * (Refs #460)。一括編集は `/auto-tag` に残す。
+ * (Refs #492)。ON = (1) PR merge の度に `tag-release.yml` を自動 dispatch し
+ * (Refs #460)、(2) その release が pending に載る度に compat gate 通過を条件に
+ * 自動で flip する (Refs #494)、tag ＆ flip の継続自動化。一括編集は
+ * `/auto-tag` に残す。
  */
 export function renderAutoTagToggle(repo: string, on: boolean): string {
   const badge = on
@@ -147,7 +149,7 @@ export function renderAutoTagToggle(repo: string, on: boolean): string {
       <form method="post" action="/api/release-wave/auto-tag/toggle" style="margin:0">
         <input type="hidden" name="repo" value="${escapeHtml(repo)}">
         <input type="hidden" name="enable" value="${on ? "0" : "1"}">
-        <button type="submit" title="PR merge の度に ${escapeHtml(repo)} の tag-release.yml を自動 dispatch するかを切り替える (Refs #460)">
+        <button type="submit" title="PR merge の度に ${escapeHtml(repo)} の tag-release.yml を自動 dispatch し、release 完了ごとに compat gate 通過を条件に自動 flip するかを切り替える (Refs #460, #494)">
           Auto-tag ${label}
         </button>
       </form>
@@ -230,9 +232,11 @@ export function renderRepoReleaseStatusSection(
       : `<table>
           <thead>
             <tr><th>Repo</th><th>Latest Tag</th><th>状況</th><th>Auto-tag${helpMark(
-              `ON なら PR が default branch に merge される度に、この repo の
-              tag-release.yml を自動 dispatch する (Refs #460)。一覧編集は
-              <a href="/auto-tag">/auto-tag</a> でも可能。`,
+              `ON なら (1) PR が default branch に merge される度に、この repo の
+              tag-release.yml を自動 dispatch し (Refs #460)、(2) その release が
+              pending に載る度に compat gate 通過を条件に自動で flip する
+              (Refs #494)。gate 不通過 / 判定不能時は flip せずスキップする
+              (fail-closed)。一覧編集は <a href="/auto-tag">/auto-tag</a> でも可能。`,
             )}</th><th>Action</th></tr>
           </thead>
           <tbody>${rows}</tbody>
@@ -252,7 +256,9 @@ export function renderRepoReleaseStatusSection(
         の repo を直接 Tag Release できる (tag 採番は各 repo の tag-release.yml)。
         「⚡ Tag Release all + Auto Flip」は要リリース repo を一括 tag release し、
         全 release 完了で自動 Flip all する (Refs #476)。
-        「Auto-tag」列は PR merge の度に自動 tag release するかの継続設定 (Refs #460)。`,
+        「Auto-tag」列 ON は PR merge の度に自動 tag release し (Refs #460)、
+        release 完了ごとに compat gate 通過を条件に自動 flip する継続設定
+        (Refs #494)。`,
       )}</h2>
       <div style="margin:8px 0">${summary}</div>
       ${autoFlipControls}

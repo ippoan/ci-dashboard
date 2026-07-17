@@ -506,6 +506,122 @@ describe("handlePendingReleaseWebhook", () => {
 });
 
 // ============================================================================
+// pending-release webhook → Auto-tag ON repo の継続 auto-flip (Refs #494)
+// ============================================================================
+
+describe("handlePendingReleaseWebhook → runContinuousAutoFlip wiring", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  /** CI_HUB (Hub DO) の auto-tag repos set を in-memory で模す fake namespace。 */
+  function memAutoTagHub(repos: string[] = []): unknown {
+    const stub = {
+      fetch: async (req: Request) => {
+        const u = new URL(req.url);
+        if (u.pathname === "/auto-tag-repos" && req.method === "GET") {
+          return Response.json(repos);
+        }
+        return new Response("not found", { status: 404 });
+      },
+    };
+    return { idFromName: () => ({}), get: () => stub };
+  }
+
+  const FRESH_TOKEN = {
+    token: "ghs_continuous_auto_flip_token",
+    expires_at_ms: Date.now() + 3600_000,
+  };
+
+  it("flips immediately when the repo is Auto-tag ON and the compat gate is clear", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const kv = memKv();
+    const { env } = fakeEnv({ compatKv: kv });
+    (env as unknown as { CI_HUB: unknown }).CI_HUB = memAutoTagHub(["ippoan/auth-worker"]);
+    // pendingFlipAllCore の GitHub dispatch は getGitHubToken(env) 経由で
+    // CI_STATUS の cache hit を要る (auto-flip.test.ts の envWith と同方式)。
+    (env as unknown as { CI_STATUS: unknown }).CI_STATUS = memKv({
+      "auth-client-worker:gh-token": FRESH_TOKEN,
+    });
+    const resp = await handlePendingReleaseWebhook(
+      jsonRequest({
+        url: PENDING_URL,
+        secret: "expected-secret",
+        body: { repo: "ippoan/auth-worker", version_id: VALID_VID, tag: "v0.2.38" },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(200);
+    const dispatched = fetchSpy.mock.calls.map((c) => String(c[0]));
+    expect(dispatched.some((u) => u.includes("/repos/ippoan/auth-worker/dispatches"))).toBe(true);
+  });
+
+  it("does not flip when the repo is NOT Auto-tag ON", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const kv = memKv();
+    const { env } = fakeEnv({ compatKv: kv });
+    (env as unknown as { CI_HUB: unknown }).CI_HUB = memAutoTagHub([]);
+    const resp = await handlePendingReleaseWebhook(
+      jsonRequest({
+        url: PENDING_URL,
+        secret: "expected-secret",
+        body: { repo: "ippoan/auth-worker", version_id: VALID_VID, tag: "v0.2.38" },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(200);
+    const dispatched = fetchSpy.mock.calls.map((c) => String(c[0]));
+    expect(dispatched.some((u) => u.includes("/dispatches"))).toBe(false);
+  });
+
+  it("does not flip when Auto-tag ON but the compat gate is red", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const kv = memKv({
+      "backend::ippoan/rust-alc-api": {
+        schema_version: 1,
+        repo: "ippoan/rust-alc-api",
+        current_image: "cur-img",
+        deployed_at: "2026-07-13T00:00:00Z",
+        deployed_by: "x",
+        wave_id: null,
+      },
+      "frontend::ippoan/alc-app": {
+        schema_version: 1,
+        repo: "ippoan/alc-app",
+        prod_version: "v1.0.0",
+        prod_deployed_at: "2026-07-13T00:00:00Z",
+        tested_against: [
+          {
+            backend_repo: "ippoan/rust-alc-api",
+            backend_image: "stale-img",
+            tested_at: "2026-07-13T00:00:00Z",
+          },
+        ],
+      },
+    });
+    const { env } = fakeEnv({ compatKv: kv });
+    (env as unknown as { CI_HUB: unknown }).CI_HUB = memAutoTagHub(["ippoan/rust-alc-api"]);
+    const resp = await handlePendingReleaseWebhook(
+      jsonRequest({
+        url: PENDING_URL,
+        secret: "expected-secret",
+        body: { repo: "ippoan/rust-alc-api", version_id: "pending-v1-0-0", tag: "v1.0.0" },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(200);
+    const dispatched = fetchSpy.mock.calls.map((c) => String(c[0]));
+    expect(dispatched.some((u) => u.includes("/dispatches"))).toBe(false);
+  });
+
+  // COMPAT_KV 未 bind 時の fail-closed skip は runContinuousAutoFlip の単体テスト
+  // (auto-flip.test.ts) でカバーする。handlePendingReleaseWebhook は COMPAT_KV が
+  // 無いと pending release の記録自体が失敗するため、この webhook 経路では
+  // 「CI_HUB はあるが COMPAT_KV は無い」状態を単独では再現できない。
+});
+
+// ============================================================================
 // traffic-report webhook
 // ============================================================================
 

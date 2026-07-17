@@ -52,7 +52,9 @@ function renderPage(repos: string[], flash: string | null): string {
 <p class="help">
   ここに <code>owner/name</code> 形式で 1 行 1 repo を列挙すると、その repo の
   PR が default branch に merge されるたびに <code>tag-release.yml</code> が
-  workflow_dispatch で自動起動されます。
+  workflow_dispatch で自動起動されます。さらに、その release が pending に
+  載る度に compatibility gate 通過を条件に自動で flip されます
+  (gate 不通過 / 判定不能時は flip せずスキップされます)。
   空行 / 重複 / 前後の空白は自動で整理されます。
 </p>
 ${flashHtml}

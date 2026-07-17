@@ -27,7 +27,11 @@ import {
   computeCompatibility,
 } from "./compat";
 import { recordPendingRelease } from "./pending-release";
-import { enqueueAutoFlipFlip, scheduleAutoFlipRecheck } from "./auto-flip";
+import {
+  enqueueAutoFlipFlip,
+  scheduleAutoFlipRecheck,
+  runContinuousAutoFlip,
+} from "./auto-flip";
 import { recordTraffic } from "./traffic";
 import { dispatchAll, decideBackendDeployRetestDispatches } from "./dispatch";
 import {
@@ -445,6 +449,26 @@ export async function handlePendingReleaseWebhook(
     await scheduleAutoFlipRecheck(env);
   } catch {
     // armed 機構の失敗は release 報告を妨げない (armed record は残り timeout で中断)。
+  }
+
+  // Auto-tag ON repo の継続 auto-flip (Refs #494)。armed バッチ (#476) とは独立に、
+  // この repo が auto-tag set (`autoTag:repos`) に入っていれば、その release を
+  // (TTL 無し・他 repo 非依存で) 即 flip する。best-effort — 失敗で report 200 は
+  // 止めない。
+  try {
+    const contOutcome = await runContinuousAutoFlip(env, record);
+    if (contOutcome.action !== "skip") {
+      console.log(
+        JSON.stringify({
+          msg: "auto-tag-flip",
+          trigger: "pending-release",
+          repo: v.data.repo,
+          outcome: contOutcome,
+        }),
+      );
+    }
+  } catch {
+    // 継続 auto-flip の失敗は release 報告を妨げない。次の release / 手動 Flip に委ねる。
   }
 
   // Pending releases / auto-flip 進捗が変わった → 開いている /release-wave を live 更新。
