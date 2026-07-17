@@ -13,6 +13,7 @@ import {
   handleReleaseWaveAutoFlipArm,
   handleReleaseWaveAutoFlipDisarm,
   AUTO_FLIP_RECHECK_DELAY_SECONDS,
+  runContinuousAutoFlip,
   type AutoFlipArmRecord,
 } from "../../src/release-wave/auto-flip";
 import type { PendingReleaseRecord } from "../../src/release-wave/pending-release";
@@ -408,6 +409,125 @@ describe("maybeAutoFlip 権威版 override (Refs #485)", () => {
     ).toBe("v1.0.1");
     // arm は clear。
     expect(await getAutoFlipArm(env)).toBeNull();
+  });
+});
+
+// ----------------------------------------------------------------------------
+// runContinuousAutoFlip (Refs #494): Auto-tag ON repo の release 完了ごとの
+// 継続 auto-flip。armAutoFlip の 1 回限りバッチ arm とは無関係に動く。
+// ----------------------------------------------------------------------------
+
+/** CI_HUB (Hub DO) の auto-tag repos set を in-memory で模す fake namespace。 */
+function memAutoTagHub(repos: string[] = []): unknown {
+  const stub = {
+    fetch: async (req: Request) => {
+      const u = new URL(req.url);
+      if (u.pathname === "/auto-tag-repos" && req.method === "GET") {
+        return Response.json(repos);
+      }
+      return new Response("not found", { status: 404 });
+    },
+  };
+  return { idFromName: () => ({}), get: () => stub };
+}
+
+function envWithAutoTag(
+  compatKv: KVNamespace | undefined,
+  autoTagRepos: string[],
+): Env {
+  return {
+    COMPAT_KV: compatKv,
+    CI_STATUS: memKv({ "auth-client-worker:gh-token": FRESH_TOKEN }),
+    INTERNAL_SHARED_SECRET: { get: async () => "secret" },
+    CI_HUB: memAutoTagHub(autoTagRepos),
+  } as unknown as Env;
+}
+
+describe("runContinuousAutoFlip (Refs #494)", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("skips (not-auto-tag) when the repo is not in the auto-tag set", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const env = envWithAutoTag(memKv(), []);
+    const out = await runContinuousAutoFlip(env, authRecord("ippoan/a", "vid", "v1.0.0"));
+    expect(out).toEqual({ action: "skip", reason: "not-auto-tag" });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("skips (no-compat-kv) fail-closed when COMPAT_KV is unbound, even for an auto-tag repo", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const env = envWithAutoTag(undefined, ["ippoan/a"]);
+    const out = await runContinuousAutoFlip(env, authRecord("ippoan/a", "vid", "v1.0.0"));
+    expect(out).toEqual({ action: "skip", reason: "no-compat-kv" });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("flips immediately for an auto-tag repo when the compat gate is clear (no backends)", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const env = envWithAutoTag(memKv(), ["ippoan/a"]);
+    const record = authRecord("ippoan/a", "fresh-vid", "v1.0.0");
+    const out = await runContinuousAutoFlip(env, record);
+    expect(out).toEqual({ action: "flipped" });
+    const dispatched = fetchSpy.mock.calls.map((c) => String(c[0]));
+    expect(dispatched.some((u) => u.includes("/repos/ippoan/a/dispatches"))).toBe(true);
+  });
+
+  it("blocks (does not flip) when compat gate is red (checked && !verified)", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const kv = memKv(redCompat());
+    const env = envWithAutoTag(kv, ["ippoan/rust-alc-api"]);
+    const out = await runContinuousAutoFlip(
+      env,
+      authRecord("ippoan/rust-alc-api", "vid", "v1.0.0"),
+    );
+    expect(out.action).toBe("blocked");
+    if (out.action === "blocked") {
+      expect(out.reason).toContain("compatibility");
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("flips using the authoritative record, not a stale KV pending-release (Refs #485 の版固定を継承)", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const fetchSpy = vi.fn(async (_url: string, init?: RequestInit) => {
+      if (init?.body) bodies.push(JSON.parse(String(init.body)));
+      return new Response(null, { status: 204 });
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    const kv = memKv({
+      "pending-release::ippoan/a": {
+        schema_version: 1,
+        repo: "ippoan/a",
+        version_id: "stale-vid",
+        tag: "v1.0.0",
+        preview_url: null,
+        uploaded_at: "2026-07-13T00:00:00.000Z",
+      },
+    });
+    const env = envWithAutoTag(kv, ["ippoan/a"]);
+    const out = await runContinuousAutoFlip(
+      env,
+      authRecord("ippoan/a", "fresh-vid", "v1.0.1"),
+    );
+    expect(out).toEqual({ action: "flipped" });
+    const flip = bodies.find((b) => b.event_type === "release-wave-flip");
+    expect(flip).toBeTruthy();
+    expect(
+      (flip!.client_payload as Record<string, unknown>).previewed_version_id,
+    ).toBe("fresh-vid");
+  });
+
+  it("does not touch a different, non-auto-tag repo's flip even when passed together", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const env = envWithAutoTag(memKv(), ["ippoan/a"]);
+    const out = await runContinuousAutoFlip(env, authRecord("ippoan/other", "vid", "v1.0.0"));
+    expect(out).toEqual({ action: "skip", reason: "not-auto-tag" });
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
 
