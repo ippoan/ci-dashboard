@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { githubGraphQL, parseRepo, tokenForOrg, validateOrg, GitHubApiError, AUTH_WORKER_ORIGIN } from "../../github-api";
 import { getGitHubToken, type AuthClientWorkerEnv } from "@ippoan/auth-client-worker";
+import { createScopedRegisterTool } from "../scoped-tool";
 
 // --------------------------------------------------------------------------
 // GitHub Projects v2 tooling.
@@ -348,12 +349,18 @@ export async function fetchProjectItems(
   return nodes.map(formatItem);
 }
 
-export function registerProjectsTools(server: McpServer, env: AuthClientWorkerEnv): void {
+export function registerProjectsTools(
+  server: McpServer,
+  env: AuthClientWorkerEnv,
+  scopes: ReadonlySet<string>,
+): void {
+  const registerTool = createScopedRegisterTool(server, scopes);
+
   // --------------------------------------------------------------------
   // Read tools
   // --------------------------------------------------------------------
 
-  server.registerTool(
+  registerTool(
     "list_org_projects",
     {
       description:
@@ -371,6 +378,7 @@ export function registerProjectsTools(server: McpServer, env: AuthClientWorkerEn
           .describe("Include closed projects (default false)"),
       },
       annotations: { readOnlyHint: true },
+      requiresScope: "mcp.read",
     },
     async ({ orgs, first, include_closed }) => {
       const perOrg = await fetchOrgProjects(env, { orgs, first, include_closed });
@@ -390,7 +398,7 @@ export function registerProjectsTools(server: McpServer, env: AuthClientWorkerEn
     },
   );
 
-  server.registerTool(
+  registerTool(
     "get_project",
     {
       description:
@@ -404,6 +412,7 @@ export function registerProjectsTools(server: McpServer, env: AuthClientWorkerEn
         number: z.number().describe("Project number (the integer in the project URL)"),
       },
       annotations: { readOnlyHint: true },
+      requiresScope: "mcp.read",
     },
     async ({ org, number }) => {
       const token = await tokenForOrg(env, org);
@@ -458,7 +467,7 @@ export function registerProjectsTools(server: McpServer, env: AuthClientWorkerEn
     },
   );
 
-  server.registerTool(
+  registerTool(
     "list_project_items",
     {
       description:
@@ -474,6 +483,7 @@ export function registerProjectsTools(server: McpServer, env: AuthClientWorkerEn
           .describe("Max items to return (default 50)"),
       },
       annotations: { readOnlyHint: true },
+      requiresScope: "mcp.read",
     },
     async ({ org, number, first }) => {
       validateOrg(org);
@@ -486,7 +496,7 @@ export function registerProjectsTools(server: McpServer, env: AuthClientWorkerEn
   // Write tools
   // --------------------------------------------------------------------
 
-  server.registerTool(
+  registerTool(
     "add_issue_to_project",
     {
       description:
@@ -503,6 +513,7 @@ export function registerProjectsTools(server: McpServer, env: AuthClientWorkerEn
         issue_number: z.number().describe("Issue or PR number to add"),
       },
       annotations: { destructiveHint: true },
+      requiresScope: "mcp.project",
     },
     async ({ org, project_number, repo, issue_number }) => {
       const token = await tokenForOrg(env, org);
@@ -539,7 +550,7 @@ export function registerProjectsTools(server: McpServer, env: AuthClientWorkerEn
     },
   );
 
-  server.registerTool(
+  registerTool(
     "remove_project_item",
     {
       description:
@@ -552,6 +563,7 @@ export function registerProjectsTools(server: McpServer, env: AuthClientWorkerEn
         item_id: z.string().describe("Item node ID (from `list_project_items` or `add_issue_to_project`)"),
       },
       annotations: { destructiveHint: true },
+      requiresScope: "mcp.project",
     },
     async ({ org, project_number, item_id }) => {
       const token = await tokenForOrg(env, org);
@@ -572,7 +584,7 @@ export function registerProjectsTools(server: McpServer, env: AuthClientWorkerEn
     },
   );
 
-  server.registerTool(
+  registerTool(
     "set_project_item_field",
     {
       description:
@@ -593,6 +605,7 @@ export function registerProjectsTools(server: McpServer, env: AuthClientWorkerEn
           .describe("New field value (string for text/date/single_select/iteration, number for number, null to clear)"),
       },
       annotations: { destructiveHint: true },
+      requiresScope: "mcp.project",
     },
     async ({ org, project_number, item_id, field_name, value }) => {
       const token = await tokenForOrg(env, org);
@@ -701,7 +714,7 @@ export function registerProjectsTools(server: McpServer, env: AuthClientWorkerEn
     },
   );
 
-  server.registerTool(
+  registerTool(
     "create_project_field",
     {
       description:
@@ -721,6 +734,7 @@ export function registerProjectsTools(server: McpServer, env: AuthClientWorkerEn
           .describe("Required when data_type='single_select': option names"),
       },
       annotations: { destructiveHint: true },
+      requiresScope: "mcp.project",
     },
     async ({ org, project_number, name, data_type, single_select_options }) => {
       const token = await tokenForOrg(env, org);
@@ -768,7 +782,7 @@ export function registerProjectsTools(server: McpServer, env: AuthClientWorkerEn
     },
   );
 
-  server.registerTool(
+  registerTool(
     "create_project",
     {
       description:
@@ -790,6 +804,7 @@ export function registerProjectsTools(server: McpServer, env: AuthClientWorkerEn
           .describe("Optional short description (applied via a second updateProjectV2 mutation)"),
       },
       annotations: { destructiveHint: true },
+      requiresScope: "mcp.project",
     },
     async ({ org, title, short_description }) => {
       const token = await tokenForOrg(env, org);

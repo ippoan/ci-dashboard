@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { githubApi, githubGraphQL, parseRepo, tokenForOrg, validateOrg, AUTH_WORKER_ORIGIN } from "../../github-api";
 import { getGitHubToken, type AuthClientWorkerEnv } from "@ippoan/auth-client-worker";
+import { createScopedRegisterTool } from "../scoped-tool";
 
 /** Build the PATCH body for `update_issue` from optional fields. Strips
  *  fields the caller did not provide (= `undefined`); preserves empty
@@ -29,8 +30,14 @@ export function buildUpdateIssuePayload(input: {
   return payload;
 }
 
-export function registerIssuesTools(server: McpServer, env: AuthClientWorkerEnv): void {
-  server.registerTool(
+export function registerIssuesTools(
+  server: McpServer,
+  env: AuthClientWorkerEnv,
+  scopes: ReadonlySet<string>,
+): void {
+  const registerTool = createScopedRegisterTool(server, scopes);
+
+  registerTool(
     "list_issues",
     {
       description: "List issues for a repository. Supports state and label filtering.",
@@ -41,6 +48,7 @@ export function registerIssuesTools(server: McpServer, env: AuthClientWorkerEnv)
         per_page: z.number().min(1).max(100).default(20).describe("Results per page (default 20)"),
       },
       annotations: { readOnlyHint: true },
+      requiresScope: "mcp.read",
     },
     async ({ repo, state, labels, per_page }) => {
       const { owner, repo: name } = parseRepo(repo);
@@ -75,7 +83,7 @@ export function registerIssuesTools(server: McpServer, env: AuthClientWorkerEnv)
     },
   );
 
-  server.registerTool(
+  registerTool(
     "get_issue",
     {
       description: "Get issue details including body and comments.",
@@ -84,6 +92,7 @@ export function registerIssuesTools(server: McpServer, env: AuthClientWorkerEnv)
         issue_number: z.number().describe("Issue number"),
       },
       annotations: { readOnlyHint: true },
+      requiresScope: "mcp.read",
     },
     async ({ repo, issue_number }) => {
       const { owner, repo: name } = parseRepo(repo);
@@ -115,7 +124,7 @@ export function registerIssuesTools(server: McpServer, env: AuthClientWorkerEnv)
     },
   );
 
-  server.registerTool(
+  registerTool(
     "create_issue",
     {
       description: "Create a new issue in a repository.",
@@ -127,6 +136,7 @@ export function registerIssuesTools(server: McpServer, env: AuthClientWorkerEnv)
         assignees: z.array(z.string()).optional().describe("GitHub usernames to assign"),
       },
       annotations: { destructiveHint: true },
+      requiresScope: "mcp.write",
     },
     async ({ repo, title, body, labels, assignees }) => {
       const { owner, repo: name } = parseRepo(repo);
@@ -152,7 +162,7 @@ export function registerIssuesTools(server: McpServer, env: AuthClientWorkerEnv)
     },
   );
 
-  server.registerTool(
+  registerTool(
     "update_issue",
     {
       description:
@@ -171,6 +181,7 @@ export function registerIssuesTools(server: McpServer, env: AuthClientWorkerEnv)
           .describe("Milestone number, or null to detach"),
       },
       annotations: { destructiveHint: true },
+      requiresScope: "mcp.write",
     },
     async ({ repo, issue_number, title, body, labels, assignees, milestone }) => {
       const { owner, repo: name } = parseRepo(repo);
@@ -194,7 +205,7 @@ export function registerIssuesTools(server: McpServer, env: AuthClientWorkerEnv)
     },
   );
 
-  server.registerTool(
+  registerTool(
     "add_issue_comment",
     {
       description: "Add a comment to an existing issue or pull request.",
@@ -204,6 +215,7 @@ export function registerIssuesTools(server: McpServer, env: AuthClientWorkerEnv)
         body: z.string().describe("Comment body (markdown)"),
       },
       annotations: { destructiveHint: true },
+      requiresScope: "mcp.write",
     },
     async ({ repo, issue_number, body }) => {
       const { owner, repo: name } = parseRepo(repo);
@@ -223,7 +235,7 @@ export function registerIssuesTools(server: McpServer, env: AuthClientWorkerEnv)
     },
   );
 
-  server.registerTool(
+  registerTool(
     "add_labels",
     {
       description: "Add labels to an issue or pull request. Returns the current label list.",
@@ -233,6 +245,7 @@ export function registerIssuesTools(server: McpServer, env: AuthClientWorkerEnv)
         labels: z.array(z.string()).min(1).describe("Label names to add"),
       },
       annotations: { destructiveHint: true },
+      requiresScope: "mcp.write",
     },
     async ({ repo, issue_number, labels }) => {
       const { owner, repo: name } = parseRepo(repo);
@@ -247,7 +260,7 @@ export function registerIssuesTools(server: McpServer, env: AuthClientWorkerEnv)
     },
   );
 
-  server.registerTool(
+  registerTool(
     "remove_label",
     {
       description: "Remove a single label from an issue or pull request. Returns the remaining label list.",
@@ -257,6 +270,7 @@ export function registerIssuesTools(server: McpServer, env: AuthClientWorkerEnv)
         label: z.string().describe("Label name to remove"),
       },
       annotations: { destructiveHint: true },
+      requiresScope: "mcp.write",
     },
     async ({ repo, issue_number, label }) => {
       const { owner, repo: name } = parseRepo(repo);
@@ -272,7 +286,7 @@ export function registerIssuesTools(server: McpServer, env: AuthClientWorkerEnv)
     },
   );
 
-  server.registerTool(
+  registerTool(
     "close_issue",
     {
       description: "Close an issue. Optionally set state_reason to 'completed' or 'not_planned'.",
@@ -283,6 +297,7 @@ export function registerIssuesTools(server: McpServer, env: AuthClientWorkerEnv)
           .describe("Reason for closing (default: completed)"),
       },
       annotations: { destructiveHint: true },
+      requiresScope: "mcp.write",
     },
     async ({ repo, issue_number, state_reason }) => {
       const { owner, repo: name } = parseRepo(repo);
@@ -306,7 +321,7 @@ export function registerIssuesTools(server: McpServer, env: AuthClientWorkerEnv)
     },
   );
 
-  server.registerTool(
+  registerTool(
     "reopen_issue",
     {
       description: "Reopen a closed issue.",
@@ -315,6 +330,7 @@ export function registerIssuesTools(server: McpServer, env: AuthClientWorkerEnv)
         issue_number: z.number().describe("Issue number"),
       },
       annotations: { destructiveHint: true },
+      requiresScope: "mcp.write",
     },
     async ({ repo, issue_number }) => {
       const { owner, repo: name } = parseRepo(repo);
@@ -335,7 +351,7 @@ export function registerIssuesTools(server: McpServer, env: AuthClientWorkerEnv)
     },
   );
 
-  server.registerTool(
+  registerTool(
     "delete_issue",
     {
       description:
@@ -349,6 +365,7 @@ export function registerIssuesTools(server: McpServer, env: AuthClientWorkerEnv)
         issue_number: z.number().describe("Issue number"),
       },
       annotations: { destructiveHint: true },
+      requiresScope: "mcp.write",
     },
     async ({ repo, issue_number }) => {
       const { owner, repo: name } = parseRepo(repo);
@@ -382,7 +399,7 @@ export function registerIssuesTools(server: McpServer, env: AuthClientWorkerEnv)
     },
   );
 
-  server.registerTool(
+  registerTool(
     "list_org_issues",
     {
       description:
@@ -404,6 +421,7 @@ export function registerIssuesTools(server: McpServer, env: AuthClientWorkerEnv)
         per_page: z.number().min(1).max(100).default(30),
       },
       annotations: { readOnlyHint: true },
+      requiresScope: "mcp.read",
     },
     async ({ orgs, state, labels, assignee, query, per_page }) => {
       const result = await fetchOrgIssues(env, {

@@ -2,9 +2,16 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { githubApi, parseRepo, tokenForOrg } from "../../github-api";
 import type { AuthClientWorkerEnv } from "@ippoan/auth-client-worker";
+import { createScopedRegisterTool } from "../scoped-tool";
 
-export function registerRepositoryTools(server: McpServer, env: AuthClientWorkerEnv): void {
-  server.registerTool(
+export function registerRepositoryTools(
+  server: McpServer,
+  env: AuthClientWorkerEnv,
+  scopes: ReadonlySet<string>,
+): void {
+  const registerTool = createScopedRegisterTool(server, scopes);
+
+  registerTool(
     "get_file_tree",
     {
       description: "Get the file tree of a repository. Use path filter to scope to a subdirectory.",
@@ -14,6 +21,7 @@ export function registerRepositoryTools(server: McpServer, env: AuthClientWorker
         path: z.string().optional().describe("Filter to paths starting with this prefix (e.g. 'src/routes')"),
       },
       annotations: { readOnlyHint: true },
+      requiresScope: "mcp.read",
     },
     async ({ repo, ref, path }) => {
       const { owner, repo: name } = parseRepo(repo);
@@ -47,7 +55,7 @@ export function registerRepositoryTools(server: McpServer, env: AuthClientWorker
     },
   );
 
-  server.registerTool(
+  registerTool(
     "get_file_content",
     {
       description: "Get file content with optional line range. For directories, returns the entry listing.",
@@ -59,6 +67,7 @@ export function registerRepositoryTools(server: McpServer, env: AuthClientWorker
         end_line: z.number().min(1).optional().describe("End line (inclusive)"),
       },
       annotations: { readOnlyHint: true },
+      requiresScope: "mcp.read",
     },
     async ({ repo, path, ref, start_line, end_line }) => {
       const { owner, repo: name } = parseRepo(repo);
@@ -115,7 +124,7 @@ export function registerRepositoryTools(server: McpServer, env: AuthClientWorker
     },
   );
 
-  server.registerTool(
+  registerTool(
     "search_code",
     {
       description: "Search code in a repository (grep-like). Returns matching files with text fragments.",
@@ -127,6 +136,7 @@ export function registerRepositoryTools(server: McpServer, env: AuthClientWorker
         per_page: z.number().min(1).max(100).default(20).describe("Results per page (default 20)"),
       },
       annotations: { readOnlyHint: true },
+      requiresScope: "mcp.read",
     },
     async ({ repo, query, path, extension, per_page }) => {
       const { owner, repo: name } = parseRepo(repo);

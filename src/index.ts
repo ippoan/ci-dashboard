@@ -38,6 +38,7 @@ import {
   handleReleaseWaveAutoFlipDisarm,
 } from "./release-wave/auto-flip";
 import { handleMcpRequest } from "./mcp/server";
+import { bindingJwtMiddleware, type BindingJwtClaims } from "./mcp/auth";
 import {
   handleContractAppliedWebhook,
   handleFlipReportWebhook,
@@ -89,6 +90,13 @@ export { ReleaseWaveHub } from "./release-wave/do";
 // (`auth-client-worker:oauth-tokens`) by the SDK after `/oauth/login`
 // browser flow — there is no operator-facing secret to rotate. Refs #118.
 export interface Env extends AuthClientWorkerEnv {
+  /**
+   * `@ippoan/mcp-cf-workers` の `bindingJwtMiddleware` が要求する `BindingJwtEnv`
+   * 型を満たすための宣言のみ。実際の値は常に `authWorkerOrigin` option 経由で
+   * 明示 (`github-api.ts` の `AUTH_WORKER_ORIGIN` 定数) するため env 側の binding
+   * は無い (Refs #498)。
+   */
+  AUTH_WORKER_ORIGIN?: string;
   WEBHOOK_SECRET: SecretsStoreSecret;
   CI_HUB: DurableObjectNamespace;
   /** Release Wave 機構の hub DO。Refs #137。 */
@@ -150,7 +158,11 @@ const OAUTH_OPTS = {
   clientName: "ci-dashboard",
 };
 
-const app = new Hono<{ Bindings: Env }>();
+// `bindingJwt` は `/mcp` middleware (Refs #498) が検証済み claims をセットする。
+// 他 route は middleware を通らないため未設定 (= optional)。
+type AppVariables = { bindingJwt?: BindingJwtClaims };
+
+const app = new Hono<{ Bindings: Env; Variables: AppVariables }>();
 
 app.use("*", cors());
 
@@ -466,8 +478,12 @@ app.get("/icons/:file", (c) => handlePwaIcon("/icons/" + c.req.param("file")));
 app.get("/oauth/login", (c) => handleOAuthLogin(c.req.raw, c.env, OAUTH_OPTS));
 app.get("/oauth/callback", (c) => handleOAuthCallback(c.req.raw, c.env, OAUTH_OPTS));
 
-// MCP endpoint (Streamable HTTP)
-app.all("/mcp", (c) => handleMcpRequest(c.req.raw, c.env));
+// MCP endpoint (Streamable HTTP) — auth-worker OAuth 2.1 (RFC 9728) 保護。
+// Bearer なし / 検証失敗 → 401 + WWW-Authenticate (claude.ai connector の
+// auto-discovery を駆動)。導入前は完全匿名で全 48 tool 実行可能だった
+// (Refs #498)。
+app.use("/mcp", bindingJwtMiddleware({ authWorkerOrigin: AUTH_WORKER_ORIGIN }));
+app.all("/mcp", (c) => handleMcpRequest(c.req.raw, c.env, c.var.bindingJwt));
 
 // Release Wave: GitHub Actions step が叩く HTTP webhook 3 本 (Refs #137
 // Phase 3d + Phase 4)。MCP 経路と機能等価だが OAuth 不要の shared secret

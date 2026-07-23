@@ -113,6 +113,17 @@ describe("resolveIssueContentId", () => {
 describe("Projects v2 tools — integration via MCP server", () => {
   afterEach(() => { vi.restoreAllMocks(); });
 
+  // binding_jwt middleware 導入 (Refs #498) 後、`handleMcpRequest` は認証済み
+  // claims 経由で scope gate する。本テストは write/project tool の入出力
+  // wiring を検証するのが目的で scope gate 自体は scoped-tool.test.ts の
+  // 責務なので、常に全 scope を持つ claims を渡して gate を無効化する。
+  const ALL_SCOPES_CLAIMS = {
+    sub: "test-user",
+    github_login: "test-user",
+    scope: "mcp.read mcp.write mcp.workflow mcp.project",
+    exp: Math.floor(Date.now() / 1000) + 3600,
+  };
+
   // Helper: drive a tool through the MCP HTTP transport, returning the parsed
   // text payload. Each call uses its own fetch mock queue.
   async function callTool(name: string, args: Record<string, unknown>) {
@@ -128,7 +139,7 @@ describe("Projects v2 tools — integration via MCP server", () => {
         params: { name, arguments: args },
       }),
     });
-    const res = await handleMcpRequest(req, appTestEnv());
+    const res = await handleMcpRequest(req, appTestEnv(), ALL_SCOPES_CLAIMS);
     expect(res.status).toBe(200);
     const body = await res.json() as {
       result?: { content?: Array<{ type: string; text: string }>; isError?: boolean };

@@ -2,9 +2,16 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { githubApi, parseRepo, tokenForOrg } from "../../github-api";
 import type { AuthClientWorkerEnv } from "@ippoan/auth-client-worker";
+import { createScopedRegisterTool } from "../scoped-tool";
 
-export function registerActionsTools(server: McpServer, env: AuthClientWorkerEnv): void {
-  server.registerTool(
+export function registerActionsTools(
+  server: McpServer,
+  env: AuthClientWorkerEnv,
+  scopes: ReadonlySet<string>,
+): void {
+  const registerTool = createScopedRegisterTool(server, scopes);
+
+  registerTool(
     "list_workflow_runs",
     {
       description: "List recent workflow runs for a repository. Use ci-dashboard UI for real-time monitoring instead of polling.",
@@ -14,6 +21,7 @@ export function registerActionsTools(server: McpServer, env: AuthClientWorkerEnv
         per_page: z.number().min(1).max(100).default(10).describe("Results per page (default 10)"),
       },
       annotations: { readOnlyHint: true },
+      requiresScope: "mcp.read",
     },
     async ({ repo, status, per_page }) => {
       const { owner, repo: name } = parseRepo(repo);
@@ -41,7 +49,7 @@ export function registerActionsTools(server: McpServer, env: AuthClientWorkerEnv
     },
   );
 
-  server.registerTool(
+  registerTool(
     "get_workflow_run",
     {
       description: "Get details of a specific workflow run.",
@@ -50,6 +58,7 @@ export function registerActionsTools(server: McpServer, env: AuthClientWorkerEnv
         run_id: z.number().describe("Workflow run ID"),
       },
       annotations: { readOnlyHint: true },
+      requiresScope: "mcp.read",
     },
     async ({ repo, run_id }) => {
       const { owner, repo: name } = parseRepo(repo);
@@ -79,7 +88,7 @@ export function registerActionsTools(server: McpServer, env: AuthClientWorkerEnv
     },
   );
 
-  server.registerTool(
+  registerTool(
     "list_workflow_run_jobs",
     {
       description: "List jobs for a workflow run.",
@@ -88,6 +97,7 @@ export function registerActionsTools(server: McpServer, env: AuthClientWorkerEnv
         run_id: z.number().describe("Workflow run ID"),
       },
       annotations: { readOnlyHint: true },
+      requiresScope: "mcp.read",
     },
     async ({ repo, run_id }) => {
       const { owner, repo: name } = parseRepo(repo);
@@ -111,7 +121,7 @@ export function registerActionsTools(server: McpServer, env: AuthClientWorkerEnv
     },
   );
 
-  server.registerTool(
+  registerTool(
     "rerun_workflow_run",
     {
       description: "Re-run all jobs in a workflow run.",
@@ -120,6 +130,7 @@ export function registerActionsTools(server: McpServer, env: AuthClientWorkerEnv
         run_id: z.number().describe("Workflow run ID"),
       },
       annotations: { destructiveHint: false, idempotentHint: true },
+      requiresScope: "mcp.workflow",
     },
     async ({ repo, run_id }) => {
       const { owner, repo: name } = parseRepo(repo);
@@ -129,7 +140,7 @@ export function registerActionsTools(server: McpServer, env: AuthClientWorkerEnv
     },
   );
 
-  server.registerTool(
+  registerTool(
     "rerun_failed_jobs",
     {
       description: "Re-run only failed jobs in a workflow run.",
@@ -138,6 +149,7 @@ export function registerActionsTools(server: McpServer, env: AuthClientWorkerEnv
         run_id: z.number().describe("Workflow run ID"),
       },
       annotations: { destructiveHint: false, idempotentHint: true },
+      requiresScope: "mcp.workflow",
     },
     async ({ repo, run_id }) => {
       const { owner, repo: name } = parseRepo(repo);
@@ -147,7 +159,7 @@ export function registerActionsTools(server: McpServer, env: AuthClientWorkerEnv
     },
   );
 
-  server.registerTool(
+  registerTool(
     "cancel_workflow_run",
     {
       description: "Cancel an in-progress workflow run.",
@@ -156,6 +168,7 @@ export function registerActionsTools(server: McpServer, env: AuthClientWorkerEnv
         run_id: z.number().describe("Workflow run ID"),
       },
       annotations: { destructiveHint: true },
+      requiresScope: "mcp.workflow",
     },
     async ({ repo, run_id }) => {
       const { owner, repo: name } = parseRepo(repo);
