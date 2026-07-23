@@ -455,6 +455,30 @@ function renderHtml(
       white-space: nowrap;
     }
     td.launch { width: 44px; text-align: center; }
+    td.flip { width: 40px; text-align: center; }
+    .issue-flip {
+      background: transparent;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      color: #c9d1d9;
+      cursor: pointer;
+      font-size: 13px;
+      line-height: 1;
+      padding: 4px 7px;
+      opacity: 0.7;
+      transition: opacity 0.15s, background 0.15s;
+    }
+    .issue-flip:hover { opacity: 1; background: #21262d; }
+    .issue-flip:disabled { opacity: 0.35; cursor: default; }
+    .issue-flip-disabled {
+      display: inline-block;
+      font-size: 13px;
+      opacity: 0.5;
+    }
+    /* Close 直後の一時 flip 状態 (Refs #496)。次に画面が更新されるまで
+       (webhook 経由の live-reload / 手動リロード) reopen ボタンで取り消せる。 */
+    tr.flipped-closed { opacity: 0.55; }
+    tr.flipped-closed td.title > a { text-decoration: line-through; }
     .cc-launch {
       display: inline-block;
       text-decoration: none;
@@ -705,6 +729,7 @@ function renderHtml(
     : repoSections}
   ${PWA_REGISTER_SCRIPT}
   ${LIVE_RELOAD_SCRIPT}
+  ${ISSUE_FLIP_SCRIPT}
   ${freshness.decoLoading ? DECORATIONS_POLL_SCRIPT : ""}
 </body>
 </html>`;
@@ -847,6 +872,59 @@ const LIVE_RELOAD_SCRIPT = `
     })();
   </script>`;
 
+// Close/reopen flip ボタン (Refs #496)。fetch で /api/issue-flip を叩き、成功
+// レスポンスの `state` に応じて同じボタンを ❌ Close ⇄ ↩️ Reopen に切り替える。
+// 行は DOM から消さず取り消し線 + dim 表示だけ変える (= 「間違えたら reopen で
+// すぐ戻せる」)。この一時状態は画面が実際に更新される (LIVE_RELOAD_SCRIPT の
+// webhook 経由 reload / 手動リロード) まで保持される — 逆に言うと更新後は
+// 消える、が「reopen は更新するまで可能」という要件そのもの。
+const ISSUE_FLIP_SCRIPT = `
+  <script>
+    (() => {
+      const applyState = (btn, state) => {
+        const tr = btn.closest("tr");
+        if (state === "closed") {
+          if (tr) tr.classList.add("flipped-closed");
+          btn.textContent = "↩️";
+          btn.title = "Reopen " + btn.dataset.repo + "#" + btn.dataset.number;
+          btn.dataset.action = "reopen";
+        } else {
+          if (tr) tr.classList.remove("flipped-closed");
+          btn.textContent = "❌";
+          btn.title = "Close " + btn.dataset.repo + "#" + btn.dataset.number;
+          btn.dataset.action = "close";
+        }
+      };
+      document.querySelectorAll(".issue-flip").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const repo = btn.dataset.repo;
+          const number = Number(btn.dataset.number);
+          const action = btn.dataset.action;
+          btn.disabled = true;
+          try {
+            const res = await fetch("/api/issue-flip", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ repo, number, action }),
+            });
+            let data = null;
+            try { data = await res.json(); } catch { /* non-JSON error body */ }
+            if (!res.ok || !data || !data.ok) {
+              alert("Failed to " + action + " " + repo + "#" + number + ": " +
+                (data && data.reason ? data.reason : res.status));
+              return;
+            }
+            applyState(btn, data.state);
+          } catch {
+            alert("Network error while trying to " + action + " " + repo + "#" + number);
+          } finally {
+            btn.disabled = false;
+          }
+        });
+      });
+    })();
+  </script>`;
+
 function renderProjectSection(
   items: ReadonlyArray<{ issue: OrgIssue; projects: ProjectRef[] }>,
   prMap: ReadonlyMap<string, IssuePrRef[]>,
@@ -857,7 +935,7 @@ function renderProjectSection(
   return `<section class="projects">
   <h2>📋 Project 付き<span class="count">(${items.length})</span></h2>
   <table>
-    <thead><tr><th>#</th><th>Repo</th><th>Title</th><th>Author</th><th>Updated</th><th></th></tr></thead>
+    <thead><tr><th>#</th><th>Repo</th><th>Title</th><th>Author</th><th>Updated</th><th></th><th></th></tr></thead>
     <tbody>${rows}</tbody>
   </table>
 </section>`;
@@ -882,6 +960,7 @@ function renderProjectRow(
     <td class="title">${renderFixtureBadge(i)}<a href="${escapeHtml(i.url)}" target="_blank" rel="noopener">${escapeHtml(i.title)}</a><div class="labels">${chips}</div>${labelChips}${renderPrChips(i, prMap)}</td>
     <td class="author">@${escapeHtml(i.author)}</td>
     <td class="updated">${escapeHtml(i.updated_at.slice(0, 10))}</td>
+    ${renderFlipCell(i)}
     ${renderLaunchCell(i)}
   </tr>`;
 }
@@ -897,7 +976,7 @@ function renderRepoSection(
   return `<section class="repo">
   <h2><a href="${escapeHtml(repoUrl)}" target="_blank" rel="noopener">${escapeHtml(repo)}</a><span class="count">(${items.length})</span>${renderReleaseModeBadge(repo, taglessSet)}</h2>
   <table>
-    <thead><tr><th>#</th><th>Title</th><th>Author</th><th>Updated</th><th></th></tr></thead>
+    <thead><tr><th>#</th><th>Title</th><th>Author</th><th>Updated</th><th></th><th></th></tr></thead>
     <tbody>${rows}</tbody>
   </table>
 </section>`;
@@ -916,6 +995,7 @@ function renderRow(
     <td class="title">${renderFixtureBadge(i)}<a href="${escapeHtml(i.url)}" target="_blank" rel="noopener">${escapeHtml(i.title)}</a>${labelChips}${renderPrChips(i, prMap)}${renderProgressChecklist(i)}</td>
     <td class="author">@${escapeHtml(i.author)}</td>
     <td class="updated">${escapeHtml(i.updated_at.slice(0, 10))}</td>
+    ${renderFlipCell(i)}
     ${renderLaunchCell(i)}
   </tr>`;
 }
@@ -1062,6 +1142,18 @@ function renderLaunchCell(i: OrgIssue): string {
   }
   const url = buildClaudeCodeLaunchUrl(i.repo, i.number);
   return `<td class="launch"><a class="cc-launch" href="${escapeHtml(url)}" target="_blank" rel="noopener" title="Claude Code で起動 (${escapeHtml(i.repo)}#${i.number})">🚀</a></td>`;
+}
+
+// Close/reopen flip ボタン (Refs #496)。CI fixture は close 不可 (worktree-naming
+// -guard test の前提が壊れるため) — renderLaunchCell の 🔒 disable と同じ扱い。
+// クリックで POST /api/issue-flip → 成功したら ISSUE_FLIP_SCRIPT が同じボタンを
+// close/reopen に flip する。行は画面が更新される (webhook 経由の live-reload /
+// 手動リロード) までその場に残るので、間違って close しても reopen で取り消せる。
+function renderFlipCell(i: OrgIssue): string {
+  if (isFixtureIssue(i)) {
+    return `<td class="flip"><span class="issue-flip-disabled" title="CI fixture — close 不可">🔒</span></td>`;
+  }
+  return `<td class="flip"><button type="button" class="issue-flip" data-repo="${escapeHtml(i.repo)}" data-number="${i.number}" data-action="close" title="Close ${escapeHtml(i.repo)}#${i.number}">❌</button></td>`;
 }
 
 function renderError(msg: string): string {
