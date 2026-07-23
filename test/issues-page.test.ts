@@ -970,6 +970,85 @@ describe("GET /issues — CI fixture rows", () => {
   });
 });
 
+describe("GET /issues — flip button (Refs #496)", () => {
+  beforeEach(async () => {
+    await env.CI_STATUS.delete("issues-page:project-map");
+    await env.CI_STATUS.delete("issues-page:pr-map:v2");
+    await env.CI_STATUS.delete("issues:watermark");
+    await env.CI_STATUS.delete("github:rl-backoff");
+    await env.CI_STATUS.delete("issues:reconciling");
+    await env.CI_STATUS.delete("issues-page:pr-map:refreshing");
+    await env.CI_STATUS.delete("issues-page:project-map:refreshing");
+    for (const prefix of ["issue:", "project:"]) {
+      let cursor: string | undefined;
+      do {
+        const page = await env.CI_STATUS.list({ prefix, cursor });
+        await Promise.all(page.keys.map((k) => env.CI_STATUS.delete(k.name)));
+        cursor = page.list_complete ? undefined : page.cursor;
+      } while (cursor);
+    }
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it("renders a ❌ close button per row with the repo/number data attributes", async () => {
+    stubFetch();
+    const req = new Request("http://localhost/issues");
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(req, testEnv(), ctx);
+    await waitOnExecutionContext(ctx);
+
+    const html = await res.text();
+    // 3 issues in the default stub (#7, #3, claude-skills #1), none fixtures.
+    const flipButtons = html.match(/<button type="button" class="issue-flip"/g) ?? [];
+    expect(flipButtons.length).toBe(3);
+    expect(html).toContain('data-repo="ippoan/rust-alc-api" data-number="7"');
+    expect(html).toContain('data-action="close"');
+    // The client-side flip handler posting to the endpoint is embedded.
+    expect(html).toContain("/api/issue-flip");
+  });
+
+  it("suppresses the flip button on CI fixture rows (mirrors the launch button 🔒)", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (req, init) => {
+      const url = typeof req === "string" ? req : (req as Request).url;
+      const body = (init?.body as string | undefined) ?? "";
+      if (url.includes("/graphql")) {
+        if (body.includes("projectsV2(first:")) {
+          return Response.json({ data: { repositoryOwner: { projectsV2: { nodes: [] } } } });
+        }
+        return Response.json({ data: { repositoryOwner: null } });
+      }
+      const decoded = decodeURIComponent(url);
+      if (decoded.includes("is:pr")) {
+        return Response.json({ total_count: 0, incomplete_results: false, items: [] });
+      }
+      if (decoded.includes("org:ippoan")) {
+        return Response.json({
+          total_count: 1, incomplete_results: false,
+          items: [{
+            number: 2,
+            title: "[CI fixture] Open issue used by tests/test-worktree-naming-guard.sh (T1, T5)",
+            state: "open",
+            user: { login: "yhonda-ohishi" },
+            labels: [], assignees: [], comments: 0,
+            created_at: "2026-05-30T00:00:00Z", updated_at: "2026-05-30T00:00:00Z",
+            html_url: "https://github.com/ippoan/claude-hooks/issues/2",
+            repository_url: "https://api.github.com/repos/ippoan/claude-hooks",
+          }],
+        });
+      }
+      return Response.json({ total_count: 0, incomplete_results: false, items: [] });
+    });
+    const req = new Request("http://localhost/issues");
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(req, testEnv(), ctx);
+    await waitOnExecutionContext(ctx);
+
+    const html = await res.text();
+    expect(html).toContain('class="issue-flip-disabled"');
+    expect(html).not.toContain('<button type="button" class="issue-flip"');
+  });
+});
+
 describe("escapeHtml()", () => {
   it("escapes the five HTML special characters", () => {
     expect(escapeHtml(`<a href="x" & 'b'>`)).toBe(

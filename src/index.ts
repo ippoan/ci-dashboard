@@ -9,6 +9,7 @@ import { AUTH_WORKER_ORIGIN } from "./github-api";
 import { handleWebhook, consumeWebhookBatch, type QueueMessage } from "./webhook";
 import { handleDashboard } from "./dashboard";
 import { handleIssuesPage, handleIssuesDecorations } from "./issues-page";
+import { handleIssueFlip } from "./issue-flip";
 import { handleProjectsPage } from "./projects-page";
 import { handleReleasesPage } from "./releases-page";
 import { handleReleaseClose } from "./release-close";
@@ -225,6 +226,10 @@ app.get("/issues", (c) => handleIssuesPage(c.env, c.executionCtx));
 
 // decorations (Project/PR チップ) の部分更新用 JSON (Refs #323)。KV read のみ。
 app.get("/issues/decorations", (c) => handleIssuesDecorations(c.env));
+
+// /issues 各行の close/reopen flip ボタン (Refs #496)。REST 直叩き
+// (tokenForOrg = auth-worker delegation) で `gh` CLI の token 失効を回避する。
+app.post("/api/issue-flip", (c) => handleIssueFlip(c.req.raw, c.env));
 
 // Projects v2 read-only listing (SSR, cross-org). Refs #72.
 app.get("/projects", (c) => handleProjectsPage(c.env));
