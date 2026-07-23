@@ -2,9 +2,16 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { githubApi, parseRepo, tokenForOrg } from "../../github-api";
 import type { AuthClientWorkerEnv } from "@ippoan/auth-client-worker";
+import { createScopedRegisterTool } from "../scoped-tool";
 
-export function registerReleasesTools(server: McpServer, env: AuthClientWorkerEnv): void {
-  server.registerTool(
+export function registerReleasesTools(
+  server: McpServer,
+  env: AuthClientWorkerEnv,
+  scopes: ReadonlySet<string>,
+): void {
+  const registerTool = createScopedRegisterTool(server, scopes);
+
+  registerTool(
     "list_tags",
     {
       description: "List tags for a repository.",
@@ -13,6 +20,7 @@ export function registerReleasesTools(server: McpServer, env: AuthClientWorkerEn
         per_page: z.number().min(1).max(100).default(10).describe("Results per page"),
       },
       annotations: { readOnlyHint: true },
+      requiresScope: "mcp.read",
     },
     async ({ repo, per_page }) => {
       const { owner, repo: name } = parseRepo(repo);
@@ -32,7 +40,7 @@ export function registerReleasesTools(server: McpServer, env: AuthClientWorkerEn
     },
   );
 
-  server.registerTool(
+  registerTool(
     "get_latest_release",
     {
       description: "Get the latest release for a repository.",
@@ -40,6 +48,7 @@ export function registerReleasesTools(server: McpServer, env: AuthClientWorkerEn
         repo: z.string().describe("Repository (e.g. 'rust-alc-api')"),
       },
       annotations: { readOnlyHint: true },
+      requiresScope: "mcp.read",
     },
     async ({ repo }) => {
       const { owner, repo: name } = parseRepo(repo);
@@ -65,13 +74,14 @@ export function registerReleasesTools(server: McpServer, env: AuthClientWorkerEn
     },
   );
 
-  server.registerTool(
+  registerTool(
     "create_tag_release",
     {
       description: "Dispatch tag-release.yml workflow to create a patch release.",
       inputSchema: {
         repo: z.string().describe("Repository as 'org/name' (e.g. 'ippoan/rust-alc-api')"),
       },
+      requiresScope: "mcp.workflow",
     },
     async ({ repo }) => {
       const { owner, repo: name } = parseRepo(repo);

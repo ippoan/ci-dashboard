@@ -2,9 +2,16 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { githubApi, parseRepo, tokenForOrg } from "../../github-api";
 import type { AuthClientWorkerEnv } from "@ippoan/auth-client-worker";
+import { createScopedRegisterTool } from "../scoped-tool";
 
-export function registerCommitsTools(server: McpServer, env: AuthClientWorkerEnv): void {
-  server.registerTool(
+export function registerCommitsTools(
+  server: McpServer,
+  env: AuthClientWorkerEnv,
+  scopes: ReadonlySet<string>,
+): void {
+  const registerTool = createScopedRegisterTool(server, scopes);
+
+  registerTool(
     "list_commits",
     {
       description: "List commits for a repository. Supports branch/tag and file path filtering.",
@@ -15,6 +22,7 @@ export function registerCommitsTools(server: McpServer, env: AuthClientWorkerEnv
         per_page: z.number().min(1).max(100).default(20).describe("Results per page (default 20)"),
       },
       annotations: { readOnlyHint: true },
+      requiresScope: "mcp.read",
     },
     async ({ repo, sha, path, per_page }) => {
       const { owner, repo: name } = parseRepo(repo);
@@ -41,7 +49,7 @@ export function registerCommitsTools(server: McpServer, env: AuthClientWorkerEnv
     },
   );
 
-  server.registerTool(
+  registerTool(
     "get_commit",
     {
       description: "Get commit details including changed files and diff patches.",
@@ -50,6 +58,7 @@ export function registerCommitsTools(server: McpServer, env: AuthClientWorkerEnv
         sha: z.string().describe("Commit SHA (full or short)"),
       },
       annotations: { readOnlyHint: true },
+      requiresScope: "mcp.read",
     },
     async ({ repo, sha }) => {
       const { owner, repo: name } = parseRepo(repo);

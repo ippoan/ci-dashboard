@@ -30,6 +30,7 @@ import {
 } from "../../release-wave/api";
 import { listPendingReleases } from "../../release-wave/pending-release";
 import { listTrafficForReposPerWorker } from "../../release-wave/traffic";
+import { createScopedRegisterTool } from "../scoped-tool";
 
 // ----------------------------------------------------------------------------
 // Hub helper
@@ -76,11 +77,17 @@ function formatRpcResult(
 // Tool registration
 // ----------------------------------------------------------------------------
 
-export function registerReleaseWaveTools(server: McpServer, env: Env): void {
+export function registerReleaseWaveTools(
+  server: McpServer,
+  env: Env,
+  scopes: ReadonlySet<string>,
+): void {
+  const registerTool = createScopedRegisterTool(server, scopes);
+
   // ============================================================
   // release_wave_status
   // ============================================================
-  server.registerTool(
+  registerTool(
     "release_wave_status",
     {
       description:
@@ -89,6 +96,7 @@ export function registerReleaseWaveTools(server: McpServer, env: Env): void {
         wave_id: z.string().min(1),
       },
       annotations: { readOnlyHint: true },
+      requiresScope: "mcp.workflow",
     },
     async ({ wave_id }) => {
       const result = (await hubStub(env).get(wave_id)) as RpcResult<WaveState>;
@@ -121,7 +129,7 @@ export function registerReleaseWaveTools(server: McpServer, env: Env): void {
   // ============================================================
   // release_wave_approve
   // ============================================================
-  server.registerTool(
+  registerTool(
     "release_wave_approve",
     {
       description:
@@ -142,6 +150,7 @@ export function registerReleaseWaveTools(server: McpServer, env: Env): void {
           ),
       },
       annotations: { readOnlyHint: false },
+      requiresScope: "mcp.workflow",
     },
     async ({ wave_id, approved_by, force }) => {
       const result = await hubStub(env).approve({
@@ -164,7 +173,7 @@ export function registerReleaseWaveTools(server: McpServer, env: Env): void {
   // tool として欠けていると wave が flipped 状態に進めないので、ここでは
   // **per-repo flip callback** として実装する。operator override は将来別 tool
   // として追加検討。
-  server.registerTool(
+  registerTool(
     "release_wave_flip",
     {
       description:
@@ -176,6 +185,7 @@ export function registerReleaseWaveTools(server: McpServer, env: Env): void {
         error: z.string().optional().describe("Error detail when ok=false"),
       },
       annotations: { readOnlyHint: false },
+      requiresScope: "mcp.workflow",
     },
     async ({ wave_id, repo, ok, error }) => {
       const result = await hubStub(env).flipReport({
@@ -191,7 +201,7 @@ export function registerReleaseWaveTools(server: McpServer, env: Env): void {
   // ============================================================
   // release_wave_rollback
   // ============================================================
-  server.registerTool(
+  registerTool(
     "release_wave_rollback",
     {
       description:
@@ -210,6 +220,7 @@ export function registerReleaseWaveTools(server: McpServer, env: Env): void {
           ),
       },
       annotations: { readOnlyHint: false },
+      requiresScope: "mcp.workflow",
     },
     async ({ wave_id, rolled_back_by, force }) => {
       const result = await hubStub(env).rollback({
@@ -224,7 +235,7 @@ export function registerReleaseWaveTools(server: McpServer, env: Env): void {
   // ============================================================
   // release_wave_abort
   // ============================================================
-  server.registerTool(
+  registerTool(
     "release_wave_abort",
     {
       description:
@@ -235,6 +246,7 @@ export function registerReleaseWaveTools(server: McpServer, env: Env): void {
         reason: z.string().min(1).describe("Free-form reason recorded in audit"),
       },
       annotations: { readOnlyHint: false },
+      requiresScope: "mcp.workflow",
     },
     async ({ wave_id, aborted_by, reason }) => {
       const result = await hubStub(env).abort({ wave_id, aborted_by, reason });
@@ -245,7 +257,7 @@ export function registerReleaseWaveTools(server: McpServer, env: Env): void {
   // ============================================================
   // release_wave_fail  (force-clear a stuck wave)
   // ============================================================
-  server.registerTool(
+  registerTool(
     "release_wave_fail",
     {
       description:
@@ -255,6 +267,7 @@ export function registerReleaseWaveTools(server: McpServer, env: Env): void {
         reason: z.string().min(1).describe("Free-form reason recorded in audit"),
       },
       annotations: { readOnlyHint: false },
+      requiresScope: "mcp.workflow",
     },
     async ({ wave_id, reason }) => {
       const result = await hubStub(env).fail({ wave_id, reason });
@@ -265,7 +278,7 @@ export function registerReleaseWaveTools(server: McpServer, env: Env): void {
   // ============================================================
   // release_wave_contract_applied
   // ============================================================
-  server.registerTool(
+  registerTool(
     "release_wave_contract_applied",
     {
       description:
@@ -283,6 +296,7 @@ export function registerReleaseWaveTools(server: McpServer, env: Env): void {
           .describe("Migration file ID (e.g. '20260601_001_drop_legacy_token')"),
       },
       annotations: { readOnlyHint: false },
+      requiresScope: "mcp.workflow",
     },
     async ({ wave_id, repo, migration_id }) => {
       const result = await hubStub(env).contractApplied({
@@ -302,7 +316,7 @@ export function registerReleaseWaveTools(server: McpServer, env: Env): void {
   // 「どの version が active か / pending-release:: が残っているか / unified の
   // source・tag・flippable」を JSON で引く。page.ts の computeUnifiedPending と
   // 同一 source を使うので、画面表示と一致する (Refs #427)。
-  server.registerTool(
+  registerTool(
     "release_wave_pending_state",
     {
       description:
@@ -316,6 +330,7 @@ export function registerReleaseWaveTools(server: McpServer, env: Env): void {
           ),
       },
       annotations: { readOnlyHint: true },
+      requiresScope: "mcp.workflow",
     },
     async ({ repo }) => {
       if (!env.COMPAT_KV) {
@@ -392,7 +407,7 @@ export function registerReleaseWaveTools(server: McpServer, env: Env): void {
   // /release-wave の「Flip」ボタンと同じ経路を MCP から叩く: pending release
   // (release CI が報告した no-traffic version) を 100% traffic へ promote する。
   // wave state machine は経由しない。
-  server.registerTool(
+  registerTool(
     "release_wave_pending_flip",
     {
       description:
@@ -404,6 +419,7 @@ export function registerReleaseWaveTools(server: McpServer, env: Env): void {
           .describe("owner/name whose pending release to flip to 100%"),
       },
       annotations: { readOnlyHint: false },
+      requiresScope: "mcp.workflow",
     },
     async ({ repo }) => {
       const result = await pendingFlipCore(env, repo);
@@ -421,7 +437,7 @@ export function registerReleaseWaveTools(server: McpServer, env: Env): void {
   // ============================================================
   // /release-wave の「Flip all」ボタンと同じ経路。全 pending release を一括
   // flip し、flip-group を記録する (= 後で一括 rollback できるよう戻し先を確保)。
-  server.registerTool(
+  registerTool(
     "release_wave_pending_flip_all",
     {
       description:
@@ -435,6 +451,7 @@ export function registerReleaseWaveTools(server: McpServer, env: Env): void {
           ),
       },
       annotations: { readOnlyHint: false },
+      requiresScope: "mcp.workflow",
     },
     async ({ flipped_by }) => {
       const result = await pendingFlipAllCore(env, flipped_by);

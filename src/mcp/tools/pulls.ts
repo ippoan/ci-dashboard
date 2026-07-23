@@ -2,9 +2,16 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { githubApi, parseRepo, tokenForOrg } from "../../github-api";
 import type { AuthClientWorkerEnv } from "@ippoan/auth-client-worker";
+import { createScopedRegisterTool } from "../scoped-tool";
 
-export function registerPullsTools(server: McpServer, env: AuthClientWorkerEnv): void {
-  server.registerTool(
+export function registerPullsTools(
+  server: McpServer,
+  env: AuthClientWorkerEnv,
+  scopes: ReadonlySet<string>,
+): void {
+  const registerTool = createScopedRegisterTool(server, scopes);
+
+  registerTool(
     "list_pull_requests",
     {
       description: "List pull requests for a repository.",
@@ -14,6 +21,7 @@ export function registerPullsTools(server: McpServer, env: AuthClientWorkerEnv):
         per_page: z.number().min(1).max(100).default(10).describe("Results per page"),
       },
       annotations: { readOnlyHint: true },
+      requiresScope: "mcp.read",
     },
     async ({ repo, state, per_page }) => {
       const { owner, repo: name } = parseRepo(repo);
@@ -42,7 +50,7 @@ export function registerPullsTools(server: McpServer, env: AuthClientWorkerEnv):
     },
   );
 
-  server.registerTool(
+  registerTool(
     "get_pull_request",
     {
       description: "Get PR details including CI check status.",
@@ -51,6 +59,7 @@ export function registerPullsTools(server: McpServer, env: AuthClientWorkerEnv):
         pull_number: z.number().describe("PR number"),
       },
       annotations: { readOnlyHint: true },
+      requiresScope: "mcp.read",
     },
     async ({ repo, pull_number }) => {
       const { owner, repo: name } = parseRepo(repo);
@@ -91,7 +100,7 @@ export function registerPullsTools(server: McpServer, env: AuthClientWorkerEnv):
     },
   );
 
-  server.registerTool(
+  registerTool(
     "merge_pull_request",
     {
       description: "Merge a pull request using squash merge.",
@@ -101,6 +110,7 @@ export function registerPullsTools(server: McpServer, env: AuthClientWorkerEnv):
         commit_title: z.string().optional().describe("Custom commit title"),
       },
       annotations: { destructiveHint: true },
+      requiresScope: "mcp.write",
     },
     async ({ repo, pull_number, commit_title }) => {
       const { owner, repo: name } = parseRepo(repo);

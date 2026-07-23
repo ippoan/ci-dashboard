@@ -2,9 +2,16 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { githubApiRaw, parseRepo, tokenForOrg } from "../../github-api";
 import type { AuthClientWorkerEnv } from "@ippoan/auth-client-worker";
+import { createScopedRegisterTool } from "../scoped-tool";
 
-export function registerLogsTools(server: McpServer, env: AuthClientWorkerEnv): void {
-  server.registerTool(
+export function registerLogsTools(
+  server: McpServer,
+  env: AuthClientWorkerEnv,
+  scopes: ReadonlySet<string>,
+): void {
+  const registerTool = createScopedRegisterTool(server, scopes);
+
+  registerTool(
     "get_job_logs",
     {
       description: "Get logs for a workflow job. Returns tail lines by default, or a specific line range with start_line/end_line.",
@@ -16,6 +23,7 @@ export function registerLogsTools(server: McpServer, env: AuthClientWorkerEnv): 
         end_line: z.number().min(1).optional().describe("End line (inclusive) for range retrieval"),
       },
       annotations: { readOnlyHint: true },
+      requiresScope: "mcp.read",
     },
     async ({ repo, job_id, tail_lines, start_line, end_line }) => {
       const { owner, repo: name } = parseRepo(repo);
@@ -59,7 +67,7 @@ export function registerLogsTools(server: McpServer, env: AuthClientWorkerEnv): 
     },
   );
 
-  server.registerTool(
+  registerTool(
     "grep_job_logs",
     {
       description: "Search job logs with regex pattern. Returns matching lines with context. Use for finding errors: pattern='error|fail|panic'",
@@ -70,6 +78,7 @@ export function registerLogsTools(server: McpServer, env: AuthClientWorkerEnv): 
         context_lines: z.number().min(0).max(20).default(3).describe("Context lines before/after each match (default 3)"),
       },
       annotations: { readOnlyHint: true },
+      requiresScope: "mcp.read",
     },
     async ({ repo, job_id, pattern, context_lines }) => {
       const { owner, repo: name } = parseRepo(repo);

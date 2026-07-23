@@ -15,6 +15,16 @@ import { registerReleaseWaveTools } from "../../src/mcp/tools/release-wave";
 import type { Env } from "../../src/index";
 import type { ReleaseWaveHub } from "../../src/release-wave/do";
 
+// binding_jwt middleware 導入 (Refs #498) 後、tool 登録時に scope 集合が要る。
+// 本テストは wiring 検証が目的で scope gate 自体は scoped-tool.test.ts の
+// 責務なので、常に全 scope を渡して gate を無効化する。
+const ALL_SCOPES: ReadonlySet<string> = new Set([
+  "mcp.read",
+  "mcp.write",
+  "mcp.workflow",
+  "mcp.project",
+]);
+
 // ----------------------------------------------------------------------------
 // Fake McpServer: registerTool だけを capture する。
 // ----------------------------------------------------------------------------
@@ -106,6 +116,7 @@ function setup(): {
   registerReleaseWaveTools(
     server as unknown as Parameters<typeof registerReleaseWaveTools>[0],
     env,
+    ALL_SCOPES,
   );
   return { tools: server.tools, spies };
 }
@@ -200,6 +211,7 @@ describe("release_wave_status", () => {
     registerReleaseWaveTools(
       server as unknown as Parameters<typeof registerReleaseWaveTools>[0],
       fakeEnv(hub),
+      ALL_SCOPES,
     );
     const r = await server.tools
       .get("release_wave_status")!
