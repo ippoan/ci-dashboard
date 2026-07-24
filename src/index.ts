@@ -97,6 +97,8 @@ export interface Env extends AuthClientWorkerEnv {
    * は無い (Refs #498)。
    */
   AUTH_WORKER_ORIGIN?: string;
+  /** auth-worker への Service Binding (`/mcp/introspect` 呼び出し用、Refs #500)。 */
+  AUTH_WORKER: Fetcher;
   WEBHOOK_SECRET: SecretsStoreSecret;
   CI_HUB: DurableObjectNamespace;
   /** Release Wave 機構の hub DO。Refs #137。 */
