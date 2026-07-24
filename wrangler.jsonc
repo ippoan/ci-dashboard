@@ -182,6 +182,16 @@
           "id": "ffb983ee8324499f915b11a0b8cf787b"
         }
       ],
+      // MCP introspect (/mcp/introspect) は service binding経由 (同一account、
+      // Refs ippoan/auth-worker#435 / ippoan/mcp-cf-workers#60,#63)。
+      // github-api.ts の AUTH_WORKER_ORIGIN 定数は変更しない (WWW-Authenticateの
+      // resource_metadata表示に引き続き使う)。
+      "services": [
+        {
+          "binding": "AUTH_WORKER",
+          "service": "auth-worker-staging"
+        }
+      ],
       "r2_buckets": [
         {
           "binding": "CAP_CATALOG_R2",
