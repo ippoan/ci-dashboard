@@ -24,7 +24,7 @@ import { applyDraftPrEvent } from "./draft-prs";
 import { notifyDiscordPrClosed, notifyDiscordCiFailed } from "./discord";
 import { isAutoTagRepo } from "./auto-tag";
 import { dispatchTagRelease } from "./tag-release";
-import { dispatchCodeSearchIndex } from "./code-search-dispatch";
+import { dispatchCodeSearchIndex, INDEX_REPO } from "./code-search-dispatch";
 import {
   markReleasesIndexStale,
   RELEASES_INDEX_KEY,
@@ -861,10 +861,16 @@ async function processWebhookEvent(
           // ippoan の public repo の merge (= default branch への push) は
           // semantic code search の索引 (ippoan/code-search-index) を
           // workflow_dispatch で追随させる (Refs #503)。private repo は索引
-          // 対象外なので送らない。連続 merge の重複起動は index 側の
-          // concurrency group が畳む。失敗は log のみ (fail-open、auto-tag と
-          // 同方針)。
-          if (owner === "ippoan" && payload.repository?.private === false) {
+          // 対象外なので送らない。index repo 自身の merge (インデクサ改修) も
+          // 送らない — full-rebuild と concurrency を取り合うだけで、自身の
+          // 内容変更は日次 cron が拾う (Refs #505)。連続 merge の重複起動は
+          // index 側の concurrency group が畳む。失敗は log のみ (fail-open、
+          // auto-tag と同方針)。
+          if (
+            owner === "ippoan" &&
+            payload.repository?.private === false &&
+            fullName !== INDEX_REPO
+          ) {
             const result = await dispatchCodeSearchIndex(env);
             console.log(JSON.stringify({
               msg: result.ok

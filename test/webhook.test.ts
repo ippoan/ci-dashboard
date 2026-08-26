@@ -1000,6 +1000,40 @@ describe("POST /webhook", () => {
     }
   });
 
+  it("push to the index repo itself does not dispatch code-search index", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(null, { status: 204 }),
+    );
+    try {
+      const body = JSON.stringify({
+        ref: "refs/heads/main",
+        repository: {
+          full_name: "ippoan/code-search-index",
+          default_branch: "main",
+          private: false,
+        },
+      });
+      const sig = await sign(body, WEBHOOK_SECRET);
+      const ctx = createExecutionContext();
+      await worker.fetch(
+        new Request("http://localhost/webhook", {
+          method: "POST",
+          body,
+          headers: { "X-Hub-Signature-256": sig, "X-GitHub-Event": "push" },
+        }),
+        testEnv(),
+        ctx,
+      );
+      await waitOnExecutionContext(ctx);
+      const dispatchCall = fetchSpy.mock.calls.find(([input]) =>
+        String(input).includes(CODE_SEARCH_DISPATCH_URL),
+      );
+      expect(dispatchCall).toBeUndefined();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
   it("issues event also invalidates release-cache issue key (close immediately reflects on /releases)", async () => {
     await env.CI_STATUS.put(
       "rcache:v1:issue:ippoan/foo:42",
