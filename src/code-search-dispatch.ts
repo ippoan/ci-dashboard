@@ -6,7 +6,7 @@
 import type { Env } from "./index";
 import { tokenForOrg } from "./github-api";
 
-const INDEX_REPO = "ippoan/code-search-index";
+export const INDEX_REPO = "ippoan/code-search-index";
 const INDEX_WORKFLOW = "index.yml";
 
 export interface CodeSearchDispatchResult {
