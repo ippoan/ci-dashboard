@@ -24,6 +24,7 @@ import { applyDraftPrEvent } from "./draft-prs";
 import { notifyDiscordPrClosed, notifyDiscordCiFailed } from "./discord";
 import { isAutoTagRepo } from "./auto-tag";
 import { dispatchTagRelease } from "./tag-release";
+import { dispatchCodeSearchIndex } from "./code-search-dispatch";
 import {
   markReleasesIndexStale,
   RELEASES_INDEX_KEY,
@@ -179,6 +180,9 @@ interface PushWebhookPayload {
   repository: {
     full_name: string;
     default_branch: string;
+    // code-search dispatch (Refs #503) 用。private repo は索引対象外なので
+    // 送らない判定に使う。最小 payload (テスト fixture) でも落ちないよう optional。
+    private?: boolean;
   };
 }
 
@@ -854,6 +858,22 @@ async function processWebhookEvent(
             hub, fullName, [...refs], payload.after ?? null,
           );
           if (outcome === "fallback") await staleAndKickReleasesIndex(env, fullName);
+          // ippoan の public repo の merge (= default branch への push) は
+          // semantic code search の索引 (ippoan/code-search-index) を
+          // workflow_dispatch で追随させる (Refs #503)。private repo は索引
+          // 対象外なので送らない。連続 merge の重複起動は index 側の
+          // concurrency group が畳む。失敗は log のみ (fail-open、auto-tag と
+          // 同方針)。
+          if (owner === "ippoan" && payload.repository?.private === false) {
+            const result = await dispatchCodeSearchIndex(env);
+            console.log(JSON.stringify({
+              msg: result.ok
+                ? "code-search-dispatch-ok"
+                : "code-search-dispatch-failed",
+              repo: fullName,
+              ...(result.ok ? {} : { status: result.status, error: result.error }),
+            }));
+          }
         }
       }
     }

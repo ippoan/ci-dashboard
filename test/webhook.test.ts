@@ -1,5 +1,5 @@
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import worker from "../src/index";
 import type { Env } from "../src/index";
 import type { CIStatus, JobStatus, WebhookQueueMessage } from "../src/webhook";
@@ -933,6 +933,71 @@ describe("POST /webhook", () => {
     // 触らない
     expect(await env.CI_STATUS.get("rcache:v1:commits:ippoan/foo:main:50")).toBe("[]");
     expect(await env.CI_STATUS.get("rcache:v1:cmp:ippoan/foo:v1.0.0..main")).toBe("{}");
+  });
+
+  // ───── code-search index dispatch (Refs #503) ─────
+
+  const CODE_SEARCH_DISPATCH_URL =
+    "/repos/ippoan/code-search-index/actions/workflows/index.yml/dispatches";
+
+  it("push to default branch of a public ippoan repo dispatches code-search index", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(null, { status: 204 }),
+    );
+    try {
+      const body = JSON.stringify({
+        ref: "refs/heads/main",
+        repository: { full_name: "ippoan/foo", default_branch: "main", private: false },
+      });
+      const sig = await sign(body, WEBHOOK_SECRET);
+      const ctx = createExecutionContext();
+      await worker.fetch(
+        new Request("http://localhost/webhook", {
+          method: "POST",
+          body,
+          headers: { "X-Hub-Signature-256": sig, "X-GitHub-Event": "push" },
+        }),
+        testEnv(),
+        ctx,
+      );
+      await waitOnExecutionContext(ctx);
+      const dispatchCall = fetchSpy.mock.calls.find(([input]) =>
+        String(input).includes(CODE_SEARCH_DISPATCH_URL),
+      );
+      expect(dispatchCall).toBeDefined();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("push to default branch of a private repo does not dispatch code-search index", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(null, { status: 204 }),
+    );
+    try {
+      const body = JSON.stringify({
+        ref: "refs/heads/main",
+        repository: { full_name: "ippoan/bar", default_branch: "main", private: true },
+      });
+      const sig = await sign(body, WEBHOOK_SECRET);
+      const ctx = createExecutionContext();
+      await worker.fetch(
+        new Request("http://localhost/webhook", {
+          method: "POST",
+          body,
+          headers: { "X-Hub-Signature-256": sig, "X-GitHub-Event": "push" },
+        }),
+        testEnv(),
+        ctx,
+      );
+      await waitOnExecutionContext(ctx);
+      const dispatchCall = fetchSpy.mock.calls.find(([input]) =>
+        String(input).includes(CODE_SEARCH_DISPATCH_URL),
+      );
+      expect(dispatchCall).toBeUndefined();
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 
   it("issues event also invalidates release-cache issue key (close immediately reflects on /releases)", async () => {
