@@ -14,6 +14,11 @@ import {
   handleReleaseWaveAutoFlipDisarm,
   AUTO_FLIP_RECHECK_DELAY_SECONDS,
   runContinuousAutoFlip,
+  sweepContinuousAutoFlip,
+  scheduleContinuousAutoFlipRecheck,
+  runContinuousAutoFlipRecheck,
+  CONTINUOUS_AUTO_FLIP_RECHECK_DELAY_SECONDS,
+  CONTINUOUS_AUTO_FLIP_RECHECK_MAX_ATTEMPTS,
   type AutoFlipArmRecord,
 } from "../../src/release-wave/auto-flip";
 import type { PendingReleaseRecord } from "../../src/release-wave/pending-release";
@@ -528,6 +533,218 @@ describe("runContinuousAutoFlip (Refs #494)", () => {
     const out = await runContinuousAutoFlip(env, authRecord("ippoan/other", "vid", "v1.0.0"));
     expect(out).toEqual({ action: "skip", reason: "not-auto-tag" });
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+// ----------------------------------------------------------------------------
+// sweepContinuousAutoFlip / recheck chain (Refs #507): backend repo が自分の
+// release で compat gate 「未検証」に落ちたあと、retest 完了を拾って flip し直す。
+// ----------------------------------------------------------------------------
+
+function envWithAutoTagQueue(
+  compatKv: KVNamespace | undefined,
+  autoTagRepos: string[],
+  send?: (...args: unknown[]) => unknown,
+): Env {
+  return {
+    ...(envWithAutoTag(compatKv, autoTagRepos) as unknown as Record<string, unknown>),
+    ...(send ? { WEBHOOK_QUEUE: { send } } : {}),
+  } as unknown as Env;
+}
+
+describe("sweepContinuousAutoFlip (Refs #507)", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("auto-tag set が空なら何もしない", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const env = envWithAutoTag(memKv({ "pending-release::ippoan/a": pending("ippoan/a", "v1.0.0") }), []);
+    expect(await sweepContinuousAutoFlip(env)).toEqual({
+      action: "skip",
+      reason: "no-candidate",
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("COMPAT_KV 未 bind なら fail-closed で何もしない", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const env = envWithAutoTag(undefined, ["ippoan/a"]);
+    expect(await sweepContinuousAutoFlip(env)).toEqual({
+      action: "skip",
+      reason: "no-compat-kv",
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("pending が auto-tag 対象外の repo だけなら flip しない", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const kv = memKv({ "pending-release::ippoan/other": pending("ippoan/other", "v1.0.0") });
+    const env = envWithAutoTag(kv, ["ippoan/a"]);
+    expect(await sweepContinuousAutoFlip(env)).toEqual({
+      action: "skip",
+      reason: "no-candidate",
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("gate が緑なら pending の auto-tag repo を flip する (retest 完了後の拾い直し)", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const fetchSpy = vi.fn(async (_url: string, init?: RequestInit) => {
+      if (init?.body) bodies.push(JSON.parse(String(init.body)));
+      return new Response(null, { status: 204 });
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    const kv = memKv({
+      "pending-release::ippoan/rust-alc-api": pending("ippoan/rust-alc-api", "v0.0.144"),
+    });
+    const env = envWithAutoTag(kv, ["ippoan/rust-alc-api"]);
+    const out = await sweepContinuousAutoFlip(env);
+    expect(out).toEqual({ action: "flipped", repos: ["ippoan/rust-alc-api"] });
+    const flip = bodies.find((b) => b.event_type === "release-wave-flip");
+    expect(flip).toBeTruthy();
+  });
+
+  it("gate が赤なら flip せず blocked (対象 repo を添えて返す)", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const kv = memKv({
+      ...redCompat(),
+      "pending-release::ippoan/rust-alc-api": pending("ippoan/rust-alc-api", "v0.0.144"),
+    });
+    const env = envWithAutoTag(kv, ["ippoan/rust-alc-api"]);
+    const out = await sweepContinuousAutoFlip(env);
+    expect(out.action).toBe("blocked");
+    if (out.action === "blocked") {
+      expect(out.reason).toContain("compatibility");
+      expect(out.repos).toEqual(["ippoan/rust-alc-api"]);
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("未 tag の pending は flip 対象にしない", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const kv = memKv({
+      "pending-release::ippoan/a": { ...pending("ippoan/a", "v1.0.0"), tag: null },
+    });
+    const env = envWithAutoTag(kv, ["ippoan/a"]);
+    expect(await sweepContinuousAutoFlip(env)).toEqual({
+      action: "skip",
+      reason: "no-candidate",
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("scheduleContinuousAutoFlipRecheck (Refs #507)", () => {
+  it("専用 kind + delay で enqueue し、専用 marker を立てる", async () => {
+    const send = vi.fn().mockResolvedValue(undefined);
+    const kv = memKv();
+    const env = envWithAutoTagQueue(kv, ["ippoan/a"], send);
+    await scheduleContinuousAutoFlipRecheck(env);
+    expect(send).toHaveBeenCalledOnce();
+    expect(send.mock.calls[0][0]).toEqual({
+      kind: "continuous-auto-flip-recheck",
+      attempt: 1,
+    });
+    expect(send.mock.calls[0][1]).toEqual({
+      delaySeconds: CONTINUOUS_AUTO_FLIP_RECHECK_DELAY_SECONDS,
+    });
+    expect(await kv.get("auto-tag-flip::recheck-scheduled")).toBe("1");
+  });
+
+  it("marker がある間は重複 enqueue しない (dedup)", async () => {
+    const send = vi.fn().mockResolvedValue(undefined);
+    const kv = memKv({ "auto-tag-flip::recheck-scheduled": "1" });
+    const env = envWithAutoTagQueue(kv, ["ippoan/a"], send);
+    await scheduleContinuousAutoFlipRecheck(env);
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("armed 側 (#481) の marker とは独立 — 互いの chain を潰さない", async () => {
+    const send = vi.fn().mockResolvedValue(undefined);
+    // armed chain が予約済みでも継続側は予約できる。
+    const kv = memKv({ "auto-flip::recheck-scheduled": "1" });
+    const env = envWithAutoTagQueue(kv, ["ippoan/a"], send);
+    await scheduleContinuousAutoFlipRecheck(env);
+    expect(send).toHaveBeenCalledOnce();
+    // 継続側の marker だけが立ち、armed 側の marker は消されない
+    // (memKv の seed は JSON 化されるので値そのものではなく残存を見る)。
+    expect(await kv.get("auto-tag-flip::recheck-scheduled")).toBe("1");
+    expect(await kv.get("auto-flip::recheck-scheduled")).not.toBeNull();
+  });
+
+  it("上限を超えた attempt は予約しない (chain 打ち切り)", async () => {
+    const send = vi.fn().mockResolvedValue(undefined);
+    const env = envWithAutoTagQueue(memKv(), ["ippoan/a"], send);
+    await scheduleContinuousAutoFlipRecheck(
+      env,
+      CONTINUOUS_AUTO_FLIP_RECHECK_MAX_ATTEMPTS + 1,
+    );
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("queue binding が無い環境では no-op", async () => {
+    const kv = memKv();
+    const env = envWithAutoTagQueue(kv, ["ippoan/a"]);
+    await scheduleContinuousAutoFlipRecheck(env);
+    expect(await kv.get("auto-tag-flip::recheck-scheduled")).toBeNull();
+  });
+});
+
+describe("runContinuousAutoFlipRecheck (Refs #507)", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("まだ blocked なら marker を消して次の attempt を予約する", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const send = vi.fn().mockResolvedValue(undefined);
+    const kv = memKv({
+      ...redCompat(),
+      "pending-release::ippoan/rust-alc-api": pending("ippoan/rust-alc-api", "v0.0.144"),
+      "auto-tag-flip::recheck-scheduled": "1",
+    });
+    const env = envWithAutoTagQueue(kv, ["ippoan/rust-alc-api"], send);
+    const out = await runContinuousAutoFlipRecheck(env, 1);
+    expect(out.action).toBe("blocked");
+    expect(send).toHaveBeenCalledOnce();
+    expect(send.mock.calls[0][0]).toEqual({
+      kind: "continuous-auto-flip-recheck",
+      attempt: 2,
+    });
+  });
+
+  it("flip できたら chain を止める", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const send = vi.fn().mockResolvedValue(undefined);
+    const kv = memKv({
+      "pending-release::ippoan/rust-alc-api": pending("ippoan/rust-alc-api", "v0.0.144"),
+      "auto-tag-flip::recheck-scheduled": "1",
+    });
+    const env = envWithAutoTagQueue(kv, ["ippoan/rust-alc-api"], send);
+    const out = await runContinuousAutoFlipRecheck(env, 1);
+    expect(out).toEqual({ action: "flipped", repos: ["ippoan/rust-alc-api"] });
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("上限に達した attempt では再予約しない", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const send = vi.fn().mockResolvedValue(undefined);
+    const kv = memKv({
+      ...redCompat(),
+      "pending-release::ippoan/rust-alc-api": pending("ippoan/rust-alc-api", "v0.0.144"),
+    });
+    const env = envWithAutoTagQueue(kv, ["ippoan/rust-alc-api"], send);
+    const out = await runContinuousAutoFlipRecheck(
+      env,
+      CONTINUOUS_AUTO_FLIP_RECHECK_MAX_ATTEMPTS,
+    );
+    expect(out.action).toBe("blocked");
+    expect(send).not.toHaveBeenCalled();
   });
 });
 

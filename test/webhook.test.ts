@@ -1869,3 +1869,89 @@ describe("consumeWebhookBatch — auto-flip-recheck routing (Refs #481)", () => 
     expect(sent[0].opts).toEqual({ delaySeconds: 60 });
   });
 });
+
+describe("consumeWebhookBatch — continuous-auto-flip-recheck routing (Refs #507)", () => {
+  beforeEach(async () => {
+    resetHubCalls();
+    await env.COMPAT_KV.delete("auto-tag-flip::recheck-scheduled");
+    await env.COMPAT_KV.delete("pending-release::ippoan/rust-alc-api");
+    await env.COMPAT_KV.delete("backend::ippoan/rust-alc-api");
+    await env.COMPAT_KV.delete("frontend::ippoan/alc-app");
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  /** auto-tag set を返す fake CI_HUB。 */
+  const autoTagHub = {
+    fetch: async (req: Request) => {
+      const u = new URL(req.url);
+      if (u.pathname === "/auto-tag-repos" && req.method === "GET") {
+        return Response.json(["ippoan/rust-alc-api"]);
+      }
+      return new Response("not found", { status: 404 });
+    },
+  };
+
+  function continuousBatch(acked: string[], attempt: number) {
+    return {
+      messages: [{
+        body: { kind: "continuous-auto-flip-recheck", attempt },
+        attempts: 1,
+        ack: () => acked.push("caf"),
+        retry: () => { throw new Error("should not retry"); },
+      }],
+    } as unknown as MessageBatch<import("../src/webhook").QueueMessage>;
+  }
+
+  it("continuous-auto-flip-recheck を sweep に振り分けて ack し、まだ blocked なら次の attempt を予約する", async () => {
+    // compat gate が赤 (frontend が古い image しか test していない) + pending は
+    // auto-tag ON の backend。= sweep は blocked → chain 継続。
+    await env.COMPAT_KV.put("backend::ippoan/rust-alc-api", JSON.stringify({
+      schema_version: 1, repo: "ippoan/rust-alc-api", current_image: "cur-img",
+      deployed_at: "2026-07-13T00:00:00Z", deployed_by: "x", wave_id: null,
+    }));
+    await env.COMPAT_KV.put("frontend::ippoan/alc-app", JSON.stringify({
+      schema_version: 1, repo: "ippoan/alc-app", prod_version: "v0.0.47",
+      prod_deployed_at: "2026-07-13T00:00:00Z",
+      tested_against: [{
+        backend_repo: "ippoan/rust-alc-api", backend_image: "stale-img",
+        tested_at: "2026-07-13T00:00:00Z",
+      }],
+    }));
+    await env.COMPAT_KV.put("pending-release::ippoan/rust-alc-api", JSON.stringify({
+      schema_version: 1, repo: "ippoan/rust-alc-api", version_id: "vid",
+      tag: "v0.0.144", preview_url: null, uploaded_at: "2026-09-04T06:40:17.569Z",
+    }));
+
+    const sent: Array<{ msg: unknown; opts: unknown }> = [];
+    const queueEnv = {
+      ...testEnv(),
+      COMPAT_KV: env.COMPAT_KV,
+      CI_HUB: { idFromName: () => ({}), get: () => autoTagHub },
+      WEBHOOK_QUEUE: { send: async (msg: unknown, opts: unknown) => { sent.push({ msg, opts }); } },
+    } as unknown as Env;
+    const acked: string[] = [];
+
+    await consumeWebhookBatch(continuousBatch(acked, 1), queueEnv);
+
+    expect(acked).toEqual(["caf"]);
+    expect(sent).toHaveLength(1);
+    expect(sent[0].msg).toEqual({ kind: "continuous-auto-flip-recheck", attempt: 2 });
+    expect(sent[0].opts).toEqual({ delaySeconds: 60 });
+  });
+
+  it("flip 対象が無ければ ack だけして chain を止める", async () => {
+    const sent: Array<{ msg: unknown }> = [];
+    const queueEnv = {
+      ...testEnv(),
+      COMPAT_KV: env.COMPAT_KV,
+      CI_HUB: { idFromName: () => ({}), get: () => autoTagHub },
+      WEBHOOK_QUEUE: { send: async (msg: unknown) => { sent.push({ msg }); } },
+    } as unknown as Env;
+    const acked: string[] = [];
+
+    await consumeWebhookBatch(continuousBatch(acked, 1), queueEnv);
+
+    expect(acked).toEqual(["caf"]);
+    expect(sent).toEqual([]);
+  });
+});

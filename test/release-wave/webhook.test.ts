@@ -509,27 +509,52 @@ describe("handlePendingReleaseWebhook", () => {
 // pending-release webhook → Auto-tag ON repo の継続 auto-flip (Refs #494)
 // ============================================================================
 
+/** CI_HUB (Hub DO) の auto-tag repos set を in-memory で模す fake namespace。 */
+function memAutoTagHub(repos: string[] = []): unknown {
+  const stub = {
+    fetch: async (req: Request) => {
+      const u = new URL(req.url);
+      if (u.pathname === "/auto-tag-repos" && req.method === "GET") {
+        return Response.json(repos);
+      }
+      return new Response("not found", { status: 404 });
+    },
+  };
+  return { idFromName: () => ({}), get: () => stub };
+}
+
+const AUTO_TAG_FRESH_TOKEN = {
+  token: "ghs_continuous_auto_flip_token",
+  expires_at_ms: Date.now() + 3600_000,
+};
+
+/** compat gate が赤 (checked && !verified) になる KV seed。 */
+const RED_COMPAT_SEED: Record<string, unknown> = {
+  "backend::ippoan/rust-alc-api": {
+    schema_version: 1,
+    repo: "ippoan/rust-alc-api",
+    current_image: "cur-img",
+    deployed_at: "2026-07-13T00:00:00Z",
+    deployed_by: "x",
+    wave_id: null,
+  },
+  "frontend::ippoan/alc-app": {
+    schema_version: 1,
+    repo: "ippoan/alc-app",
+    prod_version: "v1.0.0",
+    prod_deployed_at: "2026-07-13T00:00:00Z",
+    tested_against: [
+      {
+        backend_repo: "ippoan/rust-alc-api",
+        backend_image: "stale-img",
+        tested_at: "2026-07-13T00:00:00Z",
+      },
+    ],
+  },
+};
+
 describe("handlePendingReleaseWebhook → runContinuousAutoFlip wiring", () => {
   afterEach(() => vi.unstubAllGlobals());
-
-  /** CI_HUB (Hub DO) の auto-tag repos set を in-memory で模す fake namespace。 */
-  function memAutoTagHub(repos: string[] = []): unknown {
-    const stub = {
-      fetch: async (req: Request) => {
-        const u = new URL(req.url);
-        if (u.pathname === "/auto-tag-repos" && req.method === "GET") {
-          return Response.json(repos);
-        }
-        return new Response("not found", { status: 404 });
-      },
-    };
-    return { idFromName: () => ({}), get: () => stub };
-  }
-
-  const FRESH_TOKEN = {
-    token: "ghs_continuous_auto_flip_token",
-    expires_at_ms: Date.now() + 3600_000,
-  };
 
   it("flips immediately when the repo is Auto-tag ON and the compat gate is clear", async () => {
     const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
@@ -540,7 +565,7 @@ describe("handlePendingReleaseWebhook → runContinuousAutoFlip wiring", () => {
     // pendingFlipAllCore の GitHub dispatch は getGitHubToken(env) 経由で
     // CI_STATUS の cache hit を要る (auto-flip.test.ts の envWith と同方式)。
     (env as unknown as { CI_STATUS: unknown }).CI_STATUS = memKv({
-      "auth-client-worker:gh-token": FRESH_TOKEN,
+      "auth-client-worker:gh-token": AUTO_TAG_FRESH_TOKEN,
     });
     const resp = await handlePendingReleaseWebhook(
       jsonRequest({
@@ -577,29 +602,7 @@ describe("handlePendingReleaseWebhook → runContinuousAutoFlip wiring", () => {
   it("does not flip when Auto-tag ON but the compat gate is red", async () => {
     const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetchSpy);
-    const kv = memKv({
-      "backend::ippoan/rust-alc-api": {
-        schema_version: 1,
-        repo: "ippoan/rust-alc-api",
-        current_image: "cur-img",
-        deployed_at: "2026-07-13T00:00:00Z",
-        deployed_by: "x",
-        wave_id: null,
-      },
-      "frontend::ippoan/alc-app": {
-        schema_version: 1,
-        repo: "ippoan/alc-app",
-        prod_version: "v1.0.0",
-        prod_deployed_at: "2026-07-13T00:00:00Z",
-        tested_against: [
-          {
-            backend_repo: "ippoan/rust-alc-api",
-            backend_image: "stale-img",
-            tested_at: "2026-07-13T00:00:00Z",
-          },
-        ],
-      },
-    });
+    const kv = memKv(RED_COMPAT_SEED);
     const { env } = fakeEnv({ compatKv: kv });
     (env as unknown as { CI_HUB: unknown }).CI_HUB = memAutoTagHub(["ippoan/rust-alc-api"]);
     const resp = await handlePendingReleaseWebhook(
@@ -619,6 +622,110 @@ describe("handlePendingReleaseWebhook → runContinuousAutoFlip wiring", () => {
   // (auto-flip.test.ts) でカバーする。handlePendingReleaseWebhook は COMPAT_KV が
   // 無いと pending release の記録自体が失敗するため、この webhook 経路では
   // 「CI_HUB はあるが COMPAT_KV は無い」状態を単独では再現できない。
+
+  // --------------------------------------------------------------------------
+  // Refs #507: blocked を拾い直す遅延 recheck の予約
+  // --------------------------------------------------------------------------
+
+  it("compat gate が赤で blocked のとき、継続 auto-flip の recheck を予約する (Refs #507)", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const kv = memKv(RED_COMPAT_SEED);
+    const send = vi.fn().mockResolvedValue(undefined);
+    const { env } = fakeEnv({ compatKv: kv });
+    (env as unknown as { CI_HUB: unknown }).CI_HUB = memAutoTagHub(["ippoan/rust-alc-api"]);
+    (env as unknown as { WEBHOOK_QUEUE: unknown }).WEBHOOK_QUEUE = { send };
+    const resp = await handlePendingReleaseWebhook(
+      jsonRequest({
+        url: PENDING_URL,
+        secret: "expected-secret",
+        body: { repo: "ippoan/rust-alc-api", version_id: "pending-v1-0-0", tag: "v1.0.0" },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(200);
+    expect(send).toHaveBeenCalledWith(
+      { kind: "continuous-auto-flip-recheck", attempt: 1 },
+      expect.objectContaining({ delaySeconds: expect.any(Number) }),
+    );
+  });
+
+  it("flip できたときは recheck を予約しない (Refs #507)", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const send = vi.fn().mockResolvedValue(undefined);
+    const { env } = fakeEnv({ compatKv: memKv() });
+    (env as unknown as { CI_HUB: unknown }).CI_HUB = memAutoTagHub(["ippoan/auth-worker"]);
+    (env as unknown as { CI_STATUS: unknown }).CI_STATUS = memKv({
+      "auth-client-worker:gh-token": AUTO_TAG_FRESH_TOKEN,
+    });
+    (env as unknown as { WEBHOOK_QUEUE: unknown }).WEBHOOK_QUEUE = { send };
+    const resp = await handlePendingReleaseWebhook(
+      jsonRequest({
+        url: PENDING_URL,
+        secret: "expected-secret",
+        body: { repo: "ippoan/auth-worker", version_id: VALID_VID, tag: "v0.2.38" },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(200);
+    const kinds = send.mock.calls.map((c) => (c[0] as { kind?: string }).kind);
+    expect(kinds).not.toContain("continuous-auto-flip-recheck");
+  });
+});
+
+// ============================================================================
+// frontend-test-report webhook → 継続 auto-flip の再評価予約 (Refs #507)
+// ============================================================================
+
+describe("handleFrontendTestReportWebhook → continuous auto-flip recheck (Refs #507)", () => {
+  const FT_RECHECK_URL =
+    "https://ci-dashboard.ippoan.org/webhooks/release-wave/frontend-test-report";
+
+  it("retest 完了 (compat 更新) で継続 auto-flip の recheck を予約する", async () => {
+    const send = vi.fn().mockResolvedValue(undefined);
+    const { env } = fakeEnv({ compatKv: memKv() });
+    (env as unknown as { WEBHOOK_QUEUE: unknown }).WEBHOOK_QUEUE = { send };
+    const resp = await handleFrontendTestReportWebhook(
+      jsonRequest({
+        url: FT_RECHECK_URL,
+        secret: "expected-secret",
+        body: {
+          repo: "ippoan/alc-app",
+          prod_version: "v0.0.47",
+          tested: {
+            backend_repo: "ippoan/rust-alc-api",
+            backend_image: "1e002dc7bb913fd711ad52b5405c2e8514b87984",
+          },
+        },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(200);
+    expect(send).toHaveBeenCalledWith(
+      { kind: "continuous-auto-flip-recheck", attempt: 1 },
+      expect.objectContaining({ delaySeconds: expect.any(Number) }),
+    );
+  });
+
+  it("予約が失敗しても 200 を返す (best-effort)", async () => {
+    const send = vi.fn().mockRejectedValue(new Error("queue down"));
+    const { env } = fakeEnv({ compatKv: memKv() });
+    (env as unknown as { WEBHOOK_QUEUE: unknown }).WEBHOOK_QUEUE = { send };
+    const resp = await handleFrontendTestReportWebhook(
+      jsonRequest({
+        url: FT_RECHECK_URL,
+        secret: "expected-secret",
+        body: {
+          repo: "ippoan/alc-app",
+          prod_version: "v0.0.47",
+          tested: { backend_repo: "ippoan/rust-alc-api", backend_image: "img" },
+        },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(200);
+  });
 });
 
 // ============================================================================

@@ -31,6 +31,7 @@ import {
   enqueueAutoFlipFlip,
   scheduleAutoFlipRecheck,
   runContinuousAutoFlip,
+  scheduleContinuousAutoFlipRecheck,
 } from "./auto-flip";
 import { recordTraffic } from "./traffic";
 import { dispatchAll, decideBackendDeployRetestDispatches } from "./dispatch";
@@ -279,6 +280,16 @@ export async function handleFrontendTestReportWebhook(
     },
     now: new Date().toISOString(),
   });
+  // compat が変わった = backend の release 直後に dispatch した retest が緑になり
+  // 得る瞬間。継続 auto-flip は release webhook 1 回きりの判定で、その時点では
+  // 必ず「未検証」を見て blocked に落ちるため、ここで再評価を予約して pending の
+  // Auto-tag ON repo を拾い直す (Refs #507)。KV は書いた直後だと edge cache で
+  // stale を返しうるので、inline ではなく遅延 job で読み直す。best-effort。
+  try {
+    await scheduleContinuousAutoFlipRecheck(env);
+  } catch {
+    // 予約失敗は次の compat report / release / 手動 Flip に委ねる。
+  }
   // compatibility グラフ (tested/untested) が変わった → live 更新。
   await broadcastChange(env);
   return jsonResponse(200, { ok: true, record });
@@ -466,6 +477,12 @@ export async function handlePendingReleaseWebhook(
           outcome: contOutcome,
         }),
       );
+    }
+    // compat gate で止まった = この repo は pending に残る。上の retest dispatch は
+    // まだ走り出したばかりで、この時点の gate は構造的に必ず「未検証」を返すため、
+    // 遅延 recheck を予約して retest 完了後に拾い直す (Refs #507)。
+    if (contOutcome.action === "blocked") {
+      await scheduleContinuousAutoFlipRecheck(env);
     }
   } catch {
     // 継続 auto-flip の失敗は release 報告を妨げない。次の release / 手動 Flip に委ねる。
