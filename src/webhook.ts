@@ -37,8 +37,10 @@ import { refreshReleasesIndex } from "./releases-page";
 import {
   runAutoFlipRecheck,
   runAutoFlipFlip,
+  runContinuousAutoFlipRecheck,
   type AutoFlipRecheckMessage,
   type AutoFlipFlipMessage,
+  type ContinuousAutoFlipRecheckMessage,
 } from "./release-wave/auto-flip";
 import { broadcastChange } from "./release-wave/webhook";
 
@@ -70,7 +72,8 @@ export type QueueMessage =
   | ReleasesIndexRefreshMessage
   | ReleasesIndexKvBackupMessage
   | AutoFlipRecheckMessage
-  | AutoFlipFlipMessage;
+  | AutoFlipFlipMessage
+  | ContinuousAutoFlipRecheckMessage;
 
 // Self-reschedule の重複防止 marker (Refs #337)。60s 遅延 job が既に予約済み
 // なら積み増さない。KV expirationTtl の最小値 60s に合わせる。
@@ -400,6 +403,7 @@ export async function consumeWebhookBatch(
   const kvBackupMessages: Message<QueueMessage>[] = [];
   const autoFlipMessages: Message<QueueMessage>[] = [];
   const autoFlipFlipMessages: Message<QueueMessage>[] = [];
+  const continuousAutoFlipMessages: Message<QueueMessage>[] = [];
   for (const message of batch.messages) {
     if ("kind" in message.body) {
       if (message.body.kind === "releases-index-refresh") {
@@ -410,6 +414,8 @@ export async function consumeWebhookBatch(
         autoFlipMessages.push(message);
       } else if (message.body.kind === "auto-flip-flip") {
         autoFlipFlipMessages.push(message);
+      } else if (message.body.kind === "continuous-auto-flip-recheck") {
+        continuousAutoFlipMessages.push(message);
       } else {
         eventMessages.push(message);
       }
@@ -504,6 +510,36 @@ export async function consumeWebhookBatch(
       }));
     }
     message.ack();
+  }
+
+  // 継続 auto-flip の recheck (Refs #507): compat gate で blocked のまま残った
+  // Auto-tag ON repo を掃き出す。同 batch に複数積まれていても 1 回で足りるので、
+  // 最小の attempt (= chain の一番若い試行) で 1 回だけ走らせて残りは ack で畳む。
+  // best-effort — 失敗しても retry せず ack (次の compat report / release が拾う)。
+  if (continuousAutoFlipMessages.length > 0) {
+    const attempt = Math.min(
+      ...continuousAutoFlipMessages.map(
+        (m) => (m.body as ContinuousAutoFlipRecheckMessage).attempt,
+      ),
+    );
+    try {
+      const outcome = await runContinuousAutoFlipRecheck(env, attempt);
+      console.log(JSON.stringify({
+        msg: "auto-tag-flip",
+        trigger: "queue-recheck",
+        attempt,
+        outcome,
+      }));
+      // flip が実際に走ったら開いている /release-wave を live 更新する。
+      if (outcome.action === "flipped") await broadcastChange(env);
+    } catch (err) {
+      console.log(JSON.stringify({
+        msg: "continuous-auto-flip-recheck-failed",
+        attempts: continuousAutoFlipMessages[0]?.attempts,
+        error: err instanceof Error ? err.message : String(err),
+      }));
+    }
+    for (const m of continuousAutoFlipMessages) m.ack();
   }
 
   if (refreshMessages.length === 0) return;
