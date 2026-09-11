@@ -11,6 +11,7 @@ import {
   handleReleaseWaveFlipGroupRollback,
   handleReleaseWaveTrafficRollback,
   handleReleaseWaveBackendRollback,
+  pendingFlipAllCore,
 } from "../../src/release-wave/api";
 import {
   getPendingRelease,
@@ -1145,6 +1146,101 @@ describe("handleReleaseWavePendingReleaseFlipAll", () => {
       rollback_to: "prior-active-1111",
       rollback_tag: "v0.2.37",
     });
+  });
+});
+
+// ============================================================================
+// pendingFlipAllCore の flip claim (同じ version の重複 dispatch 防止, Refs #509)
+// ============================================================================
+
+describe("pendingFlipAllCore flip claim (Refs #509)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** ReleaseWaveHub の claim RPC だけを持つ in-memory fake。 */
+  function claimHub() {
+    const claims = new Set<string>();
+    return {
+      claimFlips: vi.fn(async (keys: string[]) => {
+        const got = keys.filter((k) => !claims.has(k));
+        for (const k of got) claims.add(k);
+        return got;
+      }),
+      releaseFlipClaims: vi.fn(async (keys: string[]) => {
+        for (const k of keys) claims.delete(k);
+      }),
+    };
+  }
+
+  function envWithHub(compatKv: KVNamespace, hub: object): Env {
+    return {
+      ...pendingFlipEnv(compatKv),
+      RELEASE_WAVE_HUB: { idFromName: () => ({}), get: () => hub },
+    } as unknown as Env;
+  }
+
+  function dispatchCalls(spy: ReturnType<typeof vi.fn>): unknown[][] {
+    return spy.mock.calls.filter((c) => String(c[0]).includes("/dispatches"));
+  }
+
+  it("dispatches once when the inline flip and the sweep read the same pending", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const hub = claimHub();
+    // 2 つの reader がそれぞれ clear 前 (または edge cache で stale) の pending を読んだ状況。
+    const first = await pendingFlipAllCore(
+      envWithHub(pendingKv(), hub),
+      "auto-tag-flip (ippoan/auth-worker)",
+    );
+    const second = await pendingFlipAllCore(
+      envWithHub(pendingKv(), hub),
+      "auto-tag-flip (recheck)",
+    );
+    expect(first).toMatchObject({
+      ok: true,
+      flipped: [{ repo: "ippoan/auth-worker", version_id: PENDING_VID }],
+    });
+    // 全件 claim 済みは DISPATCH_FAILED ではなく no-op (armed の arm を空振りで残さない)。
+    expect(second).toEqual({ ok: true, flipped: [] });
+    expect(dispatchCalls(fetchSpy)).toHaveLength(1);
+  });
+
+  it("releases the claim when dispatch fails so a retry can flip", async () => {
+    const hub = claimHub();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response("boom", { status: 500 })),
+    );
+    const failed = await pendingFlipAllCore(
+      envWithHub(pendingKv(), hub),
+      "auto-tag-flip (recheck)",
+    );
+    expect(failed.ok).toBe(false);
+    expect(hub.releaseFlipClaims).toHaveBeenCalledWith([
+      `ippoan/auth-worker::::${PENDING_VID}`,
+    ]);
+
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const retried = await pendingFlipAllCore(
+      envWithHub(pendingKv(), hub),
+      "auto-tag-flip (recheck)",
+    );
+    expect(retried.ok).toBe(true);
+    expect(dispatchCalls(fetchSpy)).toHaveLength(1);
+  });
+
+  it("fails open and dispatches when the hub is unreachable", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const hub = { claimFlips: vi.fn().mockRejectedValue(new Error("hub down")) };
+    const result = await pendingFlipAllCore(
+      envWithHub(pendingKv(), hub),
+      "auto-tag-flip (recheck)",
+    );
+    expect(result.ok).toBe(true);
+    expect(dispatchCalls(fetchSpy)).toHaveLength(1);
   });
 });
 

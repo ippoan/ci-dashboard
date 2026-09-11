@@ -596,6 +596,59 @@ export type PendingFlipAllResult =
     }
   | { ok: false; code: "KV_NOT_CONFIGURED" | "DISPATCH_FAILED"; error: string };
 
+/** flip claim の単位。同じ (repo, worker, version) への dispatch を 1 本に絞る。 */
+function flipClaimKey(u: UnifiedPending): string {
+  return `${u.repo}::${u.worker_name ?? ""}::${u.version_id}`;
+}
+
+/**
+ * flip 対象のうち ReleaseWaveHub で claim できたものだけを返す (Refs #509)。
+ *
+ * pending-release webhook の inline flip と queue の sweep が同じ pending を
+ * ほぼ同時に読み、両方が dispatch して Release Wave が 2 本走っていた。
+ *
+ * fail-open: DO に届かなければ全件を返す (従来どおり dispatch)。重複は同じ version を
+ * 2 回 100% にするだけだが、flip の取りこぼしは release を止める。
+ */
+async function claimFlipTargets(
+  env: Env,
+  actor: string,
+  unified: UnifiedPending[],
+): Promise<UnifiedPending[]> {
+  let claimed: Set<string>;
+  try {
+    claimed = new Set(
+      await hubStub(env).claimFlips(unified.map(flipClaimKey), Date.now()),
+    );
+  } catch {
+    return unified;
+  }
+  const skipped = unified.filter((u) => !claimed.has(flipClaimKey(u)));
+  if (skipped.length > 0) {
+    console.log(
+      JSON.stringify({
+        msg: "flip-claim-skip",
+        actor,
+        skipped: skipped.map(flipClaimKey),
+      }),
+    );
+  }
+  return unified.filter((u) => claimed.has(flipClaimKey(u)));
+}
+
+/** 着火できなかった flip の claim を外す (best-effort。外せなくても TTL で切れる)。 */
+async function releaseFlipClaims(
+  env: Env,
+  failed: UnifiedPending[],
+): Promise<void> {
+  if (failed.length === 0) return;
+  try {
+    await hubStub(env).releaseFlipClaims(failed.map(flipClaimKey));
+  } catch {
+    // TTL 切れで再び claim できる。
+  }
+}
+
 export async function pendingFlipAllCore(
   env: Env,
   actor: string,
@@ -627,17 +680,26 @@ export async function pendingFlipAllCore(
     return { ok: true, flipped: [] };
   }
 
+  // 同じ version を別経路が既に dispatch していれば外す (Refs #509)。
+  const targets = await claimFlipTargets(env, actor, unified);
+  if (targets.length === 0) return { ok: true, flipped: [] };
+
   // source 別に dispatch を組む:
   //  - traffic (workers): traffic-rollback (wrangler versions deploy <id>@100%)
   //  - pending (cloudrun 等): release-wave-flip (handler が platform routing)
   // 戻し先 (rollback_to) は computeUnifiedPending が traffic:: record から控える
   // (traffic source / pending source どちらも、traffic:: があれば現 active)。
-  const dispatches = unified.map((u) =>
+  const dispatches = targets.map((u) =>
     u.source === "traffic"
       ? buildTrafficRollbackDispatch(u.repo, u.version_id, u.tag, u.worker_name)
       : buildPendingFlipDispatch(unifiedToRecord(u)),
   );
   const results = await dispatchAll(env, dispatches);
+  // 着火できなかった分は claim を外し、次の sweep / 手動 Flip で再試行できるようにする。
+  await releaseFlipClaims(
+    env,
+    targets.filter((_, i) => !results[i]?.ok),
+  );
 
   const items: FlipGroupItem[] = [];
   const flipped: Array<{
@@ -646,8 +708,8 @@ export async function pendingFlipAllCore(
     tag: string | null;
     source: PendingSource;
   }> = [];
-  for (let i = 0; i < unified.length; i++) {
-    const u = unified[i]!;
+  for (let i = 0; i < targets.length; i++) {
+    const u = targets[i]!;
     if (!results[i]?.ok) continue;
     items.push({
       repo: u.repo,
@@ -675,7 +737,7 @@ export async function pendingFlipAllCore(
     return {
       ok: false,
       code: "DISPATCH_FAILED",
-      error: `failed to dispatch flip for all ${unified.length} pending release(s): ${err}`,
+      error: `failed to dispatch flip for all ${targets.length} pending release(s): ${err}`,
     };
   }
 
