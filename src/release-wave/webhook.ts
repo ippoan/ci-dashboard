@@ -478,12 +478,9 @@ export async function handlePendingReleaseWebhook(
         }),
       );
     }
-    // compat gate で止まった = この repo は pending に残る。上の retest dispatch は
-    // まだ走り出したばかりで、この時点の gate は構造的に必ず「未検証」を返すため、
-    // 遅延 recheck を予約して retest 完了後に拾い直す (Refs #507)。
-    if (contOutcome.action === "blocked") {
-      await scheduleContinuousAutoFlipRecheck(env);
-    }
+    // compat gate で止まった (blocked) repo は pending に残る。上の retest dispatch は
+    // まだ走り出したばかりなので、ここでは再評価を予約しない。retest 完了の
+    // frontend-test-report と Hub DO alarm の tick が sweep で拾い直す (Refs #507 / #509)。
   } catch {
     // 継続 auto-flip の失敗は release 報告を妨げない。次の release / 手動 Flip に委ねる。
   }

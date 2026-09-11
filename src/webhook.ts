@@ -512,22 +512,16 @@ export async function consumeWebhookBatch(
     message.ack();
   }
 
-  // 継続 auto-flip の recheck (Refs #507): compat gate で blocked のまま残った
-  // Auto-tag ON repo を掃き出す。同 batch に複数積まれていても 1 回で足りるので、
-  // 最小の attempt (= chain の一番若い試行) で 1 回だけ走らせて残りは ack で畳む。
-  // best-effort — 失敗しても retry せず ack (次の compat report / release が拾う)。
+  // 継続 auto-flip の recheck (Refs #507 / #509): compat 更新と Hub DO alarm の tick が
+  // 予約した sweep で、pending に残った Auto-tag ON repo を掃き出す。同 batch に複数
+  // 積まれていても 1 回で足りるので 1 回だけ走らせて残りは ack で畳む。
+  // best-effort — 失敗しても retry せず ack (次の tick が拾う)。
   if (continuousAutoFlipMessages.length > 0) {
-    const attempt = Math.min(
-      ...continuousAutoFlipMessages.map(
-        (m) => (m.body as ContinuousAutoFlipRecheckMessage).attempt,
-      ),
-    );
     try {
-      const outcome = await runContinuousAutoFlipRecheck(env, attempt);
+      const outcome = await runContinuousAutoFlipRecheck(env);
       console.log(JSON.stringify({
         msg: "auto-tag-flip",
         trigger: "queue-recheck",
-        attempt,
         outcome,
       }));
       // flip が実際に走ったら開いている /release-wave を live 更新する。

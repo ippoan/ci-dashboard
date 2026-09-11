@@ -627,7 +627,7 @@ describe("handlePendingReleaseWebhook → runContinuousAutoFlip wiring", () => {
   // Refs #507: blocked を拾い直す遅延 recheck の予約
   // --------------------------------------------------------------------------
 
-  it("compat gate が赤で blocked のとき、継続 auto-flip の recheck を予約する (Refs #507)", async () => {
+  it("compat gate が赤で blocked でも、ここでは recheck を予約しない (retest 完了と Hub alarm の tick が拾う、Refs #509)", async () => {
     const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetchSpy);
     const kv = memKv(RED_COMPAT_SEED);
@@ -644,10 +644,8 @@ describe("handlePendingReleaseWebhook → runContinuousAutoFlip wiring", () => {
       env,
     );
     expect(resp.status).toBe(200);
-    expect(send).toHaveBeenCalledWith(
-      { kind: "continuous-auto-flip-recheck", attempt: 1 },
-      expect.objectContaining({ delaySeconds: expect.any(Number) }),
-    );
+    const kinds = send.mock.calls.map((c) => (c[0] as { kind?: string }).kind);
+    expect(kinds).not.toContain("continuous-auto-flip-recheck");
   });
 
   it("flip できたときは recheck を予約しない (Refs #507)", async () => {
@@ -703,7 +701,7 @@ describe("handleFrontendTestReportWebhook → continuous auto-flip recheck (Refs
     );
     expect(resp.status).toBe(200);
     expect(send).toHaveBeenCalledWith(
-      { kind: "continuous-auto-flip-recheck", attempt: 1 },
+      { kind: "continuous-auto-flip-recheck" },
       expect.objectContaining({ delaySeconds: expect.any(Number) }),
     );
   });
