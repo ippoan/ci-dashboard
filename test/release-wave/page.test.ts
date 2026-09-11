@@ -39,9 +39,12 @@ function fakeEnv(opts: {
     | { ok: true; data: WaveState }
     | { ok: false; code: string; error: string };
   compatKv?: KVNamespace;
+  /** ReleaseWaveHub.listFlipClaims の戻り値 (Refs #509)。 */
+  flipClaims?: Record<string, number>;
 }): Env {
   const hub = {
     list: vi.fn().mockResolvedValue(opts.listReturn ?? []),
+    listFlipClaims: vi.fn().mockResolvedValue(opts.flipClaims ?? {}),
     get: vi.fn().mockResolvedValue(
       opts.getReturn ?? {
         ok: false,
@@ -1384,6 +1387,91 @@ describe("handleReleaseWaveDetailPage compatibility section", () => {
 // ============================================================================
 // global compat section overlay: staged previews + flip + node link (Refs #174)
 // ============================================================================
+
+// ============================================================================
+// Pending releases の「flip 送信済み」目印 (Refs #509)
+// ============================================================================
+
+describe("handleReleaseWaveListPage flip claim marker (Refs #509)", () => {
+  const VID = "530b908c-5385-451c-b163-747caaedafd3";
+  const pendingSeed = {
+    "pending-release::ippoan/auth-worker": {
+      schema_version: 1,
+      repo: "ippoan/auth-worker",
+      version_id: VID,
+      tag: "v0.2.214",
+      preview_url: null,
+      uploaded_at: "2026-09-11T08:20:00Z",
+    },
+  };
+
+  it("claim がある行に送信時刻の目印を出し、Flip ボタンは残す", async () => {
+    const env = fakeEnv({
+      compatKv: memKv(pendingSeed),
+      flipClaims: {
+        [`ippoan/auth-worker::::${VID}`]: Date.parse("2026-09-11T08:20:02.539Z"),
+      },
+    });
+    const html = await (await handleReleaseWaveListPage(env)).text();
+    expect(html).toContain("⏳ flip 送信済み 08:20:02 UTC");
+    expect(html).toContain("Flip to 100%");
+  });
+
+  it("claim が無い行には目印を出さない", async () => {
+    const env = fakeEnv({ compatKv: memKv(pendingSeed) });
+    const html = await (await handleReleaseWaveListPage(env)).text();
+    expect(html).toContain("Flip to 100%");
+    expect(html).not.toContain("flip 送信済み");
+  });
+
+  it("claim 表を読めなくてもページを描画する (目印なし)", async () => {
+    const env = fakeEnv({ compatKv: memKv(pendingSeed) });
+    (env as unknown as { RELEASE_WAVE_HUB: unknown }).RELEASE_WAVE_HUB = {
+      idFromName: () => ({}),
+      get: () => ({
+        list: vi.fn().mockResolvedValue([]),
+        listFlipClaims: vi.fn().mockRejectedValue(new Error("hub down")),
+      }),
+    };
+    const resp = await handleReleaseWaveListPage(env);
+    expect(resp.status).toBe(200);
+    const html = await resp.text();
+    expect(html).toContain("Flip to 100%");
+    expect(html).not.toContain("flip 送信済み");
+  });
+
+  it("直近の一括 flip の actor が auto- なら「自動」と出す", async () => {
+    const group = (actor: string) => ({
+      "flip-group::latest": {
+        schema_version: 1,
+        flipped_at: "2026-09-11T08:20:02.539Z",
+        actor,
+        items: [
+          {
+            repo: "ippoan/auth-worker",
+            worker_name: null,
+            flipped_version_id: VID,
+            flipped_tag: "v0.2.214",
+            rollback_to: "prev-vid",
+            rollback_tag: "v0.2.213",
+          },
+        ],
+      },
+    });
+    const auto = await (
+      await handleReleaseWaveListPage(
+        fakeEnv({ compatKv: memKv(group("auto-tag-flip (ippoan/auth-worker)")) }),
+      )
+    ).text();
+    expect(auto).toContain("🤖 自動");
+    const manual = await (
+      await handleReleaseWaveListPage(
+        fakeEnv({ compatKv: memKv(group("ops@example.com")) }),
+      )
+    ).text();
+    expect(manual).not.toContain("🤖 自動");
+  });
+});
 
 describe("handleReleaseWaveListPage global compat overlay", () => {
   const compatSeed = {

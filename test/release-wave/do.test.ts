@@ -56,6 +56,19 @@ describe("ReleaseWaveHub flip claims (Refs #509)", () => {
       expect(await i.claimFlips(["a", "b"], 2_000)).toEqual(["a"]);
     });
   });
+
+  it("listFlipClaims returns only claims within the TTL", async () => {
+    const hub = freshHub();
+    await runInDurableObject(hub, async (i) => {
+      await i.claimFlips(["a"], 1_000);
+      await i.claimFlips(["b"], 2_000);
+      expect(await i.listFlipClaims(1_000 + FLIP_CLAIM_TTL_MS - 1)).toEqual({
+        a: 1_000,
+        b: 2_000,
+      });
+      expect(await i.listFlipClaims(1_000 + FLIP_CLAIM_TTL_MS)).toEqual({ b: 2_000 });
+    });
+  });
 });
 
 describe("ReleaseWaveHub.start", () => {

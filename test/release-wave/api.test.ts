@@ -12,6 +12,7 @@ import {
   handleReleaseWaveTrafficRollback,
   handleReleaseWaveBackendRollback,
   pendingFlipAllCore,
+  pendingFlipCore,
 } from "../../src/release-wave/api";
 import {
   getPendingRelease,
@@ -1241,6 +1242,21 @@ describe("pendingFlipAllCore flip claim (Refs #509)", () => {
     );
     expect(result.ok).toBe(true);
     expect(dispatchCalls(fetchSpy)).toHaveLength(1);
+  });
+
+  it("does not gate the single pendingFlipCore (escape hatch to re-flip the same version)", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const hub = claimHub();
+    // 同じ version が既に claim 済みでも、単発 Flip は claim を見ずに dispatch する。
+    await hub.claimFlips([`ippoan/auth-worker::::${PENDING_VID}`]);
+    const result = await pendingFlipCore(
+      envWithHub(pendingKv(), hub),
+      "ippoan/auth-worker",
+    );
+    expect(result.ok).toBe(true);
+    expect(dispatchCalls(fetchSpy)).toHaveLength(1);
+    expect(hub.claimFlips).toHaveBeenCalledTimes(1);
   });
 });
 

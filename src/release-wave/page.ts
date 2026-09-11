@@ -24,6 +24,7 @@ import {
 import {
   listPendingReleases,
   getFlipGroup,
+  flipClaimKey,
   computeUnifiedPending,
   type PendingReleaseRecord,
   type FlipGroupRecord,
@@ -456,6 +457,15 @@ function renderFrontendSection(
 
 export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
   const waves = (await hubStub(env).list()) as WaveState[];
+  // flip 送信済みの pending 行に目印を出すための claim 表 (Refs #509)。KV の
+  // pending clear / flip-group は edge で最大 60s 遅れて見えるので、強整合の DO を読む。
+  // 読めなければ目印を出さないだけ (fail-soft)。
+  let flipClaims: Record<string, number> = {};
+  try {
+    flipClaims = await hubStub(env).listFlipClaims(Date.now());
+  } catch {
+    flipClaims = {};
+  }
 
   // 全 backend:: record に対する wave 非依存の compatibility 俯瞰グラフ。
   // 個別 wave に入っていない既 deploy frontend (consumer) も含めて、現
@@ -593,6 +603,7 @@ export async function handleReleaseWaveListPage(env: Env): Promise<Response> {
   const pendingReleaseSection = renderPendingReleaseSection(
     unifiedPending,
     flipGroup,
+    flipClaims,
   );
 
   // frontend (repo) 単位の追跡セクション。wave 中心の一覧テーブルは廃止し、
@@ -896,9 +907,17 @@ export async function handleReleaseWaveDetailPage(
 function renderPendingReleaseSection(
   records: UnifiedPending[],
   flipGroup: FlipGroupRecord | null,
+  flipClaims: Record<string, number>,
 ): string {
   const rows = records
     .map((r) => {
+      // 自動 flip / 一括 Flip / MCP のどれかが dispatch 済みなら、手動 Flip の手前で
+      // 分かるようにする (Refs #509)。KV の pending clear が見えるまで行は残るため。
+      const claimedAt = flipClaims[flipClaimKey(r)];
+      const claimBadge =
+        claimedAt === undefined
+          ? ""
+          : `<span class="meta" title="この version の flip を送信済み (自動 flip / 一括 Flip / MCP のいずれか)。結果は Release Wave の run で確認してください。dispatch に失敗した場合は目印が消えます。">⏳ flip 送信済み ${new Date(claimedAt).toISOString().slice(11, 19)} UTC</span> `;
       const safe = safeHttpUrl(r.preview_url);
       const previewCell = safe
         ? `<a href="${escapeHtml(safe)}" target="_blank" rel="noopener noreferrer">preview</a>`
@@ -948,7 +967,7 @@ function renderPendingReleaseSection(
           <td class="meta" title="${escapeHtml(r.version_id)}">${escapeHtml(shortVid)}…</td>
           <td>${previewCell}</td>
           <td class="meta">${escapeHtml(r.uploaded_at)}</td>
-          <td class="actions">${flipForm}</td>
+          <td class="actions">${claimBadge}${flipForm}</td>
         </tr>`;
     })
     .join("");
@@ -1087,7 +1106,7 @@ function renderFlipGroupRollback(flipGroup: FlipGroupRecord | null): string {
   return `
     <div class="subsection" style="margin-top:12px;border-top:1px solid #2a2a2a;padding-top:10px">
       <h3 style="margin:0 0 4px 0;font-size:0.95em">直近の一括 flip
-        <span class="meta">(${escapeHtml(flipGroup.flipped_at)} by ${escapeHtml(flipGroup.actor)})</span>
+        <span class="meta">(${flipGroup.actor.startsWith("auto-") ? "🤖 自動 " : ""}${escapeHtml(flipGroup.flipped_at)} by ${escapeHtml(flipGroup.actor)})</span>
       </h3>
       <ul class="meta" style="margin:4px 0">${repoList}</ul>
       ${btn}
