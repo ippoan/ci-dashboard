@@ -46,6 +46,14 @@ function waveKey(wave_id: string): string {
 /** auto-flip armed record (最新 1 件のみ、Refs #490)。 */
 const AUTO_FLIP_ARM_KEY = "auto-flip:arm";
 
+/** flip dispatch の claim 表 (claim key → claimed_at ms、Refs #509)。 */
+const FLIP_CLAIMS_KEY = "flip-claims";
+
+/** flip claim の有効期間。「flip 済み」の信号である pending-release の KV delete が
+ *  edge で stale に読める窓 (最大 60s) と、inline flip と queue sweep の着地のずれを
+ *  跨げれば足りる。これを過ぎた同じ version の flip は再び通す。 */
+export const FLIP_CLAIM_TTL_MS = 5 * 60 * 1000;
+
 // ----------------------------------------------------------------------------
 // RPC input / output shapes
 // ----------------------------------------------------------------------------
@@ -393,6 +401,41 @@ export class ReleaseWaveHub extends DurableObject<Env> {
   async deleteAutoFlipArm(): Promise<void> {
     await this.ctx.storage.delete(AUTO_FLIP_ARM_KEY);
     this.broadcast();
+  }
+
+  // ============ flip dispatch claim (Refs #509) ======================
+  //
+  // pendingFlipAllCore の呼び手 (pending-release の inline flip / queue の sweep /
+  // armed / 手動 flip-all) が同じ pending を同時に読むと、同じ version の
+  // Release Wave が 2 本走る。「flip 済み」の信号は dispatch 後の KV delete しか
+  // 無く、edge cache で最大 60s stale に読めるため KV では防げない。singleton DO の
+  // storage で check-and-set する。get→put の間に外部 I/O を await しないこと
+  // (直列化を input gate に頼っている)。
+
+  /** keys のうち TTL 内に claim されていないものを claim し、claim できた key を返す。 */
+  async claimFlips(keys: string[], nowMs: number): Promise<string[]> {
+    const stored =
+      (await this.ctx.storage.get<Record<string, number>>(FLIP_CLAIMS_KEY)) ?? {};
+    const next: Record<string, number> = {};
+    for (const [k, at] of Object.entries(stored)) {
+      if (nowMs - at < FLIP_CLAIM_TTL_MS) next[k] = at;
+    }
+    const claimed: string[] = [];
+    for (const k of keys) {
+      if (k in next) continue;
+      next[k] = nowMs;
+      claimed.push(k);
+    }
+    await this.ctx.storage.put(FLIP_CLAIMS_KEY, next);
+    return claimed;
+  }
+
+  /** dispatch に失敗した flip の claim を外す (再試行を TTL まで塞がないため)。 */
+  async releaseFlipClaims(keys: string[]): Promise<void> {
+    const stored =
+      (await this.ctx.storage.get<Record<string, number>>(FLIP_CLAIMS_KEY)) ?? {};
+    for (const k of keys) delete stored[k];
+    await this.ctx.storage.put(FLIP_CLAIMS_KEY, stored);
   }
 
   // ============ private helpers ====================================

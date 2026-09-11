@@ -1,6 +1,6 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
-import type { ReleaseWaveHub } from "../../src/release-wave/do";
+import { FLIP_CLAIM_TTL_MS, type ReleaseWaveHub } from "../../src/release-wave/do";
 import {
   recordBackendDeploy,
   recordFrontendTest,
@@ -22,6 +22,41 @@ const REPOS = [
   { repo: "ippoan/rust-alc-api", target_tag: "v1.1.0", head_sha: "sha-a" },
   { repo: "ippoan/auth-worker", target_tag: "v0.5.0", head_sha: "sha-b" },
 ];
+
+describe("ReleaseWaveHub flip claims (Refs #509)", () => {
+  it("claims a key only once within the TTL", async () => {
+    const hub = freshHub();
+    await runInDurableObject(hub, async (i) => {
+      expect(await i.claimFlips(["a", "b"], 1_000)).toEqual(["a", "b"]);
+      expect(await i.claimFlips(["a", "c"], 2_000)).toEqual(["c"]);
+    });
+  });
+
+  it("claims a key repeated in one call only once", async () => {
+    const hub = freshHub();
+    await runInDurableObject(hub, async (i) => {
+      expect(await i.claimFlips(["a", "a"], 1_000)).toEqual(["a"]);
+    });
+  });
+
+  it("lets the same key be claimed again once the TTL has passed", async () => {
+    const hub = freshHub();
+    await runInDurableObject(hub, async (i) => {
+      await i.claimFlips(["a"], 1_000);
+      expect(await i.claimFlips(["a"], 1_000 + FLIP_CLAIM_TTL_MS - 1)).toEqual([]);
+      expect(await i.claimFlips(["a"], 1_000 + FLIP_CLAIM_TTL_MS)).toEqual(["a"]);
+    });
+  });
+
+  it("releaseFlipClaims lets a failed flip be claimed again", async () => {
+    const hub = freshHub();
+    await runInDurableObject(hub, async (i) => {
+      await i.claimFlips(["a", "b"], 1_000);
+      await i.releaseFlipClaims(["a"]);
+      expect(await i.claimFlips(["a", "b"], 2_000)).toEqual(["a"]);
+    });
+  });
+});
 
 describe("ReleaseWaveHub.start", () => {
   it("creates a new wave", async () => {
