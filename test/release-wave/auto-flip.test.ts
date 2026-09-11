@@ -714,6 +714,40 @@ describe("runContinuousAutoFlipRecheck (Refs #507 / #509)", () => {
     expect(out).toEqual({ action: "flipped", repos: ["ippoan/rust-alc-api"] });
     expect(send).not.toHaveBeenCalled();
   });
+
+  it("tick の sweep と pending-release の inline flip が重なっても dispatch は 1 回 (Refs #509)", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    // ReleaseWaveHub の claim RPC だけを持つ fake。これが無いと fail-open で 2 本とも出る。
+    const claims = new Set<string>();
+    const hub = {
+      claimFlips: async (keys: string[]) => {
+        const got = keys.filter((k) => !claims.has(k));
+        for (const k of got) claims.add(k);
+        return got;
+      },
+      releaseFlipClaims: async () => {},
+    };
+    const rec = pending(
+      "ippoan/rust-alc-api",
+      "v0.0.144",
+    ) as unknown as PendingReleaseRecord;
+    const env = {
+      ...(envWithAutoTag(
+        memKv({ "pending-release::ippoan/rust-alc-api": rec }),
+        ["ippoan/rust-alc-api"],
+      ) as unknown as Record<string, unknown>),
+      RELEASE_WAVE_HUB: { idFromName: () => ({}), get: () => hub },
+    } as unknown as Env;
+    await Promise.all([
+      runContinuousAutoFlip(env, rec),
+      runContinuousAutoFlipRecheck(env),
+    ]);
+    const dispatches = fetchSpy.mock.calls.filter((c) =>
+      String(c[0]).includes("/dispatches"),
+    );
+    expect(dispatches).toHaveLength(1);
+  });
 });
 
 describe("enqueueAutoFlipFlip (Refs #485)", () => {
