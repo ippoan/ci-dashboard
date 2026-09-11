@@ -247,6 +247,12 @@ export interface UnifiedPending {
   rollback_tag: string | null;
 }
 
+/** flip claim (ReleaseWaveHub、Refs #509) の単位。同じ (repo, worker, version) への
+ *  dispatch を 1 本に絞る key で、一覧の「flip 送信済み」表示も同じ key で引く。 */
+export function flipClaimKey(u: UnifiedPending): string {
+  return `${u.repo}::${u.worker_name ?? ""}::${u.version_id}`;
+}
+
 /**
  * traffic record から「flip 待ちの最新 no-traffic version」を返す。
  * = 0% かつ現 active より新しい version の最新 1 件 (renderTrafficVersionsBlock の

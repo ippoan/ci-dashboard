@@ -438,6 +438,18 @@ export class ReleaseWaveHub extends DurableObject<Env> {
     await this.ctx.storage.put(FLIP_CLAIMS_KEY, stored);
   }
 
+  /** TTL 内の claim (key → claimed_at ms) を返す。/release-wave の「flip 送信済み」
+   *  表示用 (KV の pending clear は edge で最大 60s 遅れて見えるため)。read-only。 */
+  async listFlipClaims(nowMs: number): Promise<Record<string, number>> {
+    const stored =
+      (await this.ctx.storage.get<Record<string, number>>(FLIP_CLAIMS_KEY)) ?? {};
+    const live: Record<string, number> = {};
+    for (const [k, at] of Object.entries(stored)) {
+      if (nowMs - at < FLIP_CLAIM_TTL_MS) live[k] = at;
+    }
+    return live;
+  }
+
   // ============ private helpers ====================================
 
   /**

@@ -31,6 +31,7 @@ import {
   type PendingReleaseRecord,
   type FlipGroupItem,
   type UnifiedPending,
+  flipClaimKey,
   type PendingSource,
 } from "./pending-release";
 import {
@@ -483,6 +484,8 @@ export type PendingFlipResult =
       error: string;
     };
 
+// 単発 Flip には flip claim (Refs #509) を掛けない。手動 / MCP の明示操作で、rollback 後に
+// 同じ version を再 flip する逃げ道として残す (重複は自動経路の同時着地でしか起きていない)。
 export async function pendingFlipCore(
   env: Env,
   repo: string,
@@ -595,11 +598,6 @@ export type PendingFlipAllResult =
       }>;
     }
   | { ok: false; code: "KV_NOT_CONFIGURED" | "DISPATCH_FAILED"; error: string };
-
-/** flip claim の単位。同じ (repo, worker, version) への dispatch を 1 本に絞る。 */
-function flipClaimKey(u: UnifiedPending): string {
-  return `${u.repo}::${u.worker_name ?? ""}::${u.version_id}`;
-}
 
 /**
  * flip 対象のうち ReleaseWaveHub で claim できたものだけを返す (Refs #509)。
