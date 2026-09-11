@@ -336,9 +336,9 @@ export type ContinuousAutoFlipOutcome =
  * (COMPAT_KV 未 bind) でも fail-closed でスキップする** — armed は operator が
  * 明示的にボタンを押す確認ステップを経ているが、こちらは release の度に完全
  * 無人で発火するため、gate をかけられない状況で自動的に traffic を切り替えない
- * 方を安全側とする。gate で `blocked` を返した release は呼び出し側
- * (pending-release webhook) が `scheduleContinuousAutoFlipRecheck` で再評価を
- * 予約する (Refs #507) — 自分の release 直後は同 webhook 内で dispatch した
+ * 方を安全側とする。gate で `blocked` を返した release は、retest 完了時の compat
+ * 更新 (frontend-test-report) と Hub DO alarm の定期 tick が `sweepContinuousAutoFlip`
+ * で拾い直す (Refs #507 / #509) — 自分の release 直後は同 webhook 内で dispatch した
  * retest がまだ終わっておらず gate が必ず「未検証」を返すため、1 回きりの判定
  * だと backend が永久に pending に留まる。
  */
@@ -389,7 +389,8 @@ export type ContinuousAutoFlipSweepOutcome =
  * そこで release 単体ではなく「pending × auto-tag」の集合を対象に、gate を引き直して
  * 通っていれば flip する掃き出しを用意する。呼ばれる契機は 2 つ:
  *  - compat が更新された時 (frontend test report webhook = retest 完了)
- *  - 継続 auto-flip が blocked を返した時の遅延 recheck (下の chain)
+ *  - Hub DO alarm の定期 tick (10 分毎。blocked の残り / Hub 不達で auto-tag 判定が
+ *    落ちた release / dispatch 失敗の受け皿、Refs #509)
  *
  * `runContinuousAutoFlip` と同じく fail-closed (COMPAT_KV / CI_HUB 未 bind ならしない)
  * で、flip 対象は tag 付き pending のみ (`pendingFlipAllCore` の既存 gate)。
@@ -424,63 +425,52 @@ export async function sweepContinuousAutoFlip(
 
 /** 継続 auto-flip 用 recheck message (Refs #507)。armed バッチの
  *  `auto-flip-recheck` (#481) とは別 kind・別 marker にする — 共有すると
- *  「chain は 1 本」の dedup が互いを潰し合い、armed 中は継続側の再評価が、
- *  継続側の chain 中は armed の再評価が予約できなくなる。 */
+ *  「予約は 1 本」の dedup が互いを潰し合い、armed 中は継続側の再評価が、
+ *  継続側の予約中は armed の再評価が予約できなくなる。 */
 export interface ContinuousAutoFlipRecheckMessage {
   kind: "continuous-auto-flip-recheck";
-  /** 1 起点の試行回数。上限を超えたら chain を打ち切る。 */
-  attempt: number;
 }
 
 /** 継続 auto-flip recheck の遅延 (秒)。armed 側と同じく KV list の結果キャッシュ
  *  (最大 60s) を跨いで読み直すため。 */
 export const CONTINUOUS_AUTO_FLIP_RECHECK_DELAY_SECONDS = 60;
 
-/** chain の上限。retest 完了そのものは compat webhook 側が拾うので、この chain は
- *  「KV cache 窓 + 相前後して届く兄弟 report」を跨げれば足りる。無限ループにせず
- *  ここで打ち切り、以降は次の release / compat report / 手動 Flip に委ねる。 */
-export const CONTINUOUS_AUTO_FLIP_RECHECK_MAX_ATTEMPTS = 5;
-
 /** 重複予約防止 marker (armed 側の AUTO_FLIP_RECHECK_MARKER とは別キー)。 */
 const CONTINUOUS_AUTO_FLIP_RECHECK_MARKER = "auto-tag-flip::recheck-scheduled";
 
 /**
- * 継続 auto-flip の遅延再評価を 1 本だけ予約する (Refs #507)。marker で dedup し、
- * 同時に走る chain は 1 本に保つ (`scheduleAutoFlipRecheck` と同方式、キーのみ別)。
- * queue binding が無い環境 (dev / test) は no-op — その場合は webhook 駆動のみ。
+ * 継続 auto-flip の sweep を 1 本だけ遅延予約する (Refs #507 / #509)。marker で dedup し、
+ * 同時に積まれる予約は 1 本に保つ (`scheduleAutoFlipRecheck` と同方式、キーのみ別)。
+ * 呼び手は compat 更新 (frontend-test-report = retest 完了への即応) と Hub DO alarm の
+ * 10 分 tick (取りこぼしの受け皿)。queue binding が無い環境 (dev / test) は no-op。
  *
  * 「予約に値するか」の事前判定はしない: pending × auto-tag の交差を見るには結局
- * sweep と同じ KV list が要る一方、契機 (compat report / blocked) は日に数回程度で、
- * 空振りの sweep は KV read 数回で畳まれる。marker で 60s に 1 本へ絞れば十分安い。
+ * sweep と同じ KV list が要る一方、空振りの sweep は KV read 数回で畳まれる。
  */
-export async function scheduleContinuousAutoFlipRecheck(
-  env: Env,
-  attempt = 1,
-): Promise<void> {
+export async function scheduleContinuousAutoFlipRecheck(env: Env): Promise<void> {
   if (!env.WEBHOOK_QUEUE || !env.COMPAT_KV) return;
-  if (attempt > CONTINUOUS_AUTO_FLIP_RECHECK_MAX_ATTEMPTS) return;
   if (await env.COMPAT_KV.get(CONTINUOUS_AUTO_FLIP_RECHECK_MARKER)) return;
   await env.COMPAT_KV.put(CONTINUOUS_AUTO_FLIP_RECHECK_MARKER, "1", {
     expirationTtl: KV_MIN_TTL_SECONDS,
   });
   try {
     await env.WEBHOOK_QUEUE.send(
-      { kind: "continuous-auto-flip-recheck", attempt },
+      { kind: "continuous-auto-flip-recheck" },
       { delaySeconds: CONTINUOUS_AUTO_FLIP_RECHECK_DELAY_SECONDS },
     );
   } catch {
-    // 送信失敗は次の compat report / release に委ねる (marker は TTL で消える)。
+    // 送信失敗は次の tick に委ねる (marker は TTL で消える)。
   }
 }
 
 /**
- * `continuous-auto-flip-recheck` queue job の本体。sweep を実行し、まだ gate で
- * blocked (= flip 待ちの auto-tag repo が残っている) なら次の tick を予約する。
- * flip 済み / 対象なしなら chain は止まる。best-effort — 例外は握り潰す。
+ * `continuous-auto-flip-recheck` queue job の本体。sweep を 1 回実行する。blocked /
+ * flip_failed でも自分では再予約しない — Hub DO alarm の tick が拾い直す (以前の
+ * 60 秒 × 最大 5 回の chain は、打ち切り後に誰も拾わなかった、Refs #509)。
+ * best-effort — 例外は flip_failed に畳む。
  */
 export async function runContinuousAutoFlipRecheck(
   env: Env,
-  attempt: number,
 ): Promise<ContinuousAutoFlipSweepOutcome> {
   // このジョブを消化した = 次の予約を許可する (marker TTL 待ちにしない)。
   if (env.COMPAT_KV) {
@@ -490,23 +480,14 @@ export async function runContinuousAutoFlipRecheck(
       // marker 削除失敗は TTL 消滅に委ねる。
     }
   }
-  let outcome: ContinuousAutoFlipSweepOutcome;
   try {
-    outcome = await sweepContinuousAutoFlip(env);
+    return await sweepContinuousAutoFlip(env);
   } catch (e) {
-    outcome = {
+    return {
       action: "flip_failed",
       error: e instanceof Error ? e.message : String(e),
     };
   }
-  if (outcome.action === "blocked") {
-    try {
-      await scheduleContinuousAutoFlipRecheck(env, attempt + 1);
-    } catch {
-      // 次の compat report / release が拾う。
-    }
-  }
-  return outcome;
 }
 
 // ----------------------------------------------------------------------------

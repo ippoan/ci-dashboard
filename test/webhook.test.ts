@@ -1891,10 +1891,10 @@ describe("consumeWebhookBatch — continuous-auto-flip-recheck routing (Refs #50
     },
   };
 
-  function continuousBatch(acked: string[], attempt: number) {
+  function continuousBatch(acked: string[]) {
     return {
       messages: [{
-        body: { kind: "continuous-auto-flip-recheck", attempt },
+        body: { kind: "continuous-auto-flip-recheck" },
         attempts: 1,
         ack: () => acked.push("caf"),
         retry: () => { throw new Error("should not retry"); },
@@ -1902,9 +1902,10 @@ describe("consumeWebhookBatch — continuous-auto-flip-recheck routing (Refs #50
     } as unknown as MessageBatch<import("../src/webhook").QueueMessage>;
   }
 
-  it("continuous-auto-flip-recheck を sweep に振り分けて ack し、まだ blocked なら次の attempt を予約する", async () => {
+  it("continuous-auto-flip-recheck を sweep に振り分けて ack し、blocked でも再予約しない (Hub alarm の tick に委ねる)", async () => {
     // compat gate が赤 (frontend が古い image しか test していない) + pending は
-    // auto-tag ON の backend。= sweep は blocked → chain 継続。
+    // auto-tag ON の backend。= sweep は blocked。chain は廃止したので次は tick が拾う。
+    const logSpy = vi.spyOn(console, "log");
     await env.COMPAT_KV.put("backend::ippoan/rust-alc-api", JSON.stringify({
       schema_version: 1, repo: "ippoan/rust-alc-api", current_image: "cur-img",
       deployed_at: "2026-07-13T00:00:00Z", deployed_by: "x", wave_id: null,
@@ -1931,15 +1932,19 @@ describe("consumeWebhookBatch — continuous-auto-flip-recheck routing (Refs #50
     } as unknown as Env;
     const acked: string[] = [];
 
-    await consumeWebhookBatch(continuousBatch(acked, 1), queueEnv);
+    await consumeWebhookBatch(continuousBatch(acked), queueEnv);
 
     expect(acked).toEqual(["caf"]);
-    expect(sent).toHaveLength(1);
-    expect(sent[0].msg).toEqual({ kind: "continuous-auto-flip-recheck", attempt: 2 });
-    expect(sent[0].opts).toEqual({ delaySeconds: 60 });
+    expect(sent).toEqual([]);
+    const logged = logSpy.mock.calls.map((c) => String(c[0]));
+    expect(
+      logged.some(
+        (l) => l.includes('"trigger":"queue-recheck"') && l.includes('"action":"blocked"'),
+      ),
+    ).toBe(true);
   });
 
-  it("flip 対象が無ければ ack だけして chain を止める", async () => {
+  it("flip 対象が無ければ ack だけする", async () => {
     const sent: Array<{ msg: unknown }> = [];
     const queueEnv = {
       ...testEnv(),
@@ -1949,7 +1954,7 @@ describe("consumeWebhookBatch — continuous-auto-flip-recheck routing (Refs #50
     } as unknown as Env;
     const acked: string[] = [];
 
-    await consumeWebhookBatch(continuousBatch(acked, 1), queueEnv);
+    await consumeWebhookBatch(continuousBatch(acked), queueEnv);
 
     expect(acked).toEqual(["caf"]);
     expect(sent).toEqual([]);

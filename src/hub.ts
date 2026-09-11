@@ -308,6 +308,19 @@ export class CIDashboardHub extends DurableObject<Env> {
         err: err instanceof Error ? err.message : String(err),
       });
     }
+    // 継続 auto-flip の取りこぼしの受け皿 (Refs #509)。retest 完了後も残った
+    // blocked / Hub 不達で auto-tag 判定が落ちた release / dispatch 失敗を、経路
+    // ごとの recheck ではなくこの定期 sweep 1 本で拾い直す。予約は marker で dedup。
+    try {
+      const { scheduleContinuousAutoFlipRecheck } = await import(
+        "./release-wave/auto-flip"
+      );
+      await scheduleContinuousAutoFlipRecheck(this.env);
+    } catch (err) {
+      console.warn("hub alarm scheduleContinuousAutoFlipRecheck failed", {
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
     // 次の tick を必ず chain する。失敗時も chain しないと recheck が永久停止する。
     await this.ctx.storage.setAlarm(Date.now() + STALE_RECHECK_ALARM_MS);
   }

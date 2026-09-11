@@ -18,7 +18,6 @@ import {
   scheduleContinuousAutoFlipRecheck,
   runContinuousAutoFlipRecheck,
   CONTINUOUS_AUTO_FLIP_RECHECK_DELAY_SECONDS,
-  CONTINUOUS_AUTO_FLIP_RECHECK_MAX_ATTEMPTS,
   type AutoFlipArmRecord,
 } from "../../src/release-wave/auto-flip";
 import type { PendingReleaseRecord } from "../../src/release-wave/pending-release";
@@ -647,7 +646,6 @@ describe("scheduleContinuousAutoFlipRecheck (Refs #507)", () => {
     expect(send).toHaveBeenCalledOnce();
     expect(send.mock.calls[0][0]).toEqual({
       kind: "continuous-auto-flip-recheck",
-      attempt: 1,
     });
     expect(send.mock.calls[0][1]).toEqual({
       delaySeconds: CONTINUOUS_AUTO_FLIP_RECHECK_DELAY_SECONDS,
@@ -676,16 +674,6 @@ describe("scheduleContinuousAutoFlipRecheck (Refs #507)", () => {
     expect(await kv.get("auto-flip::recheck-scheduled")).not.toBeNull();
   });
 
-  it("上限を超えた attempt は予約しない (chain 打ち切り)", async () => {
-    const send = vi.fn().mockResolvedValue(undefined);
-    const env = envWithAutoTagQueue(memKv(), ["ippoan/a"], send);
-    await scheduleContinuousAutoFlipRecheck(
-      env,
-      CONTINUOUS_AUTO_FLIP_RECHECK_MAX_ATTEMPTS + 1,
-    );
-    expect(send).not.toHaveBeenCalled();
-  });
-
   it("queue binding が無い環境では no-op", async () => {
     const kv = memKv();
     const env = envWithAutoTagQueue(kv, ["ippoan/a"]);
@@ -694,10 +682,10 @@ describe("scheduleContinuousAutoFlipRecheck (Refs #507)", () => {
   });
 });
 
-describe("runContinuousAutoFlipRecheck (Refs #507)", () => {
+describe("runContinuousAutoFlipRecheck (Refs #507 / #509)", () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it("まだ blocked なら marker を消して次の attempt を予約する", async () => {
+  it("blocked でも自分では再予約せず (Hub alarm の tick に委ねる)、marker は消す", async () => {
     const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetchSpy);
     const send = vi.fn().mockResolvedValue(undefined);
@@ -707,43 +695,23 @@ describe("runContinuousAutoFlipRecheck (Refs #507)", () => {
       "auto-tag-flip::recheck-scheduled": "1",
     });
     const env = envWithAutoTagQueue(kv, ["ippoan/rust-alc-api"], send);
-    const out = await runContinuousAutoFlipRecheck(env, 1);
+    const out = await runContinuousAutoFlipRecheck(env);
     expect(out.action).toBe("blocked");
-    expect(send).toHaveBeenCalledOnce();
-    expect(send.mock.calls[0][0]).toEqual({
-      kind: "continuous-auto-flip-recheck",
-      attempt: 2,
-    });
-  });
-
-  it("flip できたら chain を止める", async () => {
-    const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
-    vi.stubGlobal("fetch", fetchSpy);
-    const send = vi.fn().mockResolvedValue(undefined);
-    const kv = memKv({
-      "pending-release::ippoan/rust-alc-api": pending("ippoan/rust-alc-api", "v0.0.144"),
-      "auto-tag-flip::recheck-scheduled": "1",
-    });
-    const env = envWithAutoTagQueue(kv, ["ippoan/rust-alc-api"], send);
-    const out = await runContinuousAutoFlipRecheck(env, 1);
-    expect(out).toEqual({ action: "flipped", repos: ["ippoan/rust-alc-api"] });
     expect(send).not.toHaveBeenCalled();
+    expect(await kv.get("auto-tag-flip::recheck-scheduled")).toBeNull();
   });
 
-  it("上限に達した attempt では再予約しない", async () => {
+  it("gate が通れば flip する", async () => {
     const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetchSpy);
     const send = vi.fn().mockResolvedValue(undefined);
     const kv = memKv({
-      ...redCompat(),
       "pending-release::ippoan/rust-alc-api": pending("ippoan/rust-alc-api", "v0.0.144"),
+      "auto-tag-flip::recheck-scheduled": "1",
     });
     const env = envWithAutoTagQueue(kv, ["ippoan/rust-alc-api"], send);
-    const out = await runContinuousAutoFlipRecheck(
-      env,
-      CONTINUOUS_AUTO_FLIP_RECHECK_MAX_ATTEMPTS,
-    );
-    expect(out.action).toBe("blocked");
+    const out = await runContinuousAutoFlipRecheck(env);
+    expect(out).toEqual({ action: "flipped", repos: ["ippoan/rust-alc-api"] });
     expect(send).not.toHaveBeenCalled();
   });
 });
