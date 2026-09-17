@@ -29,6 +29,7 @@ import { parseTaglessRepos } from "../tagless-repos";
 import { sortSemverDesc } from "../release-helpers";
 import { computeGlobalCompatibility } from "./compat";
 import { isTaglessRepo } from "../release-model";
+import { noteGitHubAuthBroken } from "../github-backoff";
 
 export interface RepoReleaseStatus {
   repo: string;
@@ -122,7 +123,11 @@ async function computeOne(
   let token: string;
   try {
     token = await tokenForOrg(env, owner);
-  } catch {
+  } catch (err) {
+    // auth-worker delegation の refresh_token 失効 (invalid_grant 等、Refs #334)
+    // なら全 repo 一律で 未tag/取得失敗 になる。marker を立てて /release-wave にも
+    // 「再ログインが必要」を出せるようにする (isAuthError でないエラーは no-op)。
+    if (env.CI_STATUS) await noteGitHubAuthBroken(env.CI_STATUS, err);
     return { repo: full, latestTag: null, hasTag: false, behind: -1, tagless };
   }
 
@@ -154,7 +159,8 @@ async function computeOne(
       behind = 0; // compare 失敗時は behind 不明 → 0 扱い (release は促さない)
     }
     return { repo: full, latestTag, hasTag: true, behind, tagless };
-  } catch {
+  } catch (err) {
+    if (env.CI_STATUS) await noteGitHubAuthBroken(env.CI_STATUS, err);
     return { repo: full, latestTag: null, hasTag: false, behind: -1, tagless };
   }
 }

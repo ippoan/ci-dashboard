@@ -44,6 +44,7 @@ import {
   type AutoFlipArmView,
 } from "./auto-flip";
 import { readAutoTagRepos } from "../auto-tag";
+import { getGitHubAuthBroken, type AuthBrokenMarker } from "../github-backoff";
 
 function escapeHtml(s: string): string {
   return s
@@ -161,6 +162,7 @@ export function renderRepoReleaseStatusSection(
   statuses: RepoReleaseStatus[],
   armView?: AutoFlipArmView | null,
   autoTagRepos?: ReadonlySet<string>,
+  authBroken?: AuthBrokenMarker | null,
 ): string {
   // tagless repo はリリース対象ではないので一覧から除外する。
   const visible = statuses.filter((s) => !s.tagless);
@@ -247,6 +249,18 @@ export function renderRepoReleaseStatusSection(
   const releasableRepos = visible.filter(needsRelease).map((s) => s.repo);
   const autoFlipControls = renderAutoFlipControls(releasableRepos, armView);
 
+  // GitHub 認証失効 (Refs #334) の marker。/issues・/releases は background
+  // refresh の catch で立てて banner を出すが、この section (repo-release-status.ts
+  // の computeOne) は別経路で token を取っており配線されていなかった — 失効時に
+  // 全 repo が一律「未tag / 取得失敗」になり、データが消えたように見えていた。
+  const authBrokenNote = authBroken
+    ? `<div class="unsafe" style="margin-bottom:8px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <span>🔑 GitHub 認証が失効しています (それまでこの表は全 repo が未tag/取得失敗のまま)</span>
+        <a class="refresh-btn" href="/oauth/login?return_to=/release-wave"
+           title="auth-worker で再ログインし、GitHub token を更新する">🔑 再ログイン</a>
+      </div>`
+    : "";
+
   return `
     <div class="section">
       <h2>Repo リリース状況${helpMark(
@@ -260,6 +274,7 @@ export function renderRepoReleaseStatusSection(
         release 完了ごとに compat gate 通過を条件に自動 flip する継続設定
         (Refs #494)。`,
       )}</h2>
+      ${authBrokenNote}
       <div style="margin:8px 0">${summary}</div>
       ${autoFlipControls}
       ${tableOrEmpty}
@@ -906,6 +921,14 @@ export async function handleReleaseWaveListPageWithRepoStatus(
     return res;
   }
 
+  // GitHub 認証失効 marker (Refs #334)。読めなくても banner を出さないだけ (fail-soft)。
+  let authBroken: AuthBrokenMarker | null = null;
+  try {
+    authBroken = await getGitHubAuthBroken(env.CI_STATUS);
+  } catch {
+    authBroken = null;
+  }
+
   // flip-guard self-test ボタン用に、実在の未 tag version を 1 つ探す。
   // 対象は **Traffic (version split) 表に出る promote 候補 (= active より新しい
   // 0% version)** に限る (promotableZeroVersions で表と同一フィルタ)。これにより
@@ -988,7 +1011,12 @@ export async function handleReleaseWaveListPageWithRepoStatus(
     }
   }
 
-  const section = renderRepoReleaseStatusSection(statuses, armView, autoTagRepos);
+  const section = renderRepoReleaseStatusSection(
+    statuses,
+    armView,
+    autoTagRepos,
+    authBroken,
+  );
   let html = await res.text();
   html = injectRepoStatusSection(html, section);
 
