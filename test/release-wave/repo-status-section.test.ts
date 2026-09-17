@@ -1146,4 +1146,32 @@ describe("handleReleaseWaveListPageWithRepoStatus", () => {
       html.indexOf("Staged previews (active waves)"),
     );
   });
+
+  // GitHub 認証失効 note (Refs #334)。auth-worker delegation の refresh_token が
+  // 失効すると computeOne が全 repo で token 取得に失敗し、この表が一律
+  // 未tag/取得失敗になって「データが消えた」ように見えていた (この section だけ
+  // /issues・/releases の banner 配線から漏れていた)。marker があれば同じ banner
+  // を出す。
+  it("shows the auth-broken note when github:auth-broken marker is set", async () => {
+    const kv = memKv({
+      "github:auth-broken": { at: Date.now(), message: "invalid_grant" },
+    });
+    const env = { ...baseEnv(), CI_STATUS: kv } as unknown as Env;
+    const res = await handleReleaseWaveListPageWithRepoStatus(env);
+    const html = await res.text();
+    expect(html).toContain("GitHub 認証が失効しています");
+    expect(html).toContain("/oauth/login?return_to=/release-wave");
+    // ワンクリックで再ログインできる button (テキストリンクではなく .refresh-btn)。
+    expect(html).toContain("🔑 再ログイン");
+    expect(html).toMatch(
+      /<a class="refresh-btn" href="\/oauth\/login\?return_to=\/release-wave"/,
+    );
+  });
+
+  it("does not show the auth-broken note when no marker is set", async () => {
+    const env = { ...baseEnv(), CI_STATUS: memKv() } as unknown as Env;
+    const res = await handleReleaseWaveListPageWithRepoStatus(env);
+    const html = await res.text();
+    expect(html).not.toContain("GitHub 認証が失効しています");
+  });
 });
