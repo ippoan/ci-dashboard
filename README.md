@@ -53,7 +53,7 @@ src/
 | `merge_pull_request` | pulls | write | Merge a pull request using squash merge. |
 | `list_tags` | releases | read | List tags for a repository. |
 | `get_latest_release` | releases | read | Get the latest release for a repository. |
-| `create_tag_release` | releases | write | Dispatch `tag-release.yml` workflow. |
+| `create_tag_release` | releases | write | Dispatch `tag-release.yml` workflow. Optional `target` is passed as the workflow input (e.g. `worker-vein` on rust-alc-api); omitted = the workflow's default. |
 | `list_org_projects` | projects | read | List Projects v2 across one or more orgs (number/title/url/closed). |
 | `get_project` | projects | read | Get a Project's metadata + field definitions (incl. single-select options / iterations). |
 | `list_project_items` | projects | read | List items (issues/PRs/draft) attached to a Project with their field values. |
