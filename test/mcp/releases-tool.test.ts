@@ -8,29 +8,18 @@
  *  - `target` 指定時だけ `inputs` と `return_run_details` が付く
  *  - schema に無い引数 (`inputs` / `bump` 等) は body に漏れない
  *
- * scope gate は実物の `createScopedRegisterTool` を通す。`fetch` は全て spy で
- * 差し替え、実物の GitHub へは出さない。
+ * scope gate (`createScopedRegisterTool`) と org の allowlist (`tokenForOrg` →
+ * `validateOrg`) は実物を通す。token は setup が KV に seed した fake を
+ * `appTestEnv()` 経由で読むので introspect への往復は起きない。`fetch` は全て
+ * spy で差し替え、実物の GitHub へは出さない。
  */
 
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { AuthClientWorkerEnv } from "@ippoan/auth-client-worker";
 import { GitHubApiError } from "../../src/github-api";
 import { registerReleasesTools } from "../../src/mcp/tools/releases";
-
-// token の取得 (auth-worker への往復) だけ差し替える。org の allowlist
-// (`validateOrg`) は実物を通す。
-vi.mock("../../src/github-api", async (orig) => {
-  const actual = await orig<typeof import("../../src/github-api")>();
-  return {
-    ...actual,
-    tokenForOrg: vi.fn(async (_env: unknown, owner: string) => {
-      actual.validateOrg(owner);
-      return "test-token";
-    }),
-  };
-});
+import { appTestEnv } from "../_helpers/app-env";
 
 const ALL_SCOPES: ReadonlySet<string> = new Set([
   "mcp.read",
@@ -71,7 +60,7 @@ function setup(scopes: ReadonlySet<string> = ALL_SCOPES): RegisteredTool {
   };
   registerReleasesTools(
     server as unknown as McpServer,
-    {} as AuthClientWorkerEnv,
+    appTestEnv(),
     scopes,
   );
   return tools.get("create_tag_release")!;
