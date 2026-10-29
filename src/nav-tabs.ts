@@ -14,8 +14,7 @@ export type TabKey =
   | "release-wave"
   | "secret-gen"
   | "cap-catalog"
-  | "ci-matrix"
-  | "dep-graph";
+  | "ci-matrix";
 
 interface TabDef {
   key: TabKey | "branch-protection" | "gcp-secrets" | "security-inventory" | "repo-maps";
@@ -43,9 +42,6 @@ const TABS: ReadonlyArray<TabDef> = [
   { key: "secret-gen", href: "/secret-gen", label: "🔐 Secret Generator" },
   { key: "cap-catalog", href: "/cap-catalog", label: "🗂️ Cap Catalog" },
   { key: "ci-matrix",  href: "/ci-matrix",   label: "🧩 CI Matrix" },
-  // rust-alc-api (21 crate) の Bazel 依存グラフ。Refs #443。対象 repo が
-  // 増えたら page 側 ALLOWED_REPOS と合わせて拡張する。
-  { key: "dep-graph",  href: "/dep-graph/ippoan/rust-alc-api", label: "📈 Dep Graph" },
   {
     key: "branch-protection",
     href: "https://auth-staging.ippoan.org/dashboard/branch-protection",
