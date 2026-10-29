@@ -22,7 +22,6 @@ const LAUNCH_BASE = "https://claude.ai/code";
 const ALL_REPOS = [
   "ippoan/release-wave-gcp",
   "ippoan/nuxt-notify",
-  "ippoan/rust-alc-api",
   "ippoan/claude-md",
   "ippoan/auth-worker",
   "ippoan/ci-dashboard",
