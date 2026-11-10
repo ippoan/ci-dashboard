@@ -23,7 +23,9 @@ import type { WaveState } from "./types";
 import {
   recordFrontendTest,
   recordBackendDeploy,
+  recordBackendStagingDeploy,
   getBackendCurrent,
+  getBackendStaging,
   computeCompatibility,
 } from "./compat";
 import { recordPendingRelease } from "./pending-release";
@@ -254,14 +256,17 @@ export async function handleFlipReportWebhook(
  *     }
  *   }
  */
+const testedEntrySchema = z.object({
+  backend_repo: z.string().min(1),
+  backend_image: z.string().min(1),
+  ci_run_url: z.string().url().optional(),
+});
+
 const frontendTestReportSchema = z.object({
   repo: z.string().min(1),
   prod_version: z.string().min(1),
-  tested: z.object({
-    backend_repo: z.string().min(1),
-    backend_image: z.string().min(1),
-    ci_run_url: z.string().url().optional(),
-  }),
+  // 1 件のオブジェクト、または 1 件以上の配列 (複数 backend をまとめて報告する)。
+  tested: z.union([testedEntrySchema, z.array(testedEntrySchema).min(1)]),
 });
 
 export async function handleFrontendTestReportWebhook(
@@ -273,11 +278,7 @@ export async function handleFrontendTestReportWebhook(
   const record = await recordFrontendTest(env.COMPAT_KV, {
     repo: v.data.repo,
     prod_version: v.data.prod_version,
-    tested: {
-      backend_repo: v.data.tested.backend_repo,
-      backend_image: v.data.tested.backend_image,
-      ci_run_url: v.data.tested.ci_run_url,
-    },
+    tested: v.data.tested,
     now: new Date().toISOString(),
   });
   // compat が変わった = backend の release 直後に dispatch した retest が緑になり
@@ -319,6 +320,8 @@ const backendDeployReportSchema = z.object({
   current_tag: z.string().min(1).nullish(),
   deployed_by: z.string().min(1),
   wave_id: z.string().min(1).nullable().optional(),
+  // 省略 = production。staging は `backend-staging::<repo>` に記録するだけ。
+  environment: z.enum(["production", "staging"]).optional(),
 });
 
 export async function handleBackendDeployReportWebhook(
@@ -327,6 +330,17 @@ export async function handleBackendDeployReportWebhook(
 ): Promise<Response> {
   const v = await validateAndAuth(request, env, backendDeployReportSchema);
   if (!v.ok) return v.response;
+  if (v.data.environment === "staging") {
+    // staging: `backend::` (production) には触れず、retest dispatch / auto-flip /
+    // broadcast などの production 向け副作用も起こさない。
+    const stagingRecord = await recordBackendStagingDeploy(env.COMPAT_KV, {
+      repo: v.data.repo,
+      current_image: v.data.current_image,
+      deployed_by: v.data.deployed_by,
+      now: new Date().toISOString(),
+    });
+    return jsonResponse(200, { ok: true, record: stagingRecord });
+  }
   const record = await recordBackendDeploy(env.COMPAT_KV, {
     repo: v.data.repo,
     current_image: v.data.current_image,
@@ -534,11 +548,14 @@ export async function handleBackendCurrentImageWebhook(
     });
   }
 
-  const record = await getBackendCurrent(env.COMPAT_KV, repo);
+  const staging = url.searchParams.get("environment") === "staging";
+  const record = staging
+    ? await getBackendStaging(env.COMPAT_KV, repo)
+    : await getBackendCurrent(env.COMPAT_KV, repo);
   if (!record) {
     return jsonResponse(404, {
       code: "NOT_FOUND",
-      error: `no backend deploy record for ${repo}`,
+      error: `no backend ${staging ? "staging " : ""}deploy record for ${repo}`,
     });
   }
   return jsonResponse(200, {

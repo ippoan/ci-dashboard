@@ -54,6 +54,7 @@ ci-dashboard worker → COMPAT_KV.put(...)
 |---|---|---|
 | `frontend::<owner>/<name>` | `frontend::ippoan/auth-worker` | frontend CI green path |
 | `backend::<owner>/<name>`  | `backend::ippoan/rust-alc-api` | backend deploy 完了時 |
+| `backend-staging::<owner>/<name>` | `backend-staging::ippoan/alc-vein-worker` | backend (CF Worker) の staging deploy 完了時 (Refs #520) |
 
 `<owner>/<name>` は GitHub `owner/name` 表記をそのまま使う (= `github.repository`
 context value)。lower-case / hyphen は GitHub 側の正規化に従う。
@@ -224,6 +225,11 @@ frontend CI が integration test green 時に打つ。
 
 - ci-dashboard 側で `frontend::<repo>` を read-modify-write、`tested_against` に
   append + window trim、`prod_version` / `prod_deployed_at` を update
+- `tested` は上のオブジェクト 1 件、または **1 件以上の配列** で送れる (Refs #520)。
+  配列は 1 回の KV read → 全 entry を反映 → 1 回の put で書く (KV は書いた直後に
+  読むと古い値を返すため、entry ごとに呼ぶと先の entry が消える)。同
+  (backend_repo, backend_image) の旧 entry 除去・90 日 window・50 件 trim は全 entry に
+  同じ規則で適用。同一配列内の重複は先勝ちで 1 件に畳む
 - 同時 write の race は当面 last-write-wins で許容 (90 日 window のうち数件被るのは
   運用上問題なし)
 
@@ -246,6 +252,11 @@ release-wave-gcp / 各 backend deploy workflow が deploy 成功時に打つ。
   deploy workflow が `github.ref_name` を載せる。`current_image` が変わった時だけ
   `deploy_history` に積まれる
 - `wave_id` は wave 経由でなければ omit (server 側で `null` 格納)
+- `environment` (`"production"` | `"staging"`、省略 = production、Refs #520):
+  `"staging"` のときは `backend-staging::<repo>`
+  (`{schema_version, repo, current_image, deployed_at, deployed_by}`、TTL なし) を
+  upsert して 200 を返すだけ。`backend::` は触らず、retest dispatch / auto-flip /
+  broadcast など production 経路の副作用も起こさない
 
 ### `GET /backend-current-image?repo=ippoan/rust-alc-api`
 
@@ -257,6 +268,9 @@ frontend CI の `report-frontend-compat` action が staging 現 image を取り�
 ```
 
 - `backend::<repo>` を read してそのまま返す
+- query `environment=staging` のときは `backend-staging::<repo>` を同じ応答形
+  (`repo, current_image, deployed_at`) で返す。無ければ 404。それ以外の値・省略は
+  従来どおり production (Refs #520)
 - 404 時は frontend CI 側で「report skip」扱い (= test green でも KV write しない、
   Phase A の "影響無し" 原則に従う)
 
@@ -274,6 +288,7 @@ frontend CI の `report-frontend-compat` action が staging 現 image を取り�
 |---|---|---|
 | `frontend::<repo>` | 90 日 (KV expirationTtl) | frontend が 90 日 deploy も test も走っていなければ `tested_against` は古い → 自然減衰 |
 | `backend::<repo>`  | なし (upsert)            | 最新のみで運用、deploy 都度上書き |
+| `backend-staging::<repo>` | なし (upsert)     | staging の最新のみ、deploy 都度上書き |
 | `pm::<repo>::<base_tag>` | 120 秒 (CI_STATUS) | pending migrations 算出の compare cache。head (default branch) が動くので短命。Refs #173 |
 
 `frontend::<repo>` は write の度に TTL がリセットされる (= putable で

@@ -39,6 +39,7 @@ export const FRONTEND_TTL_SECONDS = WINDOW_DAYS * 24 * 60 * 60;
 
 const FRONTEND_PREFIX = "frontend::";
 const BACKEND_PREFIX = "backend::";
+const BACKEND_STAGING_PREFIX = "backend-staging::";
 
 function frontendKey(repo: string): string {
   return `${FRONTEND_PREFIX}${repo}`;
@@ -46,6 +47,10 @@ function frontendKey(repo: string): string {
 
 function backendKey(repo: string): string {
   return `${BACKEND_PREFIX}${repo}`;
+}
+
+function backendStagingKey(repo: string): string {
+  return `${BACKEND_STAGING_PREFIX}${repo}`;
 }
 
 // ----------------------------------------------------------------------------
@@ -107,14 +112,17 @@ export interface BackendCompatRecord {
 // Write: frontend test report
 // ----------------------------------------------------------------------------
 
+export interface RecordFrontendTestEntryInput {
+  backend_repo: string;
+  backend_image: string;
+  ci_run_url?: string;
+}
+
 export interface RecordFrontendTestInput {
   repo: string;
   prod_version: string;
-  tested: {
-    backend_repo: string;
-    backend_image: string;
-    ci_run_url?: string;
-  };
+  /** 1 件、または 1 件以上の配列 (配列は 1 回の read → 全反映 → 1 回の put で書く)。 */
+  tested: RecordFrontendTestEntryInput | RecordFrontendTestEntryInput[];
   /** caller が渡す UTC ISO timestamp (テスト容易性のため内部で Date を呼ばない)。 */
   now: string;
 }
@@ -140,22 +148,31 @@ export async function recordFrontendTest(
       ? existing.tested_against
       : [];
 
-  const newEntry: TestedAgainstEntry = {
-    backend_repo: input.tested.backend_repo,
-    backend_image: input.tested.backend_image,
+  // 全 entry を 1 回の read の結果に反映して 1 回だけ put する (KV は書いた直後に
+  // 読むと古い値を返すため、entry ごとに record を呼ぶと先の entry が消える)。
+  const inputs = Array.isArray(input.tested) ? input.tested : [input.tested];
+  const newEntries: TestedAgainstEntry[] = inputs.map((t) => ({
+    backend_repo: t.backend_repo,
+    backend_image: t.backend_image,
     tested_at: input.now,
-    ...(input.tested.ci_run_url ? { ci_run_url: input.tested.ci_run_url } : {}),
-  };
+    ...(t.ci_run_url ? { ci_run_url: t.ci_run_url } : {}),
+  }));
 
   const deduped = prior.filter(
     (e) =>
-      !(
-        e.backend_repo === newEntry.backend_repo &&
-        e.backend_image === newEntry.backend_image
+      !newEntries.some(
+        (n) => e.backend_repo === n.backend_repo && e.backend_image === n.backend_image,
       ),
   );
 
-  const merged = [newEntry, ...deduped];
+  // 同一入力内の重複 (同 backend_repo + backend_image) は先勝ちで 1 件に畳む。
+  const uniqueNew = newEntries.filter(
+    (n, i) =>
+      newEntries.findIndex(
+        (m) => m.backend_repo === n.backend_repo && m.backend_image === n.backend_image,
+      ) === i,
+  );
+  const merged = [...uniqueNew, ...deduped];
   const trimmed = trimTestedAgainst(merged, input.now);
 
   const record: FrontendCompatRecord = {
@@ -270,6 +287,56 @@ export async function getBackendCurrent(
   if (!v || v.schema_version < SCHEMA_VERSION || v.schema_version > BACKEND_SCHEMA_VERSION) {
     return null;
   }
+  return v;
+}
+
+// ----------------------------------------------------------------------------
+// Backend staging (`backend-staging::<repo>`)
+// ----------------------------------------------------------------------------
+
+/**
+ * `backend-staging::<repo>`: staging 環境の backend (CF Worker の git SHA 等) の
+ * 現在値。`backend::` (production) とは独立で、compat 突合の入力にはしない。
+ * frontend CI が「staging の worker 相手にテストした SHA」を解決するための値。
+ */
+export interface BackendStagingRecord {
+  schema_version: number;
+  repo: string;
+  current_image: string;
+  deployed_at: string;
+  deployed_by: string;
+}
+
+export interface RecordBackendStagingDeployInput {
+  repo: string;
+  current_image: string;
+  deployed_by: string;
+  now: string;
+}
+
+/** staging deploy 報告の upsert (最新のみ、TTL なし)。`backend::` は触らない。 */
+export async function recordBackendStagingDeploy(
+  kv: KVNamespace,
+  input: RecordBackendStagingDeployInput,
+): Promise<BackendStagingRecord> {
+  const record: BackendStagingRecord = {
+    schema_version: SCHEMA_VERSION,
+    repo: input.repo,
+    current_image: input.current_image,
+    deployed_at: input.now,
+    deployed_by: input.deployed_by,
+  };
+  await kv.put(backendStagingKey(input.repo), JSON.stringify(record));
+  return record;
+}
+
+/** `backend-staging::<repo>` を読む。無ければ null。 */
+export async function getBackendStaging(
+  kv: KVNamespace,
+  repo: string,
+): Promise<BackendStagingRecord | null> {
+  const v = await kv.get<BackendStagingRecord>(backendStagingKey(repo), "json");
+  if (!v || v.schema_version !== SCHEMA_VERSION) return null;
   return v;
 }
 
