@@ -7,6 +7,7 @@ import {
   handleBackendTrafficReportWebhook,
   handleBackendDeployReportWebhook,
   handleFrontendTestReportWebhook,
+  handleBackendCurrentImageWebhook,
 } from "../../src/release-wave/webhook";
 import { recordFrontendTest } from "../../src/release-wave/compat";
 import { getPendingRelease } from "../../src/release-wave/pending-release";
@@ -1333,5 +1334,235 @@ describe("KV report webhooks broadcast for live update (Refs #479)", () => {
       env,
     );
     expect(resp.status).toBe(200);
+  });
+});
+
+// ============================================================================
+// compat の受け口 3 本の staging 対応 (Refs #520)
+// ============================================================================
+
+describe("compat webhooks staging 対応 (Refs #520)", () => {
+  const BASE = "https://ci-dashboard.ippoan.org/webhooks/release-wave";
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("backend-deploy-report: staging は backend-staging:: だけ書き backend:: は触らない", async () => {
+    const kv = memKv();
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const { env, spies } = fakeEnv({ compatKv: kv });
+    const resp = await handleBackendDeployReportWebhook(
+      jsonRequest({
+        url: `${BASE}/backend-deploy-report`,
+        secret: "expected-secret",
+        body: {
+          repo: "ippoan/alc-vein-worker",
+          current_image: "abc1234",
+          deployed_by: "ci",
+          environment: "staging",
+        },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(200);
+    const staging = (await kv.get("backend-staging::ippoan/alc-vein-worker", "json")) as {
+      current_image: string;
+      deployed_by: string;
+    };
+    expect(staging.current_image).toBe("abc1234");
+    expect(staging.deployed_by).toBe("ci");
+    expect(await kv.get("backend::ippoan/alc-vein-worker", "json")).toBeNull();
+    // production 向け副作用 (dispatch / broadcast) は起こさない。
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(spies.broadcast).not.toHaveBeenCalled();
+  });
+
+  it("backend-deploy-report: environment 省略は従来どおり backend:: に書く", async () => {
+    const kv = memKv();
+    const { env } = fakeEnv({ compatKv: kv });
+    const resp = await handleBackendDeployReportWebhook(
+      jsonRequest({
+        url: `${BASE}/backend-deploy-report`,
+        secret: "expected-secret",
+        body: {
+          repo: "ippoan/alc-vein-worker",
+          current_image: "prod111",
+          deployed_by: "ci",
+        },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(200);
+    expect(await kv.get("backend::ippoan/alc-vein-worker", "json")).toMatchObject({
+      current_image: "prod111",
+    });
+    expect(await kv.get("backend-staging::ippoan/alc-vein-worker", "json")).toBeNull();
+  });
+
+  it("frontend-test-report: 配列 2 件 (別 backend_repo) が両方 tested_against に残る", async () => {
+    const kv = memKv();
+    const { env } = fakeEnv({ compatKv: kv });
+    const resp = await handleFrontendTestReportWebhook(
+      jsonRequest({
+        url: `${BASE}/frontend-test-report`,
+        secret: "expected-secret",
+        body: {
+          repo: "ippoan/alc-app",
+          prod_version: "v1",
+          tested: [
+            { backend_repo: "ippoan/alc-a-worker", backend_image: "aaa" },
+            { backend_repo: "ippoan/alc-b-worker", backend_image: "bbb" },
+          ],
+        },
+      }),
+      env,
+    );
+    expect(resp.status).toBe(200);
+    const rec = (await kv.get("frontend::ippoan/alc-app", "json")) as {
+      tested_against: { backend_repo: string; backend_image: string }[];
+    };
+    expect(
+      rec.tested_against.map((e) => `${e.backend_repo}@${e.backend_image}`).sort(),
+    ).toEqual(["ippoan/alc-a-worker@aaa", "ippoan/alc-b-worker@bbb"]);
+  });
+
+  it("frontend-test-report: 空配列は 400、オブジェクト 1 件は従来どおり", async () => {
+    const kv = memKv();
+    const { env } = fakeEnv({ compatKv: kv });
+    const bad = await handleFrontendTestReportWebhook(
+      jsonRequest({
+        url: `${BASE}/frontend-test-report`,
+        secret: "expected-secret",
+        body: { repo: "ippoan/alc-app", prod_version: "v1", tested: [] },
+      }),
+      env,
+    );
+    expect(bad.status).toBe(400);
+    const ok = await handleFrontendTestReportWebhook(
+      jsonRequest({
+        url: `${BASE}/frontend-test-report`,
+        secret: "expected-secret",
+        body: {
+          repo: "ippoan/alc-app",
+          prod_version: "v1",
+          tested: { backend_repo: "ippoan/alc-a-worker", backend_image: "aaa" },
+        },
+      }),
+      env,
+    );
+    expect(ok.status).toBe(200);
+    const rec = (await kv.get("frontend::ippoan/alc-app", "json")) as {
+      tested_against: unknown[];
+    };
+    expect(rec.tested_against).toHaveLength(1);
+  });
+
+  it("recordFrontendTest: 配列内の同一 (repo, image) は 1 件に畳み、旧 entry も除去する", async () => {
+    const kv = memKv();
+    await recordFrontendTest(kv, {
+      repo: "ippoan/alc-app",
+      prod_version: "v1",
+      tested: { backend_repo: "ippoan/alc-a-worker", backend_image: "aaa" },
+      now: "2026-06-01T00:00:00Z",
+    });
+    const rec = await recordFrontendTest(kv, {
+      repo: "ippoan/alc-app",
+      prod_version: "v1",
+      tested: [
+        { backend_repo: "ippoan/alc-a-worker", backend_image: "aaa" },
+        { backend_repo: "ippoan/alc-a-worker", backend_image: "aaa" },
+        { backend_repo: "ippoan/alc-b-worker", backend_image: "bbb" },
+      ],
+      now: "2026-06-02T00:00:00Z",
+    });
+    expect(rec.tested_against).toHaveLength(2);
+    expect(rec.tested_against.every((e) => e.tested_at === "2026-06-02T00:00:00Z")).toBe(true);
+  });
+
+  it("backend-current-image: environment=staging は staging の値、record 無しは 404", async () => {
+    const kv = memKv({
+      "backend::ippoan/alc-vein-worker": {
+        schema_version: 2,
+        repo: "ippoan/alc-vein-worker",
+        current_image: "prod111",
+        deployed_at: "2026-06-01T00:00:00Z",
+      },
+      "backend-staging::ippoan/alc-vein-worker": {
+        schema_version: 1,
+        repo: "ippoan/alc-vein-worker",
+        current_image: "stg222",
+        deployed_at: "2026-06-02T00:00:00Z",
+        deployed_by: "ci",
+      },
+    });
+    const { env } = fakeEnv({ compatKv: kv });
+    const q = (repo: string, extra = "") =>
+      jsonRequest({
+        method: "GET",
+        url: `${BASE}/backend-current-image?repo=${repo}${extra}`,
+        secret: "expected-secret",
+      });
+    const stg = await handleBackendCurrentImageWebhook(
+      q("ippoan/alc-vein-worker", "&environment=staging"),
+      env,
+    );
+    expect(stg.status).toBe(200);
+    expect(await stg.json()).toEqual({
+      repo: "ippoan/alc-vein-worker",
+      current_image: "stg222",
+      deployed_at: "2026-06-02T00:00:00Z",
+    });
+    const prod = await handleBackendCurrentImageWebhook(q("ippoan/alc-vein-worker"), env);
+    expect(((await prod.json()) as { current_image: string }).current_image).toBe("prod111");
+    const missing = await handleBackendCurrentImageWebhook(
+      q("ippoan/alc-other-worker", "&environment=staging"),
+      env,
+    );
+    expect(missing.status).toBe(404);
+  });
+
+  it("3 口とも secret 不一致で 401", async () => {
+    const { env } = fakeEnv({ compatKv: memKv() });
+    const post = (path: string, body: unknown) =>
+      jsonRequest({ url: `${BASE}/${path}`, secret: "wrong", body });
+    expect(
+      (
+        await handleBackendDeployReportWebhook(
+          post("backend-deploy-report", {
+            repo: "r",
+            current_image: "i",
+            deployed_by: "ci",
+            environment: "staging",
+          }),
+          env,
+        )
+      ).status,
+    ).toBe(401);
+    expect(
+      (
+        await handleFrontendTestReportWebhook(
+          post("frontend-test-report", {
+            repo: "r",
+            prod_version: "v",
+            tested: [{ backend_repo: "b", backend_image: "i" }],
+          }),
+          env,
+        )
+      ).status,
+    ).toBe(401);
+    expect(
+      (
+        await handleBackendCurrentImageWebhook(
+          jsonRequest({
+            method: "GET",
+            url: `${BASE}/backend-current-image?repo=r&environment=staging`,
+            secret: "wrong",
+          }),
+          env,
+        )
+      ).status,
+    ).toBe(401);
   });
 });
