@@ -101,6 +101,84 @@ export const SHAPE_REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
 // DO storage key: 最後に shape refresh を完了した unix ms。
 const SHAPE_REFRESH_KEY = "shape_refresh_last_at";
 
+// KV の bulk get は 1 回 100 key まで (1 回で 1 operation と数える)。
+export const RUN_CACHE_BULK_GET_SIZE = 100;
+const RUN_KEY_PREFIX = "run:";
+
+export interface RunCacheLoadResult {
+  runs: CIStatus[];
+  /** list で見えた key 数 */
+  listed: number;
+  /** get して JSON として読めた件数 */
+  loaded: number;
+  /** list には居たが get で null (TTL 切れ・削除の直後) */
+  missing: number;
+  /** JSON.parse できなかった件数 */
+  corrupt: number;
+  /** bulk get が throw した key 数 (次の要求で読み直す) */
+  failed: number;
+  /** list の page 数 */
+  pages: number;
+}
+
+/** KV の `run:*` を全件読む。Hub DO が hibernation で追い出されたあとの
+ *  ensureCache() から呼ぶ (Refs #523)。
+ *  - list は cursor を `list_complete` まで辿る (1 page 1000 件で切れない)
+ *  - get は bulk get (100 key で 1 op) にして、327 本の単発 get を
+ *    Promise.all で同時に投げない (同時接続 6 の待ち行列 / 1 invocation の op 上限)
+ *  - chunk 単位の失敗は握って `failed` に数える (呼び手が cacheLoaded を立てない) */
+export async function loadRunCache(kv: KVNamespace): Promise<RunCacheLoadResult> {
+  const keys: string[] = [];
+  let cursor: string | undefined;
+  let pages = 0;
+  do {
+    const page = await kv.list({ prefix: RUN_KEY_PREFIX, cursor });
+    pages++;
+    for (const k of page.keys) keys.push(k.name);
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor);
+
+  const result: RunCacheLoadResult = {
+    runs: [],
+    listed: keys.length,
+    loaded: 0,
+    missing: 0,
+    corrupt: 0,
+    failed: 0,
+    pages,
+  };
+  for (let i = 0; i < keys.length; i += RUN_CACHE_BULK_GET_SIZE) {
+    const chunk = keys.slice(i, i + RUN_CACHE_BULK_GET_SIZE);
+    let values: Map<string, string | null>;
+    try {
+      values = await kv.get(chunk, "text");
+    } catch (err) {
+      result.failed += chunk.length;
+      console.warn(JSON.stringify({
+        msg: "hub-run-cache-chunk-failed",
+        offset: i,
+        size: chunk.length,
+        err: err instanceof Error ? err.message : String(err),
+      }));
+      continue;
+    }
+    for (const key of chunk) {
+      const v = values.get(key);
+      if (v === null || v === undefined) {
+        result.missing++;
+        continue;
+      }
+      try {
+        result.runs.push(JSON.parse(v) as CIStatus);
+        result.loaded++;
+      } catch {
+        result.corrupt++;
+      }
+    }
+  }
+  return result;
+}
+
 /** in-memory cache から stale な in_progress run を抽出する pure helper。
  *  - `status === "completed"` は除外
  *  - `updated_at` が parse 不能 (NaN) は除外
@@ -134,6 +212,8 @@ export class CIDashboardHub extends DurableObject<Env> {
   // In-memory cache: run_id → CIStatus
   private cache = new Map<number, CIStatus>();
   private cacheLoaded = false;
+  // 読み込み中の ensureCache() を束ねる Promise (Refs #523)
+  private cacheLoading: Promise<void> | null = null;
 
   // In-memory cache: KV key → ReleaseAlert. Keys take one of two shapes:
   //   release-alert:<owner>/<name>            — traditional tag-driven alert
@@ -462,17 +542,38 @@ export class CIDashboardHub extends DurableObject<Env> {
 
   private async ensureCache(): Promise<void> {
     if (this.cacheLoaded) return;
-    const list = await this.env.CI_STATUS.list({ prefix: "run:" });
-    const values = await Promise.all(
-      list.keys.map((key) => this.env.CI_STATUS.get(key.name))
-    );
-    for (const v of values) {
-      if (v) {
-        const s = JSON.parse(v) as CIStatus;
-        this.cache.set(s.run_id, s);
-      }
+    // KV の読み込みは input gate を閉じないので、起き抜けに同時に来た要求
+    // (/snapshot と webhook の /update-run 等) が各自で全件読みを始めないよう
+    // 1 本の Promise に束ねる。
+    if (!this.cacheLoading) {
+      this.cacheLoading = this.loadCacheFromKv().finally(() => {
+        this.cacheLoading = null;
+      });
     }
-    this.cacheLoaded = true;
+    await this.cacheLoading;
+  }
+
+  private async loadCacheFromKv(): Promise<void> {
+    const startedAt = Date.now();
+    const r = await loadRunCache(this.env.CI_STATUS);
+    for (const s of r.runs) {
+      // 読み込み中に届いた更新 (in-memory が正) は KV の古い値で上書きしない。
+      if (!this.cache.has(s.run_id)) this.cache.set(s.run_id, s);
+    }
+    // 失敗した chunk があれば読み切ったことにしない (次の要求で読み直す)。
+    if (r.failed === 0) this.cacheLoaded = true;
+    console.log(JSON.stringify({
+      msg: "hub-run-cache-load",
+      listed: r.listed,
+      loaded: r.loaded,
+      missing: r.missing,
+      corrupt: r.corrupt,
+      failed: r.failed,
+      pages: r.pages,
+      cached: this.cache.size,
+      complete: this.cacheLoaded,
+      ms: Date.now() - startedAt,
+    }));
   }
 
   private async ensureAlerts(): Promise<void> {
