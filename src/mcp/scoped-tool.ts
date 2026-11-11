@@ -18,6 +18,8 @@ interface ScopedToolConfig<Args extends ZodRawShape> {
     destructiveHint?: boolean;
     idempotentHint?: boolean;
   };
+  /** tool の `_meta` (MCP Apps の `ui.resourceUri` など)。そのまま registerTool に渡す。 */
+  _meta?: Record<string, unknown>;
   /** この tool を呼ぶのに要る scope。呼び出し元の binding_jwt scope 集合に
    *  含まれていなければ `tools/call` を isError で拒否する。 */
   requiresScope: McpScope;

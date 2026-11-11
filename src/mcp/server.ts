@@ -11,6 +11,7 @@ import { registerIssuesTools } from "./tools/issues";
 import { registerProjectsTools } from "./tools/projects";
 import { registerReleaseWaveTools } from "./tools/release-wave";
 import { parseScopes } from "./scoped-tool";
+import { registerReleaseWaveView } from "./apps/release-wave-view";
 import type { BindingJwtClaims } from "./auth";
 
 function createMcpServer(env: Env, scopes: ReadonlySet<string>): McpServer {
@@ -32,6 +33,8 @@ function createMcpServer(env: Env, scopes: ReadonlySet<string>): McpServer {
   // widen した。既存 tools は AuthClientWorkerEnv の subset を見るだけなので
   // Env (extends) を渡しても互換。
   registerReleaseWaveTools(server, env, scopes);
+  // MCP Apps: release_wave_status / release_wave_pending_state の結果を出すビュー
+  registerReleaseWaveView(server);
 
   return server;
 }
