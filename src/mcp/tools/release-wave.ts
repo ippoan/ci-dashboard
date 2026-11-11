@@ -31,6 +31,7 @@ import {
 import { listPendingReleases } from "../../release-wave/pending-release";
 import { listTrafficForReposPerWorker } from "../../release-wave/traffic";
 import { createScopedRegisterTool } from "../scoped-tool";
+import { RELEASE_WAVE_VIEW_META } from "../apps/release-wave-view";
 
 // ----------------------------------------------------------------------------
 // Hub helper
@@ -91,11 +92,12 @@ export function registerReleaseWaveTools(
     "release_wave_status",
     {
       description:
-        "Get the current state of a wave (state machine status, repo progress, rollback safety flag, audit events) plus a compatibility matrix of already-deployed frontends vs each backend's current image. Refs ippoan/ci-dashboard#157.",
+        "Get the current state of a wave (state machine status, repo progress, rollback safety flag, audit events) plus a compatibility matrix of already-deployed frontends vs each backend's current image. In MCP Apps hosts the result is shown as an interactive view with approve / abort / fail / rollback buttons. Refs ippoan/ci-dashboard#157.",
       inputSchema: {
         wave_id: z.string().min(1),
       },
       annotations: { readOnlyHint: true },
+      _meta: RELEASE_WAVE_VIEW_META,
       requiresScope: "mcp.workflow",
     },
     async ({ wave_id }) => {
@@ -122,6 +124,8 @@ export function registerReleaseWaveTools(
           : { ...result.data, compatibility };
       return {
         content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }],
+        // MCP Apps のビュー (release-wave-view.ts) が読む。text と同じ中身。
+        structuredContent: payload as unknown as Record<string, unknown>,
       };
     },
   );
@@ -320,7 +324,7 @@ export function registerReleaseWaveTools(
     "release_wave_pending_state",
     {
       description:
-        "Read-only diagnostic for /release-wave 'Pending releases'. Returns the unified pending list (repo, worker_name, version_id, tag, source, flippable, rollback_to) exactly as the page derives it, plus the raw pending-release:: records and per-worker traffic:: records (active/zero versions, deploy_history) for the involved repos. Use to diagnose 'I flipped but the dashboard still shows it / shows 未tag'. Optional repo filter (substring match on owner/name).",
+        "Read-only diagnostic for /release-wave 'Pending releases'. Returns the unified pending list (repo, worker_name, version_id, tag, source, flippable, rollback_to) exactly as the page derives it, plus the raw pending-release:: records and per-worker traffic:: records (active/zero versions, deploy_history) for the involved repos. Use to diagnose 'I flipped but the dashboard still shows it / shows 未tag'. Optional repo filter (substring match on owner/name). In MCP Apps hosts the result is shown as an interactive view with per-row Flip and Flip all buttons.",
       inputSchema: {
         repo: z
           .string()
@@ -330,6 +334,7 @@ export function registerReleaseWaveTools(
           ),
       },
       annotations: { readOnlyHint: true },
+      _meta: RELEASE_WAVE_VIEW_META,
       requiresScope: "mcp.workflow",
     },
     async ({ repo }) => {
@@ -395,6 +400,8 @@ export function registerReleaseWaveTools(
         content: [
           { type: "text" as const, text: JSON.stringify(payload, null, 2) },
         ],
+        // MCP Apps のビュー (release-wave-view.ts) が読む。text と同じ中身。
+        structuredContent: payload,
       };
     },
   );
@@ -417,12 +424,19 @@ export function registerReleaseWaveTools(
           .string()
           .min(1)
           .describe("owner/name whose pending release to flip to 100%"),
+        worker_name: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Monorepo unit worker name (UnifiedPending.worker_name). Omit for single-worker repos.",
+          ),
       },
       annotations: { readOnlyHint: false },
       requiresScope: "mcp.workflow",
     },
-    async ({ repo }) => {
-      const result = await pendingFlipCore(env, repo);
+    async ({ repo, worker_name }) => {
+      const result = await pendingFlipCore(env, repo, worker_name ?? null);
       return {
         content: [
           { type: "text" as const, text: JSON.stringify(result, null, 2) },
